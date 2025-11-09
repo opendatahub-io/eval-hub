@@ -1,10 +1,12 @@
 """Custom exceptions for the evaluation service."""
 
+from typing import Any
+
 
 class EvaluationServiceError(Exception):
     """Base exception for evaluation service errors."""
 
-    def __init__(self, message: str, details: dict = None):
+    def __init__(self, message: str, details: dict[str, Any] | None = None):
         super().__init__(message)
         self.message = message
         self.details = details or {}

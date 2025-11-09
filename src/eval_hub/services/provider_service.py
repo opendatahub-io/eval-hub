@@ -170,7 +170,7 @@ class ProviderService:
             }
             benchmarks.append(benchmark_dict)
 
-        provider_ids = list(set(b["provider_id"] for b in benchmarks))
+        provider_ids = list({b["provider_id"] for b in benchmarks})
 
         return ListBenchmarksResponse(
             benchmarks=benchmarks,
@@ -183,7 +183,7 @@ class ProviderService:
         self._load_providers_data()
 
         benchmarks = []
-        for key, benchmark in self._benchmarks_by_id.items():
+        for _key, benchmark in self._benchmarks_by_id.items():
             if benchmark.provider_id == provider_id:
                 benchmarks.append(benchmark)
 

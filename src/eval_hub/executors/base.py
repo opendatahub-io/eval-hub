@@ -7,6 +7,7 @@ from typing import Any
 from uuid import UUID
 
 from ..models.evaluation import BackendSpec, BenchmarkSpec, EvaluationResult
+from ..utils import utcnow
 
 
 class ExecutionContext:
@@ -33,7 +34,7 @@ class ExecutionContext:
         self.benchmark_spec = benchmark_spec
         self.timeout_minutes = timeout_minutes
         self.retry_attempts = retry_attempts
-        self.started_at = started_at or datetime.utcnow()
+        self.started_at = started_at or utcnow()
         self.metadata = metadata or {}
 
 
@@ -110,7 +111,7 @@ class Executor(ABC):
         """
         try:
             # Create temporary instance to validate
-            temp_executor = cls(config)
+            temp_executor = cls(config)  # noqa: F841
             return True
         except Exception:
             return False
@@ -123,7 +124,7 @@ class Executor(ABC):
         """
         return f"{self.get_backend_type()} Executor"
 
-    async def cleanup(self) -> None:
+    async def cleanup(self) -> None:  # noqa: B027
         """Perform any cleanup after execution.
 
         This method is called after evaluation completion (success or failure)

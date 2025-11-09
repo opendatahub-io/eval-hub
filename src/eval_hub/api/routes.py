@@ -2,7 +2,6 @@
 
 import asyncio
 import time
-from datetime import datetime
 from typing import Any
 from uuid import UUID, uuid4
 
@@ -52,6 +51,7 @@ from ..services.model_service import ModelService
 from ..services.parser import RequestParser
 from ..services.provider_service import ProviderService
 from ..services.response_builder import ResponseBuilder
+from ..utils import utcnow
 
 router = APIRouter()
 logger = get_logger(__name__)
@@ -124,7 +124,7 @@ async def health_check(settings: Settings = Depends(get_settings)) -> HealthResp
     return HealthResponse(
         status="healthy",
         version=settings.version,
-        timestamp=datetime.utcnow(),
+        timestamp=utcnow(),
         components=components,
         uptime_seconds=uptime_seconds,
         active_evaluations=len(active_evaluations),
@@ -168,7 +168,10 @@ async def create_single_benchmark_evaluation(
         )
 
     # Map provider type and ID to backend type
-    if provider.provider_type == ProviderType.BUILTIN and provider_id == "lm_evaluation_harness":
+    if (
+        provider.provider_type == ProviderType.BUILTIN
+        and provider_id == "lm_evaluation_harness"
+    ):
         backend_type = BackendType.LMEVAL
     elif provider.provider_type == ProviderType.NEMO_EVALUATOR:
         backend_type = BackendType.NEMO_EVALUATOR
@@ -476,7 +479,7 @@ async def cancel_evaluation(
     # Update status
     response = active_evaluations[request_id_str]
     response.status = "cancelled"
-    response.updated_at = datetime.utcnow()
+    response.updated_at = utcnow()
 
     logger.info("Cancelled evaluation", request_id=request_id_str)
 
@@ -899,7 +902,7 @@ async def _execute_evaluation_async(
         async def progress_callback(eval_id: str, progress: float, message: str):
             if request_id_str in active_evaluations:
                 response = active_evaluations[request_id_str]
-                response.updated_at = datetime.utcnow()
+                response.updated_at = utcnow()
                 # In a real implementation, you'd update individual evaluation progress
 
         # Execute evaluations
@@ -932,7 +935,7 @@ async def _execute_evaluation_async(
         if request_id_str in active_evaluations:
             response = active_evaluations[request_id_str]
             response.status = "failed"
-            response.updated_at = datetime.utcnow()
+            response.updated_at = utcnow()
 
     finally:
         # Clean up task reference

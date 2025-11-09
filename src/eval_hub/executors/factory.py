@@ -53,7 +53,9 @@ class ExecutorFactory:
         try:
             return executor_class(backend_config)
         except Exception as e:
-            raise BackendError(f"Failed to create {backend_type} executor: {e}")
+            raise BackendError(
+                f"Failed to create {backend_type} executor: {e}"
+            )  # noqa: B904
 
     @classmethod
     def validate_backend_config(

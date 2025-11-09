@@ -3,7 +3,6 @@
 import asyncio
 import json
 from collections.abc import Callable
-from datetime import datetime
 from pathlib import Path
 from typing import Any
 
@@ -22,6 +21,7 @@ from ..models.nemo import (
     NemoEvaluationResult,
     NemoEvaluationTarget,
 )
+from ..utils import safe_duration_seconds, utcnow
 from .base import ExecutionContext, Executor
 
 
@@ -168,10 +168,8 @@ class NemoEvaluatorExecutor(Executor):
                 status=EvaluationStatus.FAILED,
                 error_message=str(e),
                 started_at=context.started_at,
-                completed_at=datetime.utcnow(),
-                duration_seconds=(
-                    datetime.utcnow() - context.started_at
-                ).total_seconds(),
+                completed_at=utcnow(),
+                duration_seconds=safe_duration_seconds(utcnow(), context.started_at),
             )
 
     async def cleanup(self) -> None:
@@ -346,7 +344,9 @@ class NemoEvaluatorExecutor(Executor):
                 result = NemoEvaluationResult(**result_data)
                 return result
             except Exception as e:
-                raise BackendError(f"Failed to parse NeMo Evaluator response: {e}")
+                raise BackendError(
+                    f"Failed to parse NeMo Evaluator response: {e}"
+                )  # noqa: B904
 
     async def _convert_nemo_result_to_eval_hub(
         self, nemo_result: NemoEvaluationResult, context: ExecutionContext
@@ -401,8 +401,8 @@ class NemoEvaluatorExecutor(Executor):
             metrics=metrics,
             artifacts=artifacts,
             started_at=context.started_at,
-            completed_at=datetime.utcnow(),
-            duration_seconds=(datetime.utcnow() - context.started_at).total_seconds(),
+            completed_at=utcnow(),
+            duration_seconds=safe_duration_seconds(utcnow(), context.started_at),
         )
 
     def _get_headers(self) -> dict[str, str]:

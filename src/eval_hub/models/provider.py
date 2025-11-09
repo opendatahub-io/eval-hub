@@ -1,9 +1,18 @@
 """Provider and benchmark data models."""
 
+from collections.abc import Callable
 from enum import Enum
 from typing import Any
 
-from pydantic import BaseModel, ConfigDict, Field, field_validator, model_serializer
+from pydantic import (
+    BaseModel,
+    ConfigDict,
+    Field,
+    SerializationInfo,
+    ValidationInfo,
+    field_validator,
+    model_serializer,
+)
 
 
 class ProviderType(str, Enum):
@@ -51,7 +60,7 @@ class Provider(BaseModel):
 
     @field_validator("base_url")
     @classmethod
-    def validate_base_url(cls, v: str | None, info) -> str | None:
+    def validate_base_url(cls, v: str | None, info: ValidationInfo) -> str | None:
         """Validate that base_url is provided for nemo-evaluator providers."""
         provider_type = info.data.get("provider_type")
 
@@ -61,7 +70,11 @@ class Provider(BaseModel):
         return v
 
     @model_serializer(mode="wrap")
-    def serialize_model(self, serializer, info):
+    def serialize_model(
+        self,
+        serializer: Callable[[BaseModel], dict[str, Any]],
+        info: SerializationInfo,
+    ) -> dict[str, Any]:
         """Custom serialization to exclude base_url for builtin providers when it's None."""
         data = serializer(self)
         if self.provider_type == ProviderType.BUILTIN and self.base_url is None:
@@ -119,7 +132,11 @@ class ProviderSummary(BaseModel):
     )
 
     @model_serializer(mode="wrap")
-    def serialize_model(self, serializer, info):
+    def serialize_model(
+        self,
+        serializer: Callable[[BaseModel], dict[str, Any]],
+        info: SerializationInfo,
+    ) -> dict[str, Any]:
         """Custom serialization to exclude base_url for builtin providers when it's None."""
         data = serializer(self)
         if self.provider_type == ProviderType.BUILTIN and self.base_url is None:
@@ -191,7 +208,11 @@ class BenchmarkDetail(BaseModel):
     )
 
     @model_serializer(mode="wrap")
-    def serialize_model(self, serializer, info):
+    def serialize_model(
+        self,
+        serializer: Callable[[BaseModel], dict[str, Any]],
+        info: SerializationInfo,
+    ) -> dict[str, Any]:
         """Custom serialization to exclude base_url for builtin providers when it's None."""
         data = serializer(self)
         if self.provider_type == ProviderType.BUILTIN and self.base_url is None:

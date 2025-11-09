@@ -170,7 +170,10 @@ class TestSingleBenchmarkEvaluation:
         """Test creation with minimal required fields."""
         client, _ = client_with_mock_provider
 
-        request_data = {"model": {"server": "vllm", "name": "gpt-4o-mini"}, "model_configuration": {}}
+        request_data = {
+            "model": {"server": "vllm", "name": "gpt-4o-mini"},
+            "model_configuration": {},
+        }
 
         response = client.post(
             "/api/v1/evaluations/benchmarks/lm_evaluation_harness/blimp",
@@ -189,7 +192,10 @@ class TestSingleBenchmarkEvaluation:
 
         mock_service.get_benchmark_by_id.return_value = None
 
-        request_data = {"model": {"server": "vllm", "name": "gpt-4o-mini"}, "model_configuration": {}}
+        request_data = {
+            "model": {"server": "vllm", "name": "gpt-4o-mini"},
+            "model_configuration": {},
+        }
 
         response = client.post(
             "/api/v1/evaluations/benchmarks/lm_evaluation_harness/nonexistent",
@@ -208,7 +214,10 @@ class TestSingleBenchmarkEvaluation:
 
         mock_service.get_provider_by_id.return_value = None
 
-        request_data = {"model": {"server": "vllm", "name": "gpt-4o-mini"}, "model_configuration": {}}
+        request_data = {
+            "model": {"server": "vllm", "name": "gpt-4o-mini"},
+            "model_configuration": {},
+        }
 
         response = client.post(
             "/api/v1/evaluations/benchmarks/nonexistent_provider/blimp",
@@ -298,7 +307,10 @@ class TestSingleBenchmarkEvaluation:
         mock_service.get_benchmark_by_id.return_value = nemo_benchmark
         mock_service.get_provider_by_id.return_value = nemo_provider
 
-        request_data = {"model": {"server": "vllm", "name": "test-model"}, "model_configuration": {}}
+        request_data = {
+            "model": {"server": "vllm", "name": "test-model"},
+            "model_configuration": {},
+        }
 
         response = client.post(
             "/api/v1/evaluations/benchmarks/nemo_evaluator/test_benchmark",

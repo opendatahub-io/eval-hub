@@ -4,7 +4,6 @@ import asyncio
 import builtins
 import time
 from collections.abc import Callable
-from datetime import datetime
 from uuid import UUID
 
 from ..core.config import Settings
@@ -21,6 +20,7 @@ from ..models.evaluation import (
 )
 from ..models.status import TaskInfo, TaskStatus
 from ..services.model_service import ModelService
+from ..utils import safe_duration_seconds, utcnow
 
 
 class EvaluationExecutor:
@@ -70,8 +70,8 @@ class EvaluationExecutor:
                     benchmark_name="unknown",
                     status=EvaluationStatus.FAILED,
                     error_message=str(result),
-                    started_at=datetime.utcnow(),
-                    completed_at=datetime.utcnow(),
+                    started_at=utcnow(),
+                    completed_at=utcnow(),
                 )
                 all_results.append(error_result)
             else:
@@ -128,8 +128,8 @@ class EvaluationExecutor:
                         benchmark_name="unknown",
                         status=EvaluationStatus.FAILED,
                         error_message=str(backend_result),
-                        started_at=datetime.utcnow(),
-                        completed_at=datetime.utcnow(),
+                        started_at=utcnow(),
+                        completed_at=utcnow(),
                     )
                     results.append(error_result)
                 else:
@@ -160,8 +160,8 @@ class EvaluationExecutor:
                 benchmark_name="unknown",
                 status=EvaluationStatus.FAILED,
                 error_message=str(e),
-                started_at=datetime.utcnow(),
-                completed_at=datetime.utcnow(),
+                started_at=utcnow(),
+                completed_at=utcnow(),
             )
             results = [error_result]
 
@@ -205,8 +205,8 @@ class EvaluationExecutor:
                     benchmark_name=benchmark.name,
                     status=EvaluationStatus.FAILED,
                     error_message=str(e),
-                    started_at=datetime.utcnow(),
-                    completed_at=datetime.utcnow(),
+                    started_at=utcnow(),
+                    completed_at=utcnow(),
                 )
                 results.append(error_result)
 
@@ -271,7 +271,7 @@ class EvaluationExecutor:
                 benchmark_spec=benchmark,
                 timeout_minutes=evaluation.timeout_minutes,
                 retry_attempts=evaluation.retry_attempts,
-                started_at=datetime.utcnow(),
+                started_at=utcnow(),
                 metadata=evaluation.metadata,
             )
 
@@ -326,7 +326,7 @@ class EvaluationExecutor:
                 status=EvaluationStatus.FAILED,
                 error_message=f"Failed after {context.retry_attempts + 1} attempts: {last_error}",
                 started_at=context.started_at,
-                completed_at=datetime.utcnow(),
+                completed_at=utcnow(),
             )
 
     async def _execute_benchmark_with_timeout(
@@ -344,7 +344,7 @@ class EvaluationExecutor:
             )
             return result
         except builtins.TimeoutError:
-            raise TimeoutError(
+            raise TimeoutError(  # noqa: B904
                 f"Benchmark execution timed out after {context.timeout_minutes} minutes"
             )
 
@@ -414,10 +414,10 @@ class EvaluationExecutor:
                     status=EvaluationStatus.FAILED,
                     error_message=str(e),
                     started_at=context.started_at,
-                    completed_at=datetime.utcnow(),
-                    duration_seconds=(
-                        datetime.utcnow() - context.started_at
-                    ).total_seconds(),
+                    completed_at=utcnow(),
+                    duration_seconds=safe_duration_seconds(
+                        utcnow(), context.started_at
+                    ),
                 )
 
         # Fall back to legacy implementations for unsupported backends
@@ -488,8 +488,8 @@ class EvaluationExecutor:
                 "results_json": f"/tmp/results_{context.evaluation_id}_{context.benchmark_spec.name}.json"
             },
             started_at=context.started_at,
-            completed_at=datetime.utcnow(),
-            duration_seconds=(datetime.utcnow() - context.started_at).total_seconds(),
+            completed_at=utcnow(),
+            duration_seconds=safe_duration_seconds(utcnow(), context.started_at),
         )
 
     async def _execute_guidellm(
@@ -529,8 +529,8 @@ class EvaluationExecutor:
                 "performance_report": f"/tmp/perf_{context.evaluation_id}_{context.benchmark_spec.name}.json"
             },
             started_at=context.started_at,
-            completed_at=datetime.utcnow(),
-            duration_seconds=(datetime.utcnow() - context.started_at).total_seconds(),
+            completed_at=utcnow(),
+            duration_seconds=safe_duration_seconds(utcnow(), context.started_at),
         )
 
     async def _execute_custom_backend(
@@ -568,8 +568,8 @@ class EvaluationExecutor:
                 "custom_results": f"/tmp/custom_{context.evaluation_id}_{context.benchmark_spec.name}.json"
             },
             started_at=context.started_at,
-            completed_at=datetime.utcnow(),
-            duration_seconds=(datetime.utcnow() - context.started_at).total_seconds(),
+            completed_at=utcnow(),
+            duration_seconds=safe_duration_seconds(utcnow(), context.started_at),
         )
 
     async def get_active_evaluations(self) -> list[TaskInfo]:

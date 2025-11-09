@@ -6,6 +6,7 @@ repos:
     hooks:
       - id: black
         args: [--line-length=88]
+        exclude: ^examples/api_examples\.ipynb$
 
   # Ruff linting and formatting
   - repo: https://github.com/astral-sh/ruff-pre-commit
@@ -13,7 +14,9 @@ repos:
     hooks:
       - id: ruff
         args: [--fix, --exit-non-zero-on-fix]
+        exclude: ^examples/api_examples\.ipynb$
       - id: ruff-format
+        exclude: ^examples/api_examples\.ipynb$
 
   # Standard pre-commit hooks
   - repo: https://github.com/pre-commit/pre-commit-hooks
@@ -24,6 +27,7 @@ repos:
       - id: check-yaml
         args: [--allow-multiple-documents]
       - id: check-json
+        exclude: ^examples/api_examples\.ipynb$
       - id: check-toml
       - id: check-merge-conflict
       - id: check-added-large-files

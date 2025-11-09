@@ -1,7 +1,7 @@
 """Unit tests for LM Evaluation Harness executor."""
 
 from datetime import datetime
-from unittest.mock import Mock, patch
+from unittest.mock import patch
 from uuid import uuid4
 
 import pytest
@@ -25,8 +25,9 @@ def backend_config():
 @pytest.fixture
 def lmeval_executor(backend_config):
     """Create an LMEvalExecutor instance for testing."""
-    with patch("eval_hub.executors.lmeval.config.load_incluster_config"), patch(
-        "eval_hub.executors.lmeval.config.load_kube_config"
+    with (
+        patch("eval_hub.executors.lmeval.config.load_incluster_config"),
+        patch("eval_hub.executors.lmeval.config.load_kube_config"),
     ):
         return LMEvalExecutor(backend_config)
 
@@ -108,7 +109,9 @@ class TestLMEvalExecutorBaseUrl:
     ):
         """Test that base_url with existing /v1/completions suffix is not duplicated."""
         # Set base_url with /v1/completions already present
-        execution_context.model_server_base_url = "http://model-server:8000/v1/completions"
+        execution_context.model_server_base_url = (
+            "http://model-server:8000/v1/completions"
+        )
 
         cr = lmeval_executor._build_lmeval_job_cr(
             execution_context, ["arc_easy"], "tinyllama"
@@ -152,14 +155,13 @@ class TestLMEvalExecutorBaseUrl:
         backend_config["base_url"] = "http://config-server:9000"
         execution_context.model_server_base_url = None
 
-        with patch("eval_hub.executors.lmeval.config.load_incluster_config"), patch(
-            "eval_hub.executors.lmeval.config.load_kube_config"
+        with (
+            patch("eval_hub.executors.lmeval.config.load_incluster_config"),
+            patch("eval_hub.executors.lmeval.config.load_kube_config"),
         ):
             executor = LMEvalExecutor(backend_config)
 
-        cr = executor._build_lmeval_job_cr(
-            execution_context, ["arc_easy"], "tinyllama"
-        )
+        cr = executor._build_lmeval_job_cr(execution_context, ["arc_easy"], "tinyllama")
 
         model_args = cr["spec"]["modelArgs"]
         base_url_arg = next(
@@ -177,14 +179,13 @@ class TestLMEvalExecutorBaseUrl:
         execution_context.model_server_base_url = "http://context-server:8000"
         backend_config["base_url"] = "http://config-server:9000"
 
-        with patch("eval_hub.executors.lmeval.config.load_incluster_config"), patch(
-            "eval_hub.executors.lmeval.config.load_kube_config"
+        with (
+            patch("eval_hub.executors.lmeval.config.load_incluster_config"),
+            patch("eval_hub.executors.lmeval.config.load_kube_config"),
         ):
             executor = LMEvalExecutor(backend_config)
 
-        cr = executor._build_lmeval_job_cr(
-            execution_context, ["arc_easy"], "tinyllama"
-        )
+        cr = executor._build_lmeval_job_cr(execution_context, ["arc_easy"], "tinyllama")
 
         model_args = cr["spec"]["modelArgs"]
         base_url_arg = next(
@@ -253,4 +254,3 @@ class TestLMEvalExecutorBaseUrl:
         assert base_url_arg is not None
         assert base_url_arg["value"] == "https://secure-server:8443/v1/completions"
         assert base_url_arg["value"].startswith("https://")
-

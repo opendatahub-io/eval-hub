@@ -2,7 +2,6 @@
 
 import os
 import re
-from datetime import datetime
 
 from ..core.config import Settings
 from ..core.logging import get_logger
@@ -16,6 +15,7 @@ from ..models.model import (
     ModelType,
     ServerModel,
 )
+from ..utils import utcnow
 
 logger = get_logger(__name__)
 
@@ -100,8 +100,8 @@ class ModelService:
                     models=server_models,
                     status=ModelStatus.ACTIVE,
                     tags=["runtime"],
-                    created_at=datetime.utcnow(),
-                    updated_at=datetime.utcnow(),
+                    created_at=utcnow(),
+                    updated_at=utcnow(),
                 )
 
                 runtime_servers[server_id] = runtime_server
@@ -183,8 +183,8 @@ class ModelService:
                     models=server_models,
                     status=ModelStatus.ACTIVE,
                     tags=["runtime"],
-                    created_at=datetime.utcnow(),
-                    updated_at=datetime.utcnow(),
+                    created_at=utcnow(),
+                    updated_at=utcnow(),
                 )
 
                 runtime_servers[server_id] = runtime_server
@@ -245,8 +245,8 @@ class ModelService:
                     ],
                     status=ModelStatus.ACTIVE,
                     tags=["runtime"],
-                    created_at=datetime.utcnow(),
-                    updated_at=datetime.utcnow(),
+                    created_at=utcnow(),
+                    updated_at=utcnow(),
                 )
 
                 runtime_servers[server_id] = runtime_server
@@ -272,7 +272,7 @@ class ModelService:
             )
 
         # Create the server
-        now = datetime.utcnow()
+        now = utcnow()
         server = ModelServer(
             server_id=request.server_id,
             server_type=request.server_type,
@@ -402,7 +402,7 @@ class ModelService:
         if request.tags is not None:
             server.tags = request.tags
 
-        server.updated_at = datetime.utcnow()
+        server.updated_at = utcnow()
 
         logger.info("Server updated successfully", server_id=server_id)
 

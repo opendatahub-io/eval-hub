@@ -1,12 +1,12 @@
 """MLFlow client service for experiment tracking and results storage."""
 
-from datetime import datetime
 from typing import Any
 from uuid import uuid4
 
 from ..core.config import Settings
 from ..core.logging import get_logger
 from ..models.evaluation import EvaluationRequest, EvaluationResult, EvaluationSpec
+from ..utils import utcnow
 
 
 class MLFlowClient:
@@ -82,7 +82,7 @@ class MLFlowClient:
                 evaluation.risk_category.value if evaluation.risk_category else None
             ),
             "priority": str(evaluation.priority),
-            "started_at": datetime.utcnow().isoformat(),
+            "started_at": utcnow().isoformat(),
         }
 
         self.logger.info(
@@ -123,8 +123,12 @@ class MLFlowClient:
                     "metrics": result.metrics,
                     "artifacts": result.artifacts,
                     "duration_seconds": result.duration_seconds,
-                    "started_at": result.started_at.isoformat() if result.started_at else None,
-                    "completed_at": result.completed_at.isoformat() if result.completed_at else None,
+                    "started_at": (
+                        result.started_at.isoformat() if result.started_at else None
+                    ),
+                    "completed_at": (
+                        result.completed_at.isoformat() if result.completed_at else None
+                    ),
                     "error_message": result.error_message,
                 }
             )
@@ -183,7 +187,9 @@ class MLFlowClient:
             ]
             for run_id in run_ids_to_delete:
                 del self._mock_runs[run_id]
-            self.logger.info("Deleted MLFlow experiment (mock)", experiment_id=experiment_id)
+            self.logger.info(
+                "Deleted MLFlow experiment (mock)", experiment_id=experiment_id
+            )
 
     def _generate_experiment_name(self, request: EvaluationRequest) -> str:
         """Generate a unique experiment name for the request."""

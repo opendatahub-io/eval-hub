@@ -5,7 +5,6 @@ import json
 import re
 import uuid
 from collections.abc import Callable
-from datetime import datetime
 from pathlib import Path
 from typing import Any
 
@@ -16,6 +15,7 @@ from kubernetes.client.rest import ApiException
 from ..core.exceptions import BackendError
 from ..core.logging import get_logger
 from ..models.evaluation import EvaluationResult, EvaluationStatus
+from ..utils import parse_iso_datetime, safe_duration_seconds, utcnow
 from .base import ExecutionContext, Executor
 
 
@@ -138,7 +138,9 @@ class LMEvalExecutor(Executor):
         # Get model from context if not in config
         model = self.model or context.model_name
         if not model:
-            raise BackendError("Model name is required (either in backend config or context)")
+            raise BackendError(
+                "Model name is required (either in backend config or context)"
+            )
 
         self.logger.info(
             "Starting LM Evaluation Harness execution",
@@ -181,28 +183,18 @@ class LMEvalExecutor(Executor):
             # Deploy the CR to Kubernetes
             if self.deploy_crs and self.k8s_client:
                 await self._deploy_lmeval_job_cr(job_cr, context)
+                cr_name = job_cr["metadata"]["name"]
                 self.logger.info(
                     "LMEvalJob CR deployed successfully",
                     evaluation_id=str(context.evaluation_id),
                     benchmark=context.benchmark_spec.name,
                     namespace=self.namespace,
+                    cr_name=cr_name,
                 )
 
-                # Return a result indicating the job was deployed
-                # The actual evaluation will be handled by the operator
-                return EvaluationResult(
-                    evaluation_id=context.evaluation_id,
-                    backend_name="lm-evaluation-harness",
-                    benchmark_name=context.benchmark_spec.name,
-                    status=EvaluationStatus.PENDING,
-                    started_at=context.started_at,
-                    completed_at=None,
-                    duration_seconds=None,
-                    metadata={
-                        "cr_name": job_cr["metadata"]["name"],
-                        "namespace": self.namespace,
-                        "deployed": True,
-                    },
+                # Poll for completion and retrieve results
+                return await self._wait_for_cr_completion_and_get_results(
+                    cr_name, context, progress_callback
                 )
 
             # Fallback to local execution if CR deployment is disabled
@@ -256,10 +248,8 @@ class LMEvalExecutor(Executor):
                 status=EvaluationStatus.FAILED,
                 error_message=str(e),
                 started_at=context.started_at,
-                completed_at=datetime.utcnow(),
-                duration_seconds=(
-                    datetime.utcnow() - context.started_at
-                ).total_seconds(),
+                completed_at=utcnow(),
+                duration_seconds=safe_duration_seconds(utcnow(), context.started_at),
             )
 
     async def cleanup(self) -> None:
@@ -347,7 +337,9 @@ class LMEvalExecutor(Executor):
 
             # Always add base_url (even if empty, the operator might set it)
             # Ensure value is always a string, never None
-            model_args_list.append({"name": "base_url", "value": str(base_url) if base_url else ""})
+            model_args_list.append(
+                {"name": "base_url", "value": str(base_url) if base_url else ""}
+            )
 
             self.logger.info(
                 "Added base_url to modelArgs",
@@ -363,7 +355,9 @@ class LMEvalExecutor(Executor):
         default_model_args = {
             "num_concurrent": self.backend_config.get("num_concurrent", "1"),
             "max_retries": self.backend_config.get("max_retries", "3"),
-            "tokenized_requests": self.backend_config.get("tokenized_requests", "False"),
+            "tokenized_requests": self.backend_config.get(
+                "tokenized_requests", "False"
+            ),
             "tokenizer": self.backend_config.get("tokenizer", "google/flan-t5-base"),
         }
 
@@ -376,15 +370,17 @@ class LMEvalExecutor(Executor):
         secret_name = self.backend_config.get("secret_name")
         secret_key = self.backend_config.get("secret_key", "token")
         if secret_name:
-            pod_env.append({
-                "name": "OPENAI_API_KEY",
-                "valueFrom": {
-                    "secretKeyRef": {
-                        "name": secret_name,
-                        "key": secret_key,
-                    }
+            pod_env.append(
+                {
+                    "name": "OPENAI_API_KEY",
+                    "valueFrom": {
+                        "secretKeyRef": {
+                            "name": secret_name,
+                            "key": secret_key,
+                        }
+                    },
                 }
-            })
+            )
 
         # Construct the CR matching user's structure
         # Generate a UUID-based name for the CR
@@ -643,8 +639,8 @@ class LMEvalExecutor(Executor):
             metrics=metrics,
             artifacts=artifacts,
             started_at=context.started_at,
-            completed_at=datetime.utcnow(),
-            duration_seconds=(datetime.utcnow() - context.started_at).total_seconds(),
+            completed_at=utcnow(),
+            duration_seconds=safe_duration_seconds(utcnow(), context.started_at),
         )
 
     def get_recommended_timeout_minutes(self) -> int:
@@ -655,3 +651,240 @@ class LMEvalExecutor(Executor):
         """Get the maximum retry attempts for LM Evaluation Harness."""
         return self.backend_config.get("max_retries", 2)
 
+    async def _wait_for_cr_completion_and_get_results(
+        self,
+        cr_name: str,
+        context: ExecutionContext,
+        progress_callback: Callable[[str, float, str], None] | None = None,
+    ) -> EvaluationResult:
+        """Wait for CR to complete and retrieve results."""
+        if not self.k8s_client:
+            raise BackendError("Kubernetes client not initialized")
+
+        group = "trustyai.opendatahub.io"
+        version = "v1alpha1"
+        plural = "lmevaljobs"
+        namespace = self.namespace
+
+        # Poll interval in seconds
+        poll_interval = self.backend_config.get("poll_interval", 5)
+        max_wait_time = self.timeout_seconds
+        start_time = utcnow()
+
+        self.logger.info(
+            "Waiting for LMEvalJob CR to complete",
+            evaluation_id=str(context.evaluation_id),
+            cr_name=cr_name,
+            namespace=namespace,
+        )
+
+        while True:
+            # Check if we've exceeded timeout
+            elapsed = safe_duration_seconds(utcnow(), start_time)
+            if elapsed > max_wait_time:
+                raise BackendError(
+                    f"LMEvalJob CR {cr_name} did not complete within {max_wait_time} seconds"
+                )
+
+            # Get CR status
+            try:
+                cr = self.k8s_client.get_namespaced_custom_object(
+                    group=group,
+                    version=version,
+                    namespace=namespace,
+                    plural=plural,
+                    name=cr_name,
+                )
+            except ApiException as e:
+                if e.status == 404:
+                    raise BackendError(f"LMEvalJob CR {cr_name} not found") from e
+                raise BackendError(f"Failed to get CR status: {e}") from e
+
+            # Check status
+            status = cr.get("status", {})
+            state = status.get("state", "Unknown")
+
+            # Update progress based on progress bars if available
+            if progress_callback and "progressBars" in status:
+                progress_bars = status.get("progressBars", [])
+                if progress_bars:
+                    # Calculate overall progress from progress bars
+                    total_progress = sum(
+                        float(bar.get("percent", "0%").rstrip("%"))
+                        for bar in progress_bars
+                    ) / len(progress_bars)
+                    latest_message = progress_bars[-1].get("message", "Processing")
+                    progress_callback(
+                        str(context.evaluation_id),
+                        min(10.0 + (total_progress * 0.9), 99.0),  # 10-99% range
+                        f"LMEvalJob: {latest_message}",
+                    )
+
+            if state == "Complete":
+                # Check if succeeded or failed
+                reason = status.get("reason", "")
+                if reason == "Succeeded":
+                    # Retrieve and parse results
+                    return await self._parse_cr_results(cr, context)
+                else:
+                    # Job failed
+                    message = status.get("message", "Job failed")
+                    return EvaluationResult(
+                        evaluation_id=context.evaluation_id,
+                        backend_name="lm-evaluation-harness",
+                        benchmark_name=context.benchmark_spec.name,
+                        status=EvaluationStatus.FAILED,
+                        error_message=message,
+                        started_at=context.started_at,
+                        completed_at=utcnow(),
+                        duration_seconds=elapsed,
+                        metadata={
+                            "cr_name": cr_name,
+                            "namespace": namespace,
+                            "reason": reason,
+                        },
+                    )
+
+            # Wait before next poll
+            await asyncio.sleep(poll_interval)
+
+    async def _parse_cr_results(
+        self, cr: dict[str, Any], context: ExecutionContext
+    ) -> EvaluationResult:
+        """Parse results from completed CR and convert to EvaluationResult."""
+        status = cr.get("status", {})
+        results_str = status.get("results", "{}")
+
+        try:
+            results_data = json.loads(results_str)
+        except json.JSONDecodeError as e:
+            self.logger.error(
+                "Failed to parse CR results as JSON",
+                evaluation_id=str(context.evaluation_id),
+                error=str(e),
+            )
+            raise BackendError(f"Failed to parse CR results: {e}") from e
+
+        # Extract metrics from results
+        metrics = {}
+        results = results_data.get("results", {})
+        for task_name, task_results in results.items():
+            if isinstance(task_results, dict):
+                for metric_name, metric_value in task_results.items():
+                    # Skip non-numeric values and metadata
+                    if isinstance(metric_value, (int, float)):
+                        # Use task name as prefix if multiple tasks
+                        full_metric_name = (
+                            f"{task_name}_{metric_name}"
+                            if len(results) > 1
+                            else metric_name
+                        )
+                        metrics[full_metric_name] = metric_value
+
+        # Extract timing information
+        completed_time_str = status.get("completeTime")
+        completed_at = None
+        if completed_time_str:
+            try:
+                # Parse ISO 8601 format: '2025-11-09T01:04:15Z'
+                completed_at = parse_iso_datetime(completed_time_str)
+            except (ValueError, AttributeError):
+                completed_at = utcnow()
+
+        duration_seconds = None
+        if context.started_at and completed_at:
+            duration_seconds = safe_duration_seconds(completed_at, context.started_at)
+        elif "total_evaluation_time_seconds" in results_data:
+            try:
+                duration_seconds = float(results_data["total_evaluation_time_seconds"])
+            except (ValueError, TypeError):
+                pass
+
+        # Store full results in artifacts/metadata
+        artifacts = {
+            "cr_name": cr["metadata"]["name"],
+            "namespace": cr["metadata"]["namespace"],
+        }
+
+        return EvaluationResult(
+            evaluation_id=context.evaluation_id,
+            backend_name="lm-evaluation-harness",
+            benchmark_name=context.benchmark_spec.name,
+            status=EvaluationStatus.COMPLETED,
+            metrics=metrics,
+            artifacts=artifacts,
+            started_at=context.started_at,
+            completed_at=completed_at or utcnow(),
+            duration_seconds=duration_seconds,
+            metadata={
+                "cr_name": cr["metadata"]["name"],
+                "namespace": cr["metadata"]["namespace"],
+                "pod_name": status.get("podName"),
+                "raw_results": results_data,
+            },
+        )
+
+    def get_cr_status(
+        self, cr_name: str, namespace: str | None = None
+    ) -> dict[str, Any] | None:
+        """Get the status of an LMEvalJob CR.
+
+        Args:
+            cr_name: Name of the CR
+            namespace: Kubernetes namespace (defaults to self.namespace)
+
+        Returns:
+            CR status dictionary or None if not found
+        """
+        if not self.k8s_client:
+            return None
+
+        group = "trustyai.opendatahub.io"
+        version = "v1alpha1"
+        plural = "lmevaljobs"
+        namespace = namespace or self.namespace
+
+        try:
+            cr = self.k8s_client.get_namespaced_custom_object(
+                group=group,
+                version=version,
+                namespace=namespace,
+                plural=plural,
+                name=cr_name,
+            )
+            return cr.get("status", {})
+        except ApiException as e:
+            if e.status == 404:
+                return None
+            self.logger.error(
+                "Failed to get CR status",
+                cr_name=cr_name,
+                namespace=namespace,
+                error=str(e),
+            )
+            return None
+
+    def get_cr_results(
+        self, cr_name: str, namespace: str | None = None
+    ) -> dict[str, Any] | None:
+        """Get results from a completed LMEvalJob CR.
+
+        Args:
+            cr_name: Name of the CR
+            namespace: Kubernetes namespace (defaults to self.namespace)
+
+        Returns:
+            Parsed results dictionary or None if not found/not complete
+        """
+        status = self.get_cr_status(cr_name, namespace)
+        if not status:
+            return None
+
+        if status.get("state") != "Complete" or status.get("reason") != "Succeeded":
+            return None
+
+        results_str = status.get("results", "{}")
+        try:
+            return json.loads(results_str)
+        except json.JSONDecodeError:
+            return None

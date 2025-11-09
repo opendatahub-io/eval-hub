@@ -1,7 +1,7 @@
 """Response builder service for aggregating evaluation results."""
 
 import statistics
-from datetime import datetime
+from datetime import datetime, timedelta
 from typing import Any
 
 from ..core.config import Settings
@@ -12,6 +12,7 @@ from ..models.evaluation import (
     EvaluationResult,
     EvaluationStatus,
 )
+from ..utils import utcnow
 
 
 class ResponseBuilder:
@@ -66,7 +67,7 @@ class ResponseBuilder:
             aggregated_metrics=aggregated_metrics,
             experiment_url=experiment_url,
             created_at=request.created_at,
-            updated_at=datetime.utcnow(),
+            updated_at=utcnow(),
             estimated_completion=estimated_completion,
             progress_percentage=progress_percentage,
         )
@@ -271,7 +272,7 @@ class ResponseBuilder:
         # Add buffer time
         estimated_seconds *= 1.2  # 20% buffer
 
-        return datetime.utcnow().replace(microsecond=0) + timedelta(
+        return utcnow().replace(microsecond=0) + timedelta(
             seconds=int(estimated_seconds)
         )
 
