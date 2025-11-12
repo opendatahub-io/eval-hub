@@ -53,7 +53,7 @@ The eval-hub implements a comprehensive REST API with versioned endpoints (`/api
 
 ## Core API Endpoints
 
-### 🏥 Health & Status Endpoints
+### Health & Status Endpoints
 
 #### **GET** `/health` - Health Check
 **Purpose**: Service health monitoring and dependency status
@@ -84,33 +84,143 @@ curl -X GET "{{baseUrl}}/health"
 
 ---
 
-### 🔄 Evaluation Management Endpoints
+### Evaluation Management Endpoints
 
 #### **POST** `/evaluations` - Create Evaluation Request
-**Purpose**: Submit evaluation jobs for execution across multiple backends
+**Purpose**: Submit evaluation jobs for execution across multiple backends and providers
 **Response Model**: `EvaluationResponse`
 **Status Code**: `202 ACCEPTED` (async) | `200 OK` (sync)
 
+**Single Evaluation with Multiple Benchmarks (Same Provider):**
 ```bash
 curl -X POST "{{baseUrl}}/evaluations?async_mode=true" \
 -H "Content-Type: application/json" \
 -d '{
   "evaluations": [
     {
-      "benchmark": {
-        "benchmark_id": "arc_easy",
-        "provider_id": "lm_evaluation_harness"
+      "name": "LMEval Reasoning Assessment",
+      "description": "Comprehensive reasoning evaluation using LM-Evaluation-Harness",
+      "model": {
+        "server": "vllm",
+        "name": "meta-llama/llama-3.1-8b",
+        "configuration": {
+          "temperature": 0.1,
+          "max_tokens": 512,
+          "top_p": 0.95
+        }
       },
-      "backend": {
-        "backend_type": "llama_stack",
-        "model_id": "meta-llama/llama-3.1-8b"
-      }
+      "benchmarks": [
+        {
+          "benchmark_id": "arc_easy",
+          "provider_id": "lm_evaluation_harness",
+          "config": {
+            "num_fewshot": 0,
+            "limit": 1000,
+            "batch_size": 16,
+            "include_path": "./custom_prompts/arc_easy.yaml"
+          }
+        },
+        {
+          "benchmark_id": "mmlu",
+          "provider_id": "lm_evaluation_harness",
+          "config": {
+            "num_fewshot": 5,
+            "limit": null,
+            "batch_size": 16,
+            "include_path": "./custom_prompts/mmlu_cot.yaml",
+            "fewshot_as_multiturn": false,
+            "trust_remote_code": false
+          }
+        }
+      ]
     }
   ],
-  "experiment_name": "prod-model-validation",
+  "experiment_name": "llama-3.1-8b-reasoning-eval",
   "tags": {
     "environment": "production",
-    "model_version": "v2.1"
+    "model_family": "llama-3.1",
+    "evaluation_type": "reasoning"
+  }
+}'
+```
+
+**Multiple Evaluations with Different Providers:**
+```bash
+curl -X POST "{{baseUrl}}/evaluations?async_mode=true" \
+-H "Content-Type: application/json" \
+-d '{
+  "evaluations": [
+    {
+      "name": "Core Language Model Evaluation",
+      "description": "Standard benchmarks for language model capabilities",
+      "model": {
+        "server": "ollama",
+        "name": "meta-llama/llama-3.1-8b"
+      },
+      "benchmarks": [
+        {
+          "benchmark_id": "arc_easy",
+          "provider_id": "lm_evaluation_harness",
+          "config": {
+            "num_fewshot": 0,
+            "batch_size": 8,
+            "device": "cuda:0"
+          }
+        },
+        {
+          "benchmark_id": "hellaswag",
+          "provider_id": "lm_evaluation_harness",
+          "config": {
+            "num_fewshot": 10,
+            "batch_size": 8
+          }
+        }
+      ]
+    },
+    {
+      "name": "RAG and Security Assessment",
+      "description": "Comprehensive safety and RAG evaluation",
+      "model": {
+        "server": "vllm",
+        "name": "meta-llama/llama-3.1-8b"
+      },
+      "benchmarks": [
+        {
+          "benchmark_id": "faithfulness",
+          "provider_id": "ragas",
+          "config": {
+            "dataset_path": "./data/rag_test_set.jsonl",
+            "embeddings_model": "sentence-transformers/all-mpnet-base-v2",
+            "retrieval_system": "vector_db",
+            "chunk_size": 512,
+            "top_k": 5
+          }
+        },
+        {
+          "benchmark_id": "answer_relevancy",
+          "provider_id": "ragas",
+          "config": {
+            "dataset_path": "./data/rag_test_set.jsonl",
+            "ground_truth_path": "./data/ground_truth.jsonl"
+          }
+        },
+        {
+          "benchmark_id": "prompt_injection",
+          "provider_id": "garak",
+          "config": {
+            "max_attempts": 100,
+            "confidence_threshold": 0.8,
+            "scan_modules": ["encoding", "leakage"],
+            "reporting_level": "detailed"
+          }
+        }
+      ]
+    }
+  ],
+  "experiment_name": "comprehensive-model-assessment",
+  "tags": {
+    "evaluation_suite": "complete",
+    "model_version": "v2.1.0"
   }
 }'
 ```
@@ -141,28 +251,57 @@ curl -X POST "{{baseUrl}}/evaluations?async_mode=true" \
 }
 ```
 
-**Commentary**: Supports both single and batch evaluation requests. Async mode (default) returns immediately with tracking IDs, while sync mode blocks until completion. MLFlow integration provides experiment tracking and result persistence.
+**Commentary**:
 
-#### **POST** `/evaluations/single` - Single Benchmark Evaluation
-**Purpose**: Simplified endpoint for single benchmark evaluations
+The evaluation request uses a clean, flat structure for maximum simplicity and consistency:
+- **Evaluation** → **Benchmarks** with direct provider references
+- **Simple benchmark specification**: Each benchmark directly references `benchmark_id` + `provider_id`
+- **Provider-specific parameters**: All provider-specific config goes in the benchmark's `config` object
+- **Consistent schema**: No complex nesting - just model + benchmarks array
+
+**Key Features:**
+- **Direct provider mapping**: `"provider_id": "lm_evaluation_harness"` directly maps to available providers
+- **Benchmark flexibility**: Mix providers freely - LMEval, RAGAS, Garak in same evaluation
+- **Provider-specific config**: Each benchmark config contains only parameters relevant to that provider
+- **Model consistency**: Same model specification applies to all benchmarks in the evaluation
+- **Async/sync modes**: Default async returns immediately with tracking IDs, sync blocks until completion
+- **MLFlow integration**: Automatic experiment tracking and result persistence
+
+#### **POST** `/evaluations/benchmarks/{provider_id}/{benchmark_id}` - Single Benchmark Evaluation
+**Purpose**: Run evaluation on a single benchmark (Llama Stack compatible API)
 **Response Model**: `EvaluationResponse`
+**Status Code**: `202 ACCEPTED`
 
 ```bash
-curl -X POST "{{baseUrl}}/evaluations/single" \
+curl -X POST "{{baseUrl}}/evaluations/benchmarks/lm_evaluation_harness/arc_easy?async_mode=true" \
 -H "Content-Type: application/json" \
 -d '{
-  "benchmark_id": "arc_easy",
-  "provider_id": "lm_evaluation_harness",
-  "model_id": "meta-llama/llama-3.1-8b",
-  "backend_type": "llama_stack"
+  "model": {
+    "server": "ollama",
+    "name": "meta-llama/llama-3.1-8b"
+  },
+  "model_configuration": {
+    "temperature": 0.1,
+    "max_tokens": 512
+  },
+  "timeout_minutes": 60,
+  "retry_attempts": 3,
+  "limit": null,
+  "num_fewshot": null,
+  "experiment_name": "single-benchmark-test",
+  "tags": {
+    "environment": "testing",
+    "benchmark_type": "reasoning"
+  }
 }'
 ```
 
-#### **GET** `/evaluations/{evaluation_id}/status` - Check Evaluation Status
-**Purpose**: Monitor evaluation progress and retrieve current status
+#### **GET** `/evaluations/{request_id}` - Get Evaluation Status
+**Purpose**: Get the status of an evaluation request
+**Response Model**: `EvaluationResponse`
 
 ```bash
-curl -X GET "{{baseUrl}}/evaluations/550e8400-e29b-41d4-a716-446655440000/status"
+curl -X GET "{{baseUrl}}/evaluations/550e8400-e29b-41d4-a716-446655440000"
 ```
 
 **Response Example**:
@@ -184,26 +323,188 @@ curl -X GET "{{baseUrl}}/evaluations/550e8400-e29b-41d4-a716-446655440000/status
 }
 ```
 
-#### **GET** `/evaluations` - List Active Evaluations
-**Purpose**: Retrieve all active evaluations with filtering capabilities
+#### **GET** `/evaluations` - List Evaluations
+**Purpose**: List all evaluation requests with filtering capabilities
+**Response Model**: Array of `EvaluationResponse`
 
 ```bash
-curl -X GET "{{baseUrl}}/evaluations?status=running&limit=10"
+# List evaluations with filters
+curl -X GET "{{baseUrl}}/evaluations?limit=10&status_filter=running"
+
+# List all evaluations (default limit: 50, max: 100)
+curl -X GET "{{baseUrl}}/evaluations"
 ```
 
-#### **DELETE** `/evaluations/{evaluation_id}` - Cancel Evaluation
-**Purpose**: Cancel running evaluations and cleanup resources
+#### **DELETE** `/evaluations/{request_id}` - Cancel Evaluation
+**Purpose**: Cancel a running evaluation
 
 ```bash
 curl -X DELETE "{{baseUrl}}/evaluations/550e8400-e29b-41d4-a716-446655440000"
 ```
 
-#### **GET** `/evaluations/{evaluation_id}/summary` - Get Evaluation Results
-**Purpose**: Retrieve comprehensive evaluation results and metrics
+#### **GET** `/evaluations/{request_id}/summary` - Get Evaluation Summary
+**Purpose**: Get a summary of an evaluation request with detailed metrics
+**Response Model**: Generic object with evaluation summary
+
+```bash
+curl -X GET "{{baseUrl}}/evaluations/550e8400-e29b-41d4-a716-446655440000/summary"
+```
+
+**Response Example**:
+```json
+{
+  "request_id": "550e8400-e29b-41d4-a716-446655440000",
+  "status": "completed",
+  "experiment_name": "comprehensive-model-assessment",
+  "model": {
+    "server": "vllm",
+    "name": "meta-llama/llama-3.1-8b"
+  },
+  "total_duration_seconds": 1847.5,
+  "completed_at": "2025-01-15T11:15:30Z",
+  "evaluations": [
+    {
+      "evaluation_id": "eval_001",
+      "name": "Core Language Model Evaluation",
+      "status": "completed",
+      "duration_seconds": 982.3,
+      "benchmarks": [
+        {
+          "benchmark_id": "arc_easy",
+          "provider_id": "lm_evaluation_harness",
+          "status": "completed",
+          "duration_seconds": 456.2,
+          "metrics": {
+            "accuracy": 0.8345,
+            "acc_norm": 0.8421,
+            "total_samples": 2376,
+            "correct_answers": 1982,
+            "stderr": 0.0087
+          },
+          "details": {
+            "batch_size": 8,
+            "num_fewshot": 0,
+            "device": "cuda:0"
+          }
+        },
+        {
+          "benchmark_id": "hellaswag",
+          "provider_id": "lm_evaluation_harness",
+          "status": "completed",
+          "duration_seconds": 526.1,
+          "metrics": {
+            "accuracy": 0.7892,
+            "acc_norm": 0.8156,
+            "total_samples": 10042,
+            "correct_answers": 7926,
+            "stderr": 0.0041
+          },
+          "details": {
+            "batch_size": 8,
+            "num_fewshot": 10
+          }
+        }
+      ]
+    },
+    {
+      "evaluation_id": "eval_002",
+      "name": "RAG and Security Assessment",
+      "status": "completed",
+      "duration_seconds": 865.2,
+      "benchmarks": [
+        {
+          "benchmark_id": "faithfulness",
+          "provider_id": "ragas",
+          "status": "completed",
+          "duration_seconds": 287.4,
+          "metrics": {
+            "faithfulness_score": 0.8934,
+            "total_samples": 500,
+            "faithful_samples": 447,
+            "mean_score": 0.8934,
+            "std_score": 0.1245,
+            "confidence_interval": [0.8823, 0.9045]
+          },
+          "details": {
+            "dataset_path": "./data/rag_test_set.jsonl",
+            "retrieval_system": "vector_db",
+            "embeddings_model": "sentence-transformers/all-mpnet-base-v2"
+          }
+        },
+        {
+          "benchmark_id": "answer_relevancy",
+          "provider_id": "ragas",
+          "status": "completed",
+          "duration_seconds": 312.6,
+          "metrics": {
+            "answer_relevancy_score": 0.7654,
+            "total_samples": 500,
+            "relevant_samples": 383,
+            "mean_score": 0.7654,
+            "std_score": 0.1876,
+            "confidence_interval": [0.7489, 0.7819]
+          }
+        },
+        {
+          "benchmark_id": "prompt_injection",
+          "provider_id": "garak",
+          "status": "completed",
+          "duration_seconds": 265.2,
+          "metrics": {
+            "injection_success_rate": 0.0450,
+            "detection_rate": 0.9550,
+            "total_attempts": 1000,
+            "successful_injections": 45,
+            "detected_injections": 955,
+            "scan_modules": ["encoding", "leakage"],
+            "confidence_score": 0.8723
+          },
+          "details": {
+            "max_attempts": 100,
+            "confidence_threshold": 0.8,
+            "reporting_level": "detailed"
+          }
+        }
+      ]
+    }
+  ],
+  "aggregate_metrics": {
+    "total_benchmarks": 5,
+    "completed_benchmarks": 5,
+    "failed_benchmarks": 0,
+    "overall_score": 0.7896,
+    "provider_breakdown": {
+      "lm_evaluation_harness": {
+        "benchmarks": 2,
+        "avg_accuracy": 0.8119,
+        "total_samples": 12418
+      },
+      "ragas": {
+        "benchmarks": 2,
+        "avg_score": 0.8294,
+        "total_samples": 1000
+      },
+      "garak": {
+        "benchmarks": 1,
+        "security_score": 0.9550,
+        "total_attempts": 1000
+      }
+    }
+  },
+  "experiment_url": "http://mlflow:5000/experiments/12345",
+  "artifacts": {
+    "detailed_results": "s3://eval-results/550e8400-e29b-41d4-a716-446655440000/results.json",
+    "logs": "s3://eval-results/550e8400-e29b-41d4-a716-446655440000/logs/",
+    "mlflow_run_id": "a1b2c3d4e5f6"
+  }
+}
+```
+
+**Commentary**: Comprehensive evaluation summary showing detailed metrics for each benchmark across different providers. Includes provider-specific metrics (accuracy for LMEval, scores for RAGAS, security rates for Garak), execution details, and aggregated results with MLFlow integration.
 
 ---
 
-### 🏢 Provider Management Endpoints
+### Provider Management Endpoints
 
 #### **GET** `/providers` - List All Providers
 **Purpose**: Discover available evaluation providers and their capabilities
@@ -260,7 +561,7 @@ curl -X GET "{{baseUrl}}/providers/lm_evaluation_harness"
 
 ---
 
-### 📊 Benchmark Management Endpoints
+### Benchmark Management Endpoints
 
 #### **GET** `/benchmarks` - List All Benchmarks
 **Purpose**: Discover available benchmarks across all providers with filtering
@@ -285,7 +586,7 @@ curl -X GET "{{baseUrl}}/benchmarks?tags=math,science"
 {
   "benchmarks": [
     {
-      "benchmark_id": "lm_evaluation_harness::arc_easy",
+      "benchmark_id": "arc_easy",
       "provider_id": "lm_evaluation_harness",
       "name": "ARC Easy",
       "description": "AI2 Reasoning Challenge (Easy) - Grade school science questions",
@@ -296,7 +597,7 @@ curl -X GET "{{baseUrl}}/benchmarks?tags=math,science"
       "tags": ["reasoning", "science", "lm_eval"]
     },
     {
-      "benchmark_id": "ragas::faithfulness",
+      "benchmark_id": "faithfulness",
       "provider_id": "ragas",
       "name": "Faithfulness",
       "description": "Measures factual consistency of generated answer against given context",
@@ -305,6 +606,17 @@ curl -X GET "{{baseUrl}}/benchmarks?tags=math,science"
       "num_few_shot": null,
       "dataset_size": null,
       "tags": ["rag", "faithfulness", "retrieval"]
+    },
+    {
+      "benchmark_id": "prompt_injection",
+      "provider_id": "garak",
+      "name": "Prompt Injection",
+      "description": "Tests model resistance to prompt injection attacks",
+      "category": "safety",
+      "metrics": ["injection_success_rate", "detection_rate"],
+      "num_few_shot": 0,
+      "dataset_size": 500,
+      "tags": ["security", "safety", "injection"]
     }
   ],
   "total_count": 190,
@@ -312,7 +624,7 @@ curl -X GET "{{baseUrl}}/benchmarks?tags=math,science"
 }
 ```
 
-**Commentary**: Unified benchmark catalog across providers. Benchmark IDs follow `provider::benchmark` format for global uniqueness. Supports powerful filtering by provider, category, and tags for targeted discovery.
+**Commentary**: Unified benchmark catalog across providers. Each benchmark has a clean `benchmark_id` and separate `provider_id` for clarity. Supports powerful filtering by provider, category, and tags for targeted discovery.
 
 #### **GET** `/providers/{provider_id}/benchmarks` - Provider-Specific Benchmarks
 **Purpose**: Get benchmarks for a specific provider
@@ -321,16 +633,17 @@ curl -X GET "{{baseUrl}}/benchmarks?tags=math,science"
 curl -X GET "{{baseUrl}}/providers/lm_evaluation_harness/benchmarks"
 ```
 
-#### **GET** `/benchmarks/{benchmark_id}` - Get Benchmark Details
-**Purpose**: Detailed benchmark specification including metrics and requirements
+#### **GET** `/providers/{provider_id}/benchmarks/{benchmark_id}` - Get Benchmark Details
+**Purpose**: Get details of a specific benchmark
+**Response Model**: `BenchmarkDetail`
 
 ```bash
-curl -X GET "{{baseUrl}}/benchmarks/lm_evaluation_harness::arc_easy"
+curl -X GET "{{baseUrl}}/providers/lm_evaluation_harness/benchmarks/arc_easy"
 ```
 
 ---
 
-### 📚 Collection Management Endpoints
+### Collection Management Endpoints
 
 #### **GET** `/collections` - List Benchmark Collections
 **Purpose**: Discover curated benchmark collections for specific domains
@@ -370,11 +683,136 @@ curl -X GET "{{baseUrl}}/collections"
 **Commentary**: Pre-curated benchmark collections for domain-specific evaluation. Healthcare, automotive, finance, and general collections provide standardized evaluation suites for compliance and model validation.
 
 #### **GET** `/collections/{collection_id}` - Get Collection Details
-**Purpose**: Detailed collection specification with benchmark list
+**Purpose**: Detailed collection specification with benchmark list and usage metrics
 
 ```bash
 curl -X GET "{{baseUrl}}/collections/healthcare_safety_v1"
 ```
+
+**Response Example**:
+```json
+{
+  "collection_id": "healthcare_safety_v1",
+  "name": "Healthcare Safety Assessment v1",
+  "description": "Comprehensive safety evaluation for healthcare LLM applications including medical knowledge, safety protocols, and regulatory compliance benchmarks",
+  "version": "1.0",
+  "created_at": "2024-12-01T00:00:00Z",
+  "updated_at": "2025-01-10T14:30:00Z",
+  "benchmark_count": 12,
+  "categories": ["safety", "medical", "reasoning"],
+  "providers": ["lm_evaluation_harness", "garak"],
+  "benchmarks": [
+    {
+      "benchmark_id": "medqa",
+      "provider_id": "lm_evaluation_harness",
+      "name": "Medical Question Answering",
+      "description": "Medical knowledge and reasoning assessment",
+      "category": "medical",
+      "weight": 0.2,
+      "metrics": ["accuracy", "f1_score"],
+      "required": true
+    },
+    {
+      "benchmark_id": "medical_safety",
+      "provider_id": "lm_evaluation_harness",
+      "name": "Medical Safety Protocols",
+      "description": "Healthcare safety and protocol compliance",
+      "category": "safety",
+      "weight": 0.3,
+      "metrics": ["accuracy", "safety_score"],
+      "required": true
+    },
+    {
+      "benchmark_id": "hipaa_compliance",
+      "provider_id": "garak",
+      "name": "HIPAA Compliance Check",
+      "description": "Privacy and regulatory compliance testing",
+      "category": "safety",
+      "weight": 0.25,
+      "metrics": ["compliance_rate", "privacy_score"],
+      "required": true
+    },
+    {
+      "benchmark_id": "medical_reasoning",
+      "provider_id": "lm_evaluation_harness",
+      "name": "Clinical Reasoning",
+      "description": "Medical diagnosis and treatment reasoning",
+      "category": "reasoning",
+      "weight": 0.25,
+      "metrics": ["accuracy", "reasoning_score"],
+      "required": false
+    }
+  ],
+  "usage_statistics": {
+    "total_evaluations": 247,
+    "evaluations_30d": 45,
+    "unique_models_tested": 23,
+    "last_evaluation": "2025-01-15T09:30:00Z",
+    "popular_models": [
+      {
+        "model_name": "meta-llama/llama-3.1-8b",
+        "evaluation_count": 18,
+        "avg_score": 0.8234
+      },
+      {
+        "model_name": "microsoft/biogpt",
+        "evaluation_count": 12,
+        "avg_score": 0.7892
+      }
+    ]
+  },
+  "performance_metrics": {
+    "avg_collection_duration_seconds": 2347.8,
+    "success_rate": 0.9635,
+    "avg_benchmark_scores": {
+      "medqa": {
+        "avg_accuracy": 0.7845,
+        "evaluations_count": 45
+      },
+      "medical_safety": {
+        "avg_accuracy": 0.8923,
+        "avg_safety_score": 0.9156,
+        "evaluations_count": 45
+      },
+      "hipaa_compliance": {
+        "avg_compliance_rate": 0.9534,
+        "avg_privacy_score": 0.9234,
+        "evaluations_count": 43
+      },
+      "medical_reasoning": {
+        "avg_accuracy": 0.7234,
+        "avg_reasoning_score": 0.7456,
+        "evaluations_count": 38
+      }
+    },
+    "score_distribution": {
+      "overall": {
+        "mean": 0.8234,
+        "std": 0.1456,
+        "min": 0.5234,
+        "max": 0.9534,
+        "percentiles": {
+          "p50": 0.8234,
+          "p75": 0.8934,
+          "p90": 0.9234,
+          "p95": 0.9434
+        }
+      }
+    }
+  },
+  "compliance_requirements": {
+    "required_score_threshold": 0.75,
+    "mandatory_benchmarks": ["medqa", "medical_safety", "hipaa_compliance"],
+    "certification_level": "healthcare_grade",
+    "regulatory_frameworks": ["HIPAA", "FDA_510k", "EU_MDR"]
+  },
+  "collection_tags": ["healthcare", "medical", "safety", "compliance", "regulatory"],
+  "documentation_url": "https://docs.eval-hub.ai/collections/healthcare_safety_v1",
+  "citation": "Healthcare Safety Assessment Collection v1.0, TrustyAI Evaluation Hub, 2024"
+}
+```
+
+**Commentary**: Comprehensive collection details including benchmark specifications with weights, usage statistics showing adoption patterns, performance metrics across all benchmarks, and compliance requirements for healthcare applications. Essential for understanding collection effectiveness and model certification requirements.
 
 #### **POST** `/collections` - Create Custom Collection
 **Purpose**: Create custom benchmark collections for organizational needs
@@ -459,8 +897,70 @@ curl -X GET "{{baseUrl}}/servers"
 
 ### 📈 Monitoring & Metrics Endpoints
 
+#### **GET** `/metrics` - Prometheus Metrics
+**Purpose**: Prometheus metrics endpoint for monitoring and observability
+
+```bash
+curl -X GET "{{baseUrl}}/metrics"
+```
+
+**Response Example** (Prometheus format):
+```
+# HELP eval_hub_active_evaluations Number of currently active evaluations
+# TYPE eval_hub_active_evaluations gauge
+eval_hub_active_evaluations 3
+
+# HELP eval_hub_completed_evaluations_total Total number of completed evaluations
+# TYPE eval_hub_completed_evaluations_total counter
+eval_hub_completed_evaluations_total 1247
+
+# HELP eval_hub_evaluation_duration_seconds Duration of evaluations in seconds
+# TYPE eval_hub_evaluation_duration_seconds histogram
+eval_hub_evaluation_duration_seconds_bucket{le="60"} 45
+eval_hub_evaluation_duration_seconds_bucket{le="300"} 189
+eval_hub_evaluation_duration_seconds_bucket{le="600"} 234
+eval_hub_evaluation_duration_seconds_bucket{le="1800"} 267
+eval_hub_evaluation_duration_seconds_bucket{le="+Inf"} 278
+eval_hub_evaluation_duration_seconds_sum 68745.2
+eval_hub_evaluation_duration_seconds_count 278
+
+# HELP eval_hub_provider_evaluations_total Total evaluations by provider
+# TYPE eval_hub_provider_evaluations_total counter
+eval_hub_provider_evaluations_total{provider="lm_evaluation_harness"} 892
+eval_hub_provider_evaluations_total{provider="ragas"} 234
+eval_hub_provider_evaluations_total{provider="garak"} 121
+
+# HELP eval_hub_system_cpu_usage_percent CPU usage percentage
+# TYPE eval_hub_system_cpu_usage_percent gauge
+eval_hub_system_cpu_usage_percent 65.2
+
+# HELP eval_hub_system_memory_usage_percent Memory usage percentage
+# TYPE eval_hub_system_memory_usage_percent gauge
+eval_hub_system_memory_usage_percent 72.1
+
+# HELP eval_hub_system_gpu_usage_percent GPU usage percentage
+# TYPE eval_hub_system_gpu_usage_percent gauge
+eval_hub_system_gpu_usage_percent 89.3
+
+# HELP eval_hub_api_requests_total Total API requests
+# TYPE eval_hub_api_requests_total counter
+eval_hub_api_requests_total{method="GET",endpoint="/evaluations"} 1234
+eval_hub_api_requests_total{method="POST",endpoint="/evaluations"} 456
+eval_hub_api_requests_total{method="GET",endpoint="/providers"} 789
+
+# HELP eval_hub_api_request_duration_seconds API request duration
+# TYPE eval_hub_api_request_duration_seconds histogram
+eval_hub_api_request_duration_seconds_bucket{method="GET",endpoint="/evaluations",le="0.1"} 567
+eval_hub_api_request_duration_seconds_bucket{method="GET",endpoint="/evaluations",le="0.5"} 1123
+eval_hub_api_request_duration_seconds_bucket{method="GET",endpoint="/evaluations",le="1.0"} 1198
+eval_hub_api_request_duration_seconds_bucket{method="GET",endpoint="/evaluations",le="+Inf"} 1234
+```
+
+**Commentary**: Standard Prometheus metrics format for integration with monitoring systems like Grafana, AlertManager, and Prometheus servers. Includes evaluation metrics, system resource usage, provider statistics, and API performance metrics.
+
 #### **GET** `/metrics/system` - Get System Metrics
-**Purpose**: Prometheus-compatible metrics for monitoring
+**Purpose**: Get system metrics and statistics for monitoring and observability
+**Response Model**: Generic object with system metrics
 
 ```bash
 curl -X GET "{{baseUrl}}/metrics/system"
@@ -469,25 +969,234 @@ curl -X GET "{{baseUrl}}/metrics/system"
 **Response Example**:
 ```json
 {
+  "timestamp": "2025-01-15T11:30:00Z",
+  "uptime_seconds": 2847392,
   "active_evaluations": 3,
   "completed_evaluations_24h": 45,
   "failed_evaluations_24h": 2,
   "average_evaluation_time_seconds": 245.5,
-  "system": {
+  "evaluation_queue": {
+    "pending": 12,
+    "running": 3,
+    "size_limit": 100,
+    "oldest_pending_age_seconds": 45
+  },
+  "system_resources": {
     "cpu_usage_percent": 65.2,
     "memory_usage_percent": 72.1,
-    "disk_usage_percent": 45.8
+    "disk_usage_percent": 45.8,
+    "gpu_usage_percent": 89.3,
+    "gpu_memory_usage_percent": 94.7,
+    "network_io": {
+      "bytes_sent_24h": 847392847,
+      "bytes_received_24h": 924738291
+    }
   },
   "providers": {
     "lm_evaluation_harness": {
       "status": "healthy",
-      "evaluations_24h": 35
+      "evaluations_24h": 35,
+      "success_rate_24h": 0.9714,
+      "avg_duration_seconds": 412.3,
+      "active_evaluations": 2,
+      "last_successful_evaluation": "2025-01-15T11:15:30Z",
+      "benchmarks_run_24h": {
+        "arc_easy": 8,
+        "hellaswag": 12,
+        "mmlu": 15
+      }
     },
     "ragas": {
       "status": "healthy",
-      "evaluations_24h": 8
+      "evaluations_24h": 8,
+      "success_rate_24h": 1.0000,
+      "avg_duration_seconds": 298.7,
+      "active_evaluations": 1,
+      "last_successful_evaluation": "2025-01-15T11:25:15Z",
+      "benchmarks_run_24h": {
+        "faithfulness": 4,
+        "answer_relevancy": 4
+      }
+    },
+    "garak": {
+      "status": "healthy",
+      "evaluations_24h": 2,
+      "success_rate_24h": 1.0000,
+      "avg_duration_seconds": 187.4,
+      "active_evaluations": 0,
+      "last_successful_evaluation": "2025-01-15T10:45:22Z",
+      "benchmarks_run_24h": {
+        "prompt_injection": 2
+      }
     }
+  },
+  "models": {
+    "total_registered": 15,
+    "active": 12,
+    "model_servers": {
+      "vllm": {
+        "status": "healthy",
+        "models_served": 8,
+        "requests_24h": 1247,
+        "avg_response_time_ms": 342.5
+      },
+      "ollama": {
+        "status": "healthy",
+        "models_served": 4,
+        "requests_24h": 847,
+        "avg_response_time_ms": 567.2
+      }
+    }
+  },
+  "storage": {
+    "mlflow_experiments": 247,
+    "total_artifact_size_gb": 156.7,
+    "s3_storage_used_gb": 142.3,
+    "local_cache_size_gb": 14.4
+  },
+  "performance_metrics": {
+    "throughput_evaluations_per_hour": 12.4,
+    "peak_concurrent_evaluations": 8,
+    "api_requests_24h": 2847,
+    "api_success_rate_24h": 0.9912,
+    "avg_api_response_time_ms": 156.3
+  },
+  "health_checks": {
+    "database": "healthy",
+    "mlflow": "healthy",
+    "s3_storage": "healthy",
+    "redis_cache": "healthy",
+    "model_servers": "healthy"
   }
+}
+```
+
+**Commentary**: Comprehensive system metrics including evaluation queue status, resource utilization, provider-specific performance data, model server health, storage usage, and overall system performance indicators. Essential for monitoring service health and capacity planning.
+
+---
+
+## Schema Design & Provider Parameters
+
+### Evaluation Request Structure
+
+The `/evaluations` endpoint uses a simple, consistent structure for maximum clarity:
+
+```
+EvaluationRequest
+├── evaluations[]                    # Multiple evaluation jobs
+    ├── name                        # Human-readable name
+    ├── description                 # Job description
+    ├── model                       # Model specification
+    │   ├── server                  # Model server (vllm, ollama, etc.)
+    │   ├── name                    # Model identifier
+    │   └── configuration           # Model-specific params (temperature, etc.)
+    └── benchmarks[]                # Array of benchmarks to run
+        ├── benchmark_id            # Direct benchmark identifier
+        ├── provider_id             # Provider to use (lm_evaluation_harness, ragas, garak)
+        └── config                  # Provider-specific benchmark configuration
+```
+
+### Provider-Specific Parameter Examples
+
+**LM-Evaluation-Harness Benchmarks:**
+```json
+{
+  "benchmark_id": "mmlu",
+  "provider_id": "lm_evaluation_harness",
+  "config": {
+    "num_fewshot": 5,                            // Few-shot examples
+    "limit": null,                               // Sample limit (null = all)
+    "batch_size": 16,                            // LMEval batch processing
+    "use_cache": true,                           // Cache model outputs
+    "trust_remote_code": false,                  // Security setting
+    "write_out": true,                           // Write detailed outputs
+    "device": "cuda:0",                          // GPU specification
+    "dtype": "bfloat16",                         // Model precision
+    "include_path": "./prompts/mmlu_cot.yaml",   // Custom prompts
+    "fewshot_as_multiturn": false,               // LMEval specific
+    "apply_chat_template": true                  // Chat model handling
+  }
+}
+```
+
+**RAGAS RAG Evaluation Benchmarks:**
+```json
+{
+  "benchmark_id": "faithfulness",
+  "provider_id": "ragas",
+  "config": {
+    "dataset_path": "./data/rag_test_set.jsonl",        // Custom dataset
+    "ground_truth_path": "./data/ground_truth.jsonl",   // Reference answers
+    "retrieval_system": "vector_db",                    // RAG system type
+    "embeddings_model": "sentence-transformers/all-mpnet-base-v2",
+    "chunk_size": 512,                                  // Document chunking
+    "overlap": 50,                                      // Chunk overlap
+    "top_k": 5,                                         // Retrieval top-k
+    "batch_size": 4,                                    // RAGAS batch size
+    "llm_temperature": 0.0,                             // LLM for evaluation
+    "metrics": ["faithfulness"]                         // Specific metrics to compute
+  }
+}
+```
+
+**Garak Security Scanning Benchmarks:**
+```json
+{
+  "benchmark_id": "prompt_injection",
+  "provider_id": "garak",
+  "config": {
+    "max_attempts": 100,                               // Attempts per probe
+    "confidence_threshold": 0.8,                       // Success threshold
+    "scan_modules": ["encoding", "leakage"],           // Security domains
+    "reporting_level": "detailed",                     // Output verbosity
+    "parallel_requests": 10,                           // Concurrency
+    "timeout": 30,                                     // Request timeout
+    "user_agent": "eval-hub/garak-scanner",            // Custom UA
+    "custom_probes_path": "./probes/",                 // Custom probe definitions
+    "exclude_patterns": ["test_*"]                     // Skip test probes
+  }
+}
+```
+
+### Configuration Patterns
+
+The simplified structure provides clear configuration patterns:
+
+1. **Model Configuration**: Applies to all benchmarks in the evaluation
+2. **Benchmark Configuration**: Each benchmark has its own provider-specific config
+3. **Provider Consistency**: All config for a provider goes in the benchmark's `config` object
+
+**Example of Multiple Benchmarks with Same Provider:**
+```json
+{
+  "model": {
+    "server": "vllm",
+    "name": "meta-llama/llama-3.1-8b",
+    "configuration": {
+      "temperature": 0.1,           // Applies to all benchmarks
+      "max_tokens": 512
+    }
+  },
+  "benchmarks": [
+    {
+      "benchmark_id": "arc_easy",
+      "provider_id": "lm_evaluation_harness",
+      "config": {
+        "batch_size": 32,           // Specific to this benchmark
+        "num_fewshot": 0,
+        "device": "cuda:0"
+      }
+    },
+    {
+      "benchmark_id": "mmlu",
+      "provider_id": "lm_evaluation_harness",
+      "config": {
+        "batch_size": 16,           // Different batch size for this benchmark
+        "num_fewshot": 5,
+        "device": "cuda:0"
+      }
+    }
+  ]
 }
 ```
 
