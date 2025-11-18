@@ -336,12 +336,12 @@ curl -X POST "{{baseUrl}}/evaluations/benchmarks/lm_evaluation_harness/arc_easy?
 }'
 ```
 
-#### **GET** `/evaluations/job/{request_id}` \- Get Evaluation Status
+#### **GET** `/evaluations/jobs/{id}` \- Get Evaluation Status
 
 **Purpose**: Get the status of an evaluation request **Response Model**: `EvaluationResponse`
 
 ```shell
-curl -X GET "{{baseUrl}}/evaluations/job/550e8400-e29b-41d4-a716-446655440000"
+curl -X GET "{{baseUrl}}/evaluations/jobs/550e8400-e29b-41d4-a716-446655440000"
 ```
 
 **Response Example**:
@@ -385,20 +385,20 @@ curl -X GET "{{baseUrl}}/evaluations?limit=10&status_filter=running"
 curl -X GET "{{baseUrl}}/evaluations"
 ```
 
-#### **DELETE** `/evaluations/job/{request_id}` \- Cancel Evaluation
+#### **DELETE** `/evaluations/jobs/{id}` \- Cancel Evaluation
 
 **Purpose**: Cancel a running evaluation
 
 ```shell
-curl -X DELETE "{{baseUrl}}/evaluations/job/550e8400-e29b-41d4-a716-446655440000"
+curl -X DELETE "{{baseUrl}}/evaluations/jobs/550e8400-e29b-41d4-a716-446655440000"
 ```
 
-#### **GET** `/evaluations/job/{request_id}/summary` \- Get Evaluation Summary
+#### **GET** `/evaluations/jobs/{id}/summary` \- Get Evaluation Summary
 
 **Purpose**: Get a summary of an evaluation request with detailed metrics **Response Model**: Generic object with evaluation summary
 
 ```shell
-curl -X GET "{{baseUrl}}/evaluations/job/550e8400-e29b-41d4-a716-446655440000/summary"
+curl -X GET "{{baseUrl}}/evaluations/jobs/550e8400-e29b-41d4-a716-446655440000/summary"
 ```
 
 **Response Example**:

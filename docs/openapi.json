@@ -231,20 +231,20 @@
         }
       }
     },
-    "/api/v1/evaluations/{request_id}": {
+    "/api/v1/evaluations/{id}": {
       "get": {
         "summary": "Get Evaluation Status",
         "description": "Get the status of an evaluation request.",
-        "operationId": "get_evaluation_status_api_v1_evaluations__request_id__get",
+        "operationId": "get_evaluation_status_api_v1_evaluations__id__get",
         "parameters": [
           {
-            "name": "request_id",
+            "name": "id",
             "in": "path",
             "required": true,
             "schema": {
               "type": "string",
               "format": "uuid",
-              "title": "Request Id"
+              "title": "Id"
             }
           }
         ],
@@ -274,16 +274,16 @@
       "delete": {
         "summary": "Cancel Evaluation",
         "description": "Cancel a running evaluation.",
-        "operationId": "cancel_evaluation_api_v1_evaluations__request_id__delete",
+        "operationId": "cancel_evaluation_api_v1_evaluations__id__delete",
         "parameters": [
           {
-            "name": "request_id",
+            "name": "id",
             "in": "path",
             "required": true,
             "schema": {
               "type": "string",
               "format": "uuid",
-              "title": "Request Id"
+              "title": "Id"
             }
           }
         ],
@@ -309,20 +309,20 @@
         }
       }
     },
-    "/api/v1/evaluations/{request_id}/summary": {
+    "/api/v1/evaluations/{id}/summary": {
       "get": {
         "summary": "Get Evaluation Summary",
         "description": "Get a summary of an evaluation request.",
-        "operationId": "get_evaluation_summary_api_v1_evaluations__request_id__summary_get",
+        "operationId": "get_evaluation_summary_api_v1_evaluations__id__summary_get",
         "parameters": [
           {
-            "name": "request_id",
+            "name": "id",
             "in": "path",
             "required": true,
             "schema": {
               "type": "string",
               "format": "uuid",
-              "title": "Request Id"
+              "title": "Id"
             }
           }
         ],
@@ -334,7 +334,7 @@
                 "schema": {
                   "type": "object",
                   "additionalProperties": true,
-                  "title": "Response Get Evaluation Summary Api V1 Evaluations  Request Id  Summary Get"
+                  "title": "Response Get Evaluation Summary Api V1 Evaluations  Id  Summary Get"
                 }
               }
             }

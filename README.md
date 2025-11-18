@@ -511,7 +511,7 @@ curl "http://localhost:8000/api/v1/benchmarks?category=code&provider_id=lm_evalu
 
 ### Checking Evaluation Status
 
-**Endpoint**: `GET /api/v1/evaluations/{request_id}`
+**Endpoint**: `GET /api/v1/evaluations/{id}`
 
 **Response**:
 ```json
@@ -1179,7 +1179,7 @@ mypy src/
 kubectl logs -n eval-hub deployment/eval-hub -f
 
 # Check specific evaluation
-curl http://eval-hub:8000/api/v1/evaluations/{request_id}
+curl http://eval-hub:8000/api/v1/evaluations/{id}
 
 # Monitor system metrics
 curl http://eval-hub:8000/metrics
