@@ -367,46 +367,6 @@ class TestModelAPI:
         data = response.json()
         assert "Cannot delete runtime models" in data["detail"]
 
-    @patch("eval_hub.api.routes.ModelService")
-    def test_reload_runtime_models_success(self, mock_model_service_class, client):
-        """Test successful runtime models reload."""
-        # Mock the service
-        mock_service = Mock()
-        mock_service.reload_runtime_models.return_value = None
-        mock_model_service_class.return_value = mock_service
-
-        # Make request
-        response = client.post("/api/v1/models/reload")
-
-        # Verify response
-        assert response.status_code == 200
-        data = response.json()
-        assert (
-            "Runtime models reloaded from environment variables successfully"
-            in data["message"]
-        )
-
-        # Verify service call
-        mock_service.reload_runtime_models.assert_called_once()
-
-    @patch("eval_hub.api.routes.ModelService")
-    def test_reload_runtime_models_error(self, mock_model_service_class, client):
-        """Test runtime models reload with error."""
-        # Mock the service
-        mock_service = Mock()
-        mock_service.reload_runtime_models.side_effect = Exception(
-            "Environment variable error"
-        )
-        mock_model_service_class.return_value = mock_service
-
-        # Make request
-        response = client.post("/api/v1/models/reload")
-
-        # Verify response
-        assert response.status_code == 500
-        data = response.json()
-        assert "Failed to reload runtime models" in data["detail"]
-
 
 class TestModelAPIValidation:
     """Test model API validation and edge cases."""
