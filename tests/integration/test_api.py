@@ -387,8 +387,18 @@ class TestAPIEndpoints:
 
         assert response.status_code == 200
         data = response.json()
-        assert isinstance(data, list)
-        assert len(data) <= 10
+
+        # Verify pagination structure
+        assert isinstance(data, dict)
+        assert "items" in data
+        assert "limit" in data
+        assert "total_count" in data
+        assert "first" in data
+
+        # Verify pagination behavior
+        assert isinstance(data["items"], list)
+        assert len(data["items"]) <= 10
+        assert data["limit"] == 10
 
     def test_invalid_request_format(self, client):
         """Test handling of invalid JSON request."""
