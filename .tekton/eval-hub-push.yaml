@@ -23,9 +23,9 @@ spec:
   - name: revision
     value: '{{revision}}'
   - name: output-image
-    value: quay.io/opendatahub/eval-hub:latest
+    value: quay.io/opendatahub/odh-eval-hub:latest
   - name: dockerfile
-    value: containers/lighteval/Dockerfile
+    value: Containerfile
   - name: path-context
     value: .
   pipelineSpec:
