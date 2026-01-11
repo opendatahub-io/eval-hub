@@ -265,7 +265,9 @@ class EvaluationExecutor:
                     mlflow_client,
                     experiment_name,
                 )
-                results.append(result)
+                results.extend(
+                    self._expand_combined_lmeval_results(result, backend.benchmarks)
+                )
 
             except Exception as e:
                 self.logger.error(
@@ -275,19 +277,20 @@ class EvaluationExecutor:
                     error=str(e),
                 )
                 # Create error result for the combined execution
-                error_result = EvaluationResult(
-                    evaluation_id=evaluation.id,
-                    provider_id=backend.name,
-                    benchmark_id=f"collection-{'-'.join([b.name for b in backend.benchmarks])}",
-                    benchmark_name=f"collection-{'-'.join([b.name for b in backend.benchmarks])}",
-                    status=EvaluationStatus.FAILED,
-                    error_message=str(e),
-                    started_at=utcnow(),
-                    completed_at=utcnow(),
-                    duration_seconds=0.0,
-                    mlflow_run_id=None,
-                )
-                results.append(error_result)
+                for benchmark in backend.benchmarks:
+                    error_result = EvaluationResult(
+                        evaluation_id=evaluation.id,
+                        provider_id=backend.name,
+                        benchmark_id=benchmark.name,
+                        benchmark_name=benchmark.name,
+                        status=EvaluationStatus.FAILED,
+                        error_message=str(e),
+                        started_at=utcnow(),
+                        completed_at=utcnow(),
+                        duration_seconds=0.0,
+                        mlflow_run_id=None,
+                    )
+                    results.append(error_result)
         else:
             # Original behavior for non-LMEval backends - execute each benchmark individually
             for benchmark in backend.benchmarks:
@@ -325,6 +328,44 @@ class EvaluationExecutor:
                     results.append(error_result)
 
         return results
+
+    def _expand_combined_lmeval_results(
+        self, result: EvaluationResult, benchmarks: list[BenchmarkSpec]
+    ) -> list[EvaluationResult]:
+        if len(benchmarks) <= 1:
+            return [result]
+
+        metrics = result.metrics or {}
+        expanded_results = []
+
+        for benchmark in benchmarks:
+            benchmark_metrics: dict[str, Any] = {}
+            matched = False
+            for task in benchmark.tasks:
+                prefix = f"{task}_"
+                for metric_name, metric_value in metrics.items():
+                    if metric_name.startswith(prefix):
+                        matched = True
+                        stripped_name = metric_name[len(prefix) :]
+                        if stripped_name in benchmark_metrics:
+                            benchmark_metrics[metric_name] = metric_value
+                        else:
+                            benchmark_metrics[stripped_name] = metric_value
+
+            if not matched:
+                benchmark_metrics = metrics.copy()
+
+            expanded_results.append(
+                result.model_copy(
+                    update={
+                        "benchmark_id": benchmark.name,
+                        "benchmark_name": benchmark.name,
+                        "metrics": benchmark_metrics,
+                    }
+                )
+            )
+
+        return expanded_results
 
     async def _execute_benchmark(
         self,
@@ -683,187 +724,63 @@ class EvaluationExecutor:
     ) -> Any | None:
         """Check if a pending evaluation has completed and update its status.
 
+        This handles multi-benchmark evaluations by checking if all benchmarks have
+        completed based on the results counts.
+
         Args:
             evaluation_id: The evaluation ID to check
             current_response: Current EvaluationJobResource response
 
         Returns:
-            Updated response if job completed, None if still pending
+            Updated response if evaluation should be marked completed, None if still pending
         """
         try:
-            # Extract job information from current response artifacts
-            artifacts = (
-                getattr(current_response.result, "artifacts", {})
-                if current_response.result
-                else {}
-            )
-            job_name = artifacts.get("job_name")
-            namespace = artifacts.get("namespace")
-
-            if not job_name or not namespace:
-                # Can't check status without job info
+            # Skip if not pending
+            if current_response.status.state != "pending":
                 return None
 
-            # Create a temporary LMEval executor to check status
-            # Note: This is a bit of a hack, but we need to check the CR status somehow
-            from ..executors.lmeval import LMEvalExecutor
-
-            # Create minimal config for status checking
-            temp_config = {
-                "namespace": namespace,
-                "deploy_crs": True,
-                "model": "temp",  # Required but not used for status checking
-            }
-
-            # Create temporary executor just for status checking
-            temp_executor = LMEvalExecutor(temp_config)
-
-            # Check if CR has completed
-            cr_status = temp_executor.get_cr_status(job_name, namespace)
-            if not cr_status:
-                # CR not found or error - keep pending
+            # Check if we have results section with evaluation counts
+            if not hasattr(current_response, 'results') or not current_response.results:
                 return None
 
-            if (
-                cr_status.get("state") == "Complete"
-                and cr_status.get("reason") == "Succeeded"
-            ):
-                # Job completed successfully - fetch results
-                cr_results = temp_executor.get_cr_results(job_name, namespace)
-                if cr_results:
-                    # Parse results and create updated response
-                    # Extract metrics from results
-                    metrics: dict[str, float | int | str] = {}
-                    results_data = cr_results.get("results", {})
-                    for task_name, task_results in results_data.items():
-                        if isinstance(task_results, dict) and isinstance(
-                            task_name, str
-                        ):
-                            for metric_name, metric_value in task_results.items():
-                                if isinstance(
-                                    metric_value, (int, float)
-                                ) and isinstance(metric_name, str):
-                                    full_metric_name = (
-                                        f"{task_name}_{metric_name}"
-                                        if len(results_data) > 1
-                                        else metric_name
-                                    )
-                                    metrics[full_metric_name] = metric_value
+            results = current_response.results
+            total_evals = getattr(results, 'total_evaluations', 0)
+            completed_evals = getattr(results, 'completed_evaluations', 0)
+            failed_evals = getattr(results, 'failed_evaluations', 0)
 
-                    # Create updated response with completed status
-                    from ..models.evaluation import EvaluationResult, EvaluationStatus
-                    from ..utils import (
-                        parse_iso_datetime,
-                        safe_duration_seconds,
-                        utcnow,
-                    )
-
-                    # Parse completion time
-                    completed_at = utcnow()
-                    completed_time_str = cr_status.get("completeTime")
-                    if completed_time_str:
-                        try:
-                            completed_at = parse_iso_datetime(completed_time_str)
-                        except (ValueError, AttributeError):
-                            completed_at = utcnow()
-
-                    # Calculate duration
-                    started_at = (
-                        current_response.result.started_at
-                        if current_response.result
-                        else utcnow()
-                    )
-                    duration_seconds = safe_duration_seconds(completed_at, started_at)
-
-                    # Create updated result
-                    updated_result = EvaluationResult(
-                        evaluation_id=current_response.result.evaluation_id,
-                        provider_id=current_response.result.provider_id,
-                        benchmark_id=current_response.result.benchmark_id,
-                        benchmark_name=current_response.result.benchmark_name,
-                        status=EvaluationStatus.COMPLETED,
-                        metrics=metrics,
-                        artifacts={
-                            "job_name": job_name,
-                            "namespace": namespace,
-                            "cr_results": str(cr_results),
-                        },
-                        started_at=started_at,
-                        completed_at=completed_at,
-                        duration_seconds=duration_seconds,
-                        error_message=None,
-                        mlflow_run_id=current_response.result.mlflow_run_id,
-                    )
-
-                    # Create updated response
-                    from copy import deepcopy
-
-                    updated_response = deepcopy(current_response)
-                    updated_response.result = updated_result
-                    updated_response.status.state = "completed"
-                    updated_response.status.message = (
-                        "Evaluation completed successfully"
-                    )
-
-                    self.logger.info(
-                        "Updated evaluation status from pending to completed",
-                        evaluation_id=evaluation_id,
-                        job_name=job_name,
-                        namespace=namespace,
-                    )
-
-                    return updated_response
-
-            elif (
-                cr_status.get("state") == "Complete"
-                and cr_status.get("reason") != "Succeeded"
-            ):
-                # Job failed
-                error_message = cr_status.get("message", "Job failed")
-
+            # If all evaluations are done (completed + failed >= total), mark as completed
+            if total_evals > 0 and (completed_evals + failed_evals >= total_evals):
                 from copy import deepcopy
 
-                from ..models.evaluation import EvaluationResult, EvaluationStatus
-                from ..utils import safe_duration_seconds, utcnow
-
-                # Create failed result
-                started_at = (
-                    current_response.result.started_at
-                    if current_response.result
-                    else utcnow()
-                )
-                failed_result = EvaluationResult(
-                    evaluation_id=current_response.result.evaluation_id,
-                    provider_id=current_response.result.provider_id,
-                    benchmark_id=current_response.result.benchmark_id,
-                    benchmark_name=current_response.result.benchmark_name,
-                    status=EvaluationStatus.FAILED,
-                    metrics={},
-                    artifacts={"job_name": job_name, "namespace": namespace},
-                    started_at=started_at,
-                    completed_at=utcnow(),
-                    duration_seconds=safe_duration_seconds(utcnow(), started_at),
-                    error_message=error_message,
-                    mlflow_run_id=current_response.result.mlflow_run_id,
-                )
-
-                # Create updated response
                 updated_response = deepcopy(current_response)
-                updated_response.result = failed_result
-                updated_response.status.state = "failed"
-                updated_response.status.message = error_message
+
+                # Determine overall status
+                if failed_evals > 0:
+                    updated_response.status.state = "completed"
+                    updated_response.status.message = f"Evaluation completed with mixed results: {completed_evals} succeeded, {failed_evals} failed"
+                else:
+                    updated_response.status.state = "completed"
+                    updated_response.status.message = f"All {completed_evals} evaluations completed successfully"
+
+                # Update benchmark statuses to match
+                if hasattr(updated_response.status, 'benchmarks'):
+                    for benchmark_status in updated_response.status.benchmarks:
+                        if benchmark_status.state == "pending":
+                            # Mark remaining as completed (they should have results by now)
+                            benchmark_status.state = "completed"
+                            benchmark_status.message = "Evaluation completed"
 
                 self.logger.info(
-                    "Updated evaluation status from pending to failed",
+                    "Updated evaluation status from pending to completed",
                     evaluation_id=evaluation_id,
-                    job_name=job_name,
-                    namespace=namespace,
-                    error=error_message,
+                    total=total_evals,
+                    completed=completed_evals,
+                    failed=failed_evals
                 )
 
                 return updated_response
 
-            # Still running - return None (no update)
+            # Still have pending evaluations
             return None
 
         except Exception as e:
@@ -872,7 +789,6 @@ class EvaluationExecutor:
                 evaluation_id=evaluation_id,
                 error=str(e),
             )
-            # Don't update on error - keep current state
             return None
 
     async def cancel_evaluation(self, evaluation_id: UUID) -> bool:
