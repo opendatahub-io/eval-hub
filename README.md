@@ -87,7 +87,6 @@ flowchart TD
 1. **Clone and setup**:
    ```bash
    git clone <repository>
-   cd eval-hub/poc
    uv venv
    source .venv/bin/activate  # On Windows: .venv\\Scripts\\activate
    uv pip install -e ".[dev]"
