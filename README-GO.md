@@ -6,7 +6,8 @@ A Go API service built with net/http.
 
 ### Prerequisites
 
-- Go 1.21 or higher
+- Go 1.24 or higher
+- Podman (for container builds)
 
 ### Running the Service
 
@@ -109,6 +110,28 @@ Run the binary:
 ```bash
 ./bin/eval-hub
 ```
+
+### Container Build and Run
+
+Build the container image:
+```bash
+podman build -t eval-hub:latest \
+  --build-arg BUILD_NUMBER=0.0.1 \
+  --build-arg BUILD_DATE=$(date -u +'%Y-%m-%dT%H:%M:%SZ') \
+  -f Containerfile .
+```
+
+This builds the image with:
+- Go 1.24 toolchain (UBI9 base)
+- Build metadata (version 0.0.1 and timestamp)
+- Multi-stage build for minimal final image
+
+Run the container locally:
+```bash
+podman run -p 8080:8080 eval-hub:latest
+```
+
+The container will be available at `http://localhost:8080`.
 
 ### Makefile Targets
 
