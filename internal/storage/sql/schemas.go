@@ -1,4 +1,4 @@
-package schemas
+package sql
 
 const SQLITE_SCHEMA = `
 CREATE TABLE IF NOT EXISTS evaluations (

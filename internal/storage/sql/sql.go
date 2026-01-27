@@ -17,7 +17,6 @@ import (
 
 	"github.com/eval-hub/eval-hub/internal/abstractions"
 	"github.com/eval-hub/eval-hub/internal/executioncontext"
-	"github.com/eval-hub/eval-hub/internal/storage/sql/schemas"
 	"github.com/eval-hub/eval-hub/pkg/api"
 )
 
@@ -86,7 +85,7 @@ func (s *SQLStorage) exec(query string, args ...any) (sql.Result, error) {
 }
 
 func (s *SQLStorage) ensureSchema(driver string) error {
-	if _, err := s.exec(schemas.SchemaForDriver(driver)); err != nil {
+	if _, err := s.exec(SchemaForDriver(driver)); err != nil {
 		return err
 	}
 
