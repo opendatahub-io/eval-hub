@@ -1,6 +1,6 @@
 service:
   port: 8080
-  # These wull be elsewhere on a cluster and coherent with the pod spec
+  # These will be elsewhere on a cluster and coherent with the pod spec
   ready_file: "/tmp/repo-ready"
   termination_file: "/tmp/termination-log"
 # These are here so that the config can be loaded from the secrets directory when needed
