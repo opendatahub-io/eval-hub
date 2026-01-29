@@ -6,10 +6,19 @@ import (
 	"fmt"
 	"log/slog"
 	"os"
+	"path/filepath"
 	"strings"
+	"sync"
 
 	"github.com/eval-hub/eval-hub/pkg/api"
 	"github.com/spf13/viper"
+)
+
+var (
+	configLookup = []string{"config/providers", "./config/providers", "../../config/providers", "../../../config/providers"}
+
+	once        = sync.Once{}
+	isLocalMode = false
 )
 
 type EnvMap struct {
@@ -19,6 +28,15 @@ type EnvMap struct {
 type SecretMap struct {
 	Dir      string            `mapstructure:"dir,omitempty"`
 	Mappings map[string]string `mapstructure:"mappings,omitempty"`
+}
+
+func localMode() bool {
+	once.Do(func() {
+		localMode := flag.Bool("local", false, "Server operates in local mode or not.")
+		flag.Parse()
+		isLocalMode = *localMode
+	})
+	return isLocalMode
 }
 
 // readConfig locates and reads a configuration file using Viper. It searches for
@@ -58,7 +76,7 @@ func readConfig(logger *slog.Logger, name string, ext string, dirs ...string) (*
 
 func loadProvider(logger *slog.Logger, file string) (api.ProviderResource, error) {
 	providerConfig := api.ProviderResource{}
-	configValues, err := readConfig(logger, file, "yaml", "config/providers", "./config/providers", "../../config/providers")
+	configValues, err := readConfig(logger, file, "yaml", configLookup...)
 	if err != nil {
 		return providerConfig, err
 	}
@@ -70,20 +88,30 @@ func loadProvider(logger *slog.Logger, file string) (api.ProviderResource, error
 }
 
 func scanFolders(logger *slog.Logger, dirs ...string) ([]os.DirEntry, error) {
+	var dirsChecked []string
 	for _, dir := range dirs {
-		files, err := os.ReadDir(dir)
+		absDir, err := filepath.Abs(dir)
+		if err != nil {
+			logger.Error("Failed to get absolute path for provider config directory", "directory", dir, "error", err.Error())
+			continue
+		}
+		dirsChecked = append(dirsChecked, absDir)
+		files, err := os.ReadDir(absDir)
 		if err != nil {
 			continue
 		}
 		return files, nil
 	}
-	logger.Warn("No providers found", "directories", dirs)
+	logger.Warn("No providers found", "directories", dirsChecked)
 	return []os.DirEntry{}, nil
 }
 
-func LoadProviderConfigs(logger *slog.Logger) (map[string]api.ProviderResource, error) {
+func LoadProviderConfigs(logger *slog.Logger, dirs ...string) (map[string]api.ProviderResource, error) {
+	if len(dirs) == 0 {
+		dirs = configLookup
+	}
 	providerConfigs := make(map[string]api.ProviderResource)
-	files, err := scanFolders(logger, "config/providers", "./config/providers", "../../config/providers")
+	files, err := scanFolders(logger, dirs...)
 	if err != nil {
 		return providerConfigs, err
 	}
@@ -142,8 +170,11 @@ func LoadProviderConfigs(logger *slog.Logger) (map[string]api.ProviderResource, 
 // Returns:
 //   - *Config: The loaded configuration with all sources applied
 //   - error: An error if configuration cannot be loaded or is invalid
-func LoadConfig(logger *slog.Logger, version string, build string, buildDate string) (*Config, error) {
-	configValues, err := readConfig(logger, "config", "yaml", "config", "./config", "../../config")
+func LoadConfig(logger *slog.Logger, version string, build string, buildDate string, dirs ...string) (*Config, error) {
+	if len(dirs) == 0 {
+		dirs = []string{"config", "./config", "../../config"}
+	}
+	configValues, err := readConfig(logger, "config", "yaml", dirs...)
 	if err != nil {
 		return nil, err
 	}
@@ -185,9 +216,6 @@ func LoadConfig(logger *slog.Logger, version string, build string, buildDate str
 		logger.Info("Mapped environment variable", "field_name", field, "env_name", envName)
 	}
 
-	localMode := flag.Bool("local", false, "Server operates in local mode or not.")
-	flag.Parse()
-
 	conf := Config{}
 	if err := configValues.Unmarshal(&conf); err != nil {
 		return nil, err
@@ -197,7 +225,7 @@ func LoadConfig(logger *slog.Logger, version string, build string, buildDate str
 	conf.Service.Version = version
 	conf.Service.Build = build
 	conf.Service.BuildDate = buildDate
-	conf.Service.LocalMode = *localMode
+	conf.Service.LocalMode = localMode()
 	return &conf, nil
 }
 
