@@ -10,7 +10,6 @@ import (
 )
 
 func NewRuntime(logger *slog.Logger, serviceConfig *config.Config) (abstractions.Runtime, error) {
-
 	var runtime abstractions.Runtime
 	var err error
 
