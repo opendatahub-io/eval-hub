@@ -10,14 +10,17 @@ import (
 )
 
 func NewRuntime(logger *slog.Logger, serviceConfig *config.Config) (abstractions.Runtime, error) {
-
 	var runtime abstractions.Runtime
 	var err error
 
 	if serviceConfig.Service.LocalMode {
 		runtime, err = local.NewLocalRuntime(logger)
 	} else {
-		runtime, err = k8s.NewK8sRuntime(logger)
+		helper, err := k8s.NewKubernetesHelper()
+		if err != nil {
+			return nil, err
+		}
+		runtime, err = k8s.NewK8sRuntime(logger, helper)
 	}
 
 	return runtime, err
