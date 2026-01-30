@@ -1,12 +1,16 @@
 package handlers
 
 import (
-	"encoding/json"
-	"net/http"
+	"errors"
+	"fmt"
+	"strconv"
 	"strings"
 
 	"github.com/eval-hub/eval-hub/internal/executioncontext"
+	"github.com/eval-hub/eval-hub/internal/http_wrappers"
+	"github.com/eval-hub/eval-hub/internal/logging"
 	"github.com/eval-hub/eval-hub/internal/serialization"
+	"github.com/eval-hub/eval-hub/internal/serviceerrors"
 	"github.com/eval-hub/eval-hub/pkg/api"
 )
 
@@ -23,212 +27,191 @@ type BenchmarkSpec struct {
 	Config      map[string]interface{} `json:"config,omitempty"`
 }
 
-// HandleCreateEvaluation handles POST /api/v1/evaluations/jobs
-func (h *Handlers) HandleCreateEvaluation(ctx *executioncontext.ExecutionContext, w http.ResponseWriter) {
-	if !h.checkMethod(ctx, http.MethodPost, w) {
+func getEvaluationJobID(ctx *executioncontext.ExecutionContext) string {
+	if _, after, found := strings.Cut(ctx.Request.URI(), "/api/v1/evaluations/jobs/"); found {
+		if after != "" {
+			if id, _, found := strings.Cut(after, "/"); found {
+				return id
+			}
+			if id, _, found := strings.Cut(after, "?"); found {
+				return id
+			}
+			return after
+		}
+	}
+	return ""
+}
+
+func getParam[T string | int | bool](ctx *executioncontext.ExecutionContext, name string, optional bool, defaultValue T) (T, error) {
+	values := ctx.Request.Query(name)
+	if (len(values) == 0) || (values[0] == "") {
+		if !optional {
+			return defaultValue, fmt.Errorf("parameter '%s' is required", name)
+		}
+		return defaultValue, nil
+	}
+	switch any(defaultValue).(type) {
+	case string:
+		return any(values[0]).(T), nil
+	case int:
+		v, err := strconv.Atoi(values[0])
+		if err != nil {
+			return defaultValue, err
+		}
+		return any(v).(T), nil
+	case bool:
+		v, err := strconv.ParseBool(values[0])
+		if err != nil {
+			return defaultValue, err
+		}
+		return any(v).(T), nil
+	default:
+		// we should never get here
+		return defaultValue, fmt.Errorf("unsupported type %T", defaultValue)
+	}
+}
+
+func handleError(ctx *executioncontext.ExecutionContext, w http_wrappers.ResponseWrapper, err error, code int) {
+	var se = new(serviceerrors.StorageError)
+	if errors.As(err, &se) {
+		w.Error(se.Message, se.Code, ctx.RequestID)
 		return
 	}
+	w.Error(err.Error(), code, ctx.RequestID)
+}
+
+// HandleCreateEvaluation handles POST /api/v1/evaluations/jobs
+func (h *Handlers) HandleCreateEvaluation(ctx *executioncontext.ExecutionContext, w http_wrappers.ResponseWrapper) {
+	logging.LogRequestStarted(ctx)
+
 	// get the body bytes from the context
-	bodyBytes, err := ctx.GetBodyAsBytes()
+	bodyBytes, err := ctx.Request.BodyAsBytes()
 	if err != nil {
-		http.Error(w, err.Error(), http.StatusInternalServerError)
+		handleError(ctx, w, err, 500)
 		return
 	}
 	evaluation := &api.EvaluationJobConfig{}
 	err = serialization.Unmarshal(h.validate, ctx, bodyBytes, evaluation)
 	if err != nil {
-		h.serializationError(ctx, w, err, http.StatusBadRequest)
+		handleError(ctx, w, err, 400)
 		return
 	}
 
 	response, err := h.storage.CreateEvaluationJob(ctx, evaluation)
 	if err != nil {
-		h.errorResponse(ctx, w, err.Error(), http.StatusInternalServerError)
+		handleError(ctx, w, err, 500)
 		return
 	}
 
-	h.successResponse(ctx, w, response, http.StatusAccepted)
+	w.WriteJSON(response, 202)
 }
 
 // HandleListEvaluations handles GET /api/v1/evaluations/jobs
-func (h *Handlers) HandleListEvaluations(ctx *executioncontext.ExecutionContext, w http.ResponseWriter) {
-	if !h.checkMethod(ctx, http.MethodGet, w) {
+func (h *Handlers) HandleListEvaluations(ctx *executioncontext.ExecutionContext, w http_wrappers.ResponseWrapper) {
+	logging.LogRequestStarted(ctx)
+
+	limit, err := getParam(ctx, "limit", true, 50)
+	if err != nil {
+		w.Error(fmt.Errorf("failed to get limit query parameter as an integer: %w", err).Error(), 400, ctx.RequestID)
+		return
+	}
+	offset, err := getParam(ctx, "offset", true, 0)
+	if err != nil {
+		w.Error(fmt.Errorf("failed to get offset query parameter as an integer: %w", err).Error(), 400, ctx.RequestID)
+		return
+	}
+	statusFilter, err := getParam(ctx, "status_filter", true, "")
+	if err != nil {
+		w.Error(fmt.Errorf("failed to get status_filter query parameter: %w", err).Error(), 400, ctx.RequestID)
+		return
+	}
+	response, err := h.storage.GetEvaluationJobs(ctx, limit, offset, statusFilter)
+	if err != nil {
+		handleError(ctx, w, err, 500)
 		return
 	}
 
-	w.Header().Set("Content-Type", "application/json")
-	json.NewEncoder(w).Encode(map[string]interface{}{
-		"items":       []interface{}{},
-		"total_count": 0,
-		"limit":       50,
-		"first":       map[string]string{"href": ""},
-		"next":        nil,
-	})
+	// set the first href to the current request URL
+	response.Page.First = &api.HRef{Href: ctx.Request.URI()} // ctx.Request.URI() is the full request URL which should include the query parameters
+
+	w.WriteJSON(response, 200)
 }
 
 // HandleGetEvaluation handles GET /api/v1/evaluations/jobs/{id}
-func (h *Handlers) HandleGetEvaluation(ctx *executioncontext.ExecutionContext, w http.ResponseWriter) {
-	if !h.checkMethod(ctx, http.MethodGet, w) {
+func (h *Handlers) HandleGetEvaluation(ctx *executioncontext.ExecutionContext, w http_wrappers.ResponseWrapper) {
+	logging.LogRequestStarted(ctx)
+
+	// Extract ID from path
+	evaluationJobID := getEvaluationJobID(ctx)
+	if evaluationJobID == "" {
+		handleError(ctx, w, fmt.Errorf("no evaluation job ID found in path"), 400)
 		return
 	}
 
-	// Extract ID from path
-	pathParts := strings.Split(ctx.URI, "/")
-	id := pathParts[len(pathParts)-1]
+	response, err := h.storage.GetEvaluationJob(ctx, evaluationJobID)
+	if err != nil {
+		handleError(ctx, w, err, 500)
+		return
+	}
 
-	w.Header().Set("Content-Type", "application/json")
-	json.NewEncoder(w).Encode(map[string]interface{}{
-		"message": "Evaluation retrieval not yet implemented",
-		"id":      id,
-	})
+	w.WriteJSON(response, 200)
+}
+
+func (h *Handlers) HandleUpdateEvaluation(ctx *executioncontext.ExecutionContext, w http_wrappers.ResponseWrapper) {
+	logging.LogRequestStarted(ctx)
+
+	// Extract ID from path
+	evaluationJobID := getEvaluationJobID(ctx)
+	if evaluationJobID == "" {
+		handleError(ctx, w, fmt.Errorf("no evaluation job ID found in path"), 400)
+		return
+	}
+
+	// get the body bytes from the context
+	bodyBytes, err := ctx.Request.BodyAsBytes()
+	if err != nil {
+		handleError(ctx, w, err, 500)
+		return
+	}
+	status := &api.EvaluationJobStatus{}
+	err = serialization.Unmarshal(h.validate, ctx, bodyBytes, status)
+	if err != nil {
+		handleError(ctx, w, err, 400)
+		return
+	}
+
+	err = h.storage.UpdateEvaluationJobStatus(ctx, evaluationJobID, status)
+	if err != nil {
+		handleError(ctx, w, err, 500)
+		return
+	}
+
+	w.WriteJSON(nil, 204)
 }
 
 // HandleCancelEvaluation handles DELETE /api/v1/evaluations/jobs/{id}
-func (h *Handlers) HandleCancelEvaluation(ctx *executioncontext.ExecutionContext, w http.ResponseWriter) {
-	if !h.checkMethod(ctx, http.MethodDelete, w) {
+func (h *Handlers) HandleCancelEvaluation(ctx *executioncontext.ExecutionContext, w http_wrappers.ResponseWrapper) {
+	logging.LogRequestStarted(ctx)
+
+	// Extract ID from path
+	evaluationJobID := getEvaluationJobID(ctx)
+	if evaluationJobID == "" {
+		handleError(ctx, w, fmt.Errorf("no evaluation job ID found in path"), 400)
 		return
 	}
 
-	w.Header().Set("Content-Type", "application/json")
-	w.WriteHeader(http.StatusOK)
-	json.NewEncoder(w).Encode(map[string]interface{}{
-		"message": "Evaluation cancellation not yet implemented",
-	})
-}
-
-// HandleGetEvaluationSummary handles GET /api/v1/evaluations/jobs/{id}/summary
-func (h *Handlers) HandleGetEvaluationSummary(ctx *executioncontext.ExecutionContext, w http.ResponseWriter) {
-	if !h.checkMethod(ctx, http.MethodGet, w) {
+	hardDelete, err := getParam(ctx, "hard_delete", true, false)
+	if err != nil {
+		rerr := fmt.Errorf("failed to get hard_delete query parameter: %w", err)
+		handleError(ctx, w, rerr, 400)
 		return
 	}
 
-	w.Header().Set("Content-Type", "application/json")
-	json.NewEncoder(w).Encode(map[string]interface{}{
-		"message": "Evaluation summary not yet implemented",
-	})
-}
-
-// HandleListBenchmarks handles GET /api/v1/evaluations/benchmarks
-func (h *Handlers) HandleListBenchmarks(ctx *executioncontext.ExecutionContext, w http.ResponseWriter) {
-	if !h.checkMethod(ctx, http.MethodGet, w) {
+	err = h.storage.DeleteEvaluationJob(ctx, evaluationJobID, hardDelete)
+	if err != nil {
+		ctx.Logger.Info("Failed to delete evaluation job", "error", err.Error(), "id", evaluationJobID, "hardDelete", hardDelete)
+		handleError(ctx, w, err, 500)
 		return
 	}
-
-	w.Header().Set("Content-Type", "application/json")
-	json.NewEncoder(w).Encode(map[string]interface{}{
-		"benchmarks":         []interface{}{},
-		"total_count":        0,
-		"providers_included": []string{},
-	})
-}
-
-// HandleListCollections handles GET /api/v1/evaluations/collections
-func (h *Handlers) HandleListCollections(ctx *executioncontext.ExecutionContext, w http.ResponseWriter) {
-	if !h.checkMethod(ctx, http.MethodGet, w) {
-		return
-	}
-
-	w.Header().Set("Content-Type", "application/json")
-	json.NewEncoder(w).Encode(map[string]interface{}{
-		"collections":       []interface{}{},
-		"total_collections": 0,
-	})
-}
-
-// HandleCreateCollection handles POST /api/v1/evaluations/collections
-func (h *Handlers) HandleCreateCollection(ctx *executioncontext.ExecutionContext, w http.ResponseWriter) {
-	if !h.checkMethod(ctx, http.MethodPost, w) {
-		return
-	}
-
-	w.Header().Set("Content-Type", "application/json")
-	w.WriteHeader(http.StatusCreated)
-	json.NewEncoder(w).Encode(map[string]interface{}{
-		"message": "Collection creation not yet implemented",
-	})
-}
-
-// HandleGetCollection handles GET /api/v1/evaluations/collections/{collection_id}
-func (h *Handlers) HandleGetCollection(ctx *executioncontext.ExecutionContext, w http.ResponseWriter) {
-	if !h.checkMethod(ctx, http.MethodGet, w) {
-		return
-	}
-
-	// Extract collection_id from path
-	pathParts := strings.Split(ctx.URI, "/")
-	collectionID := pathParts[len(pathParts)-1]
-
-	w.Header().Set("Content-Type", "application/json")
-	json.NewEncoder(w).Encode(map[string]interface{}{
-		"message":       "Collection retrieval not yet implemented",
-		"collection_id": collectionID,
-	})
-}
-
-// HandleUpdateCollection handles PUT /api/v1/evaluations/collections/{collection_id}
-func (h *Handlers) HandleUpdateCollection(ctx *executioncontext.ExecutionContext, w http.ResponseWriter) {
-	if !h.checkMethod(ctx, http.MethodPut, w) {
-		return
-	}
-
-	w.Header().Set("Content-Type", "application/json")
-	json.NewEncoder(w).Encode(map[string]interface{}{
-		"message": "Collection update not yet implemented",
-	})
-}
-
-// HandlePatchCollection handles PATCH /api/v1/evaluations/collections/{collection_id}
-func (h *Handlers) HandlePatchCollection(ctx *executioncontext.ExecutionContext, w http.ResponseWriter) {
-	if !h.checkMethod(ctx, http.MethodPatch, w) {
-		return
-	}
-
-	w.Header().Set("Content-Type", "application/json")
-	json.NewEncoder(w).Encode(map[string]interface{}{
-		"message": "Collection patch not yet implemented",
-	})
-}
-
-// HandleDeleteCollection handles DELETE /api/v1/evaluations/collections/{collection_id}
-func (h *Handlers) HandleDeleteCollection(ctx *executioncontext.ExecutionContext, w http.ResponseWriter) {
-	if !h.checkMethod(ctx, http.MethodDelete, w) {
-		return
-	}
-
-	w.Header().Set("Content-Type", "application/json")
-	w.WriteHeader(http.StatusOK)
-	json.NewEncoder(w).Encode(map[string]interface{}{
-		"message": "Collection deletion not yet implemented",
-	})
-}
-
-// HandleListProviders handles GET /api/v1/evaluations/providers
-func (h *Handlers) HandleListProviders(ctx *executioncontext.ExecutionContext, w http.ResponseWriter) {
-	if !h.checkMethod(ctx, http.MethodGet, w) {
-		return
-	}
-
-	w.Header().Set("Content-Type", "application/json")
-	json.NewEncoder(w).Encode(map[string]interface{}{
-		"providers":        []interface{}{},
-		"total_providers":  0,
-		"total_benchmarks": 0,
-	})
-}
-
-// HandleGetProvider handles GET /api/v1/evaluations/providers/{provider_id}
-func (h *Handlers) HandleGetProvider(ctx *executioncontext.ExecutionContext, w http.ResponseWriter) {
-	if !h.checkMethod(ctx, http.MethodGet, w) {
-		return
-	}
-
-	// Extract provider_id from path
-	pathParts := strings.Split(ctx.URI, "/")
-	providerID := pathParts[len(pathParts)-1]
-
-	w.Header().Set("Content-Type", "application/json")
-	json.NewEncoder(w).Encode(map[string]interface{}{
-		"message":     "Provider retrieval not yet implemented",
-		"provider_id": providerID,
-	})
+	w.WriteJSON(nil, 204)
 }

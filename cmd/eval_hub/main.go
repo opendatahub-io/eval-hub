@@ -6,6 +6,7 @@ import (
 	"log"
 	"log/slog"
 	"net/http"
+
 	"os"
 	"os/signal"
 	"syscall"
@@ -14,6 +15,7 @@ import (
 	"github.com/eval-hub/eval-hub/cmd/eval_hub/server"
 	"github.com/eval-hub/eval-hub/internal/config"
 	"github.com/eval-hub/eval-hub/internal/logging"
+	"github.com/eval-hub/eval-hub/internal/runtimes"
 	"github.com/eval-hub/eval-hub/internal/storage"
 	"github.com/eval-hub/eval-hub/internal/validation"
 )
@@ -28,9 +30,6 @@ var (
 )
 
 func main() {
-	// TODO write fatal errors to the error file and close down the server
-
-	// Create logger once for all requests
 	logger, logShutdown, err := logging.NewLogger()
 	if err != nil {
 		// we do this as no point trying to continue
@@ -59,7 +58,23 @@ func main() {
 	}
 	// serviceConfig.Storage = storage
 
-	srv, err := server.NewServer(logger, serviceConfig, storage, validate)
+	// set up the provider configs
+	providerConfigs, err := config.LoadProviderConfigs(logger)
+	if err != nil {
+		// we do this as no point trying to continue
+		startUpFailed(serviceConfig, err, "Failed to create provider configs", logger)
+	}
+
+	// setup runtime
+	runtime, err := runtimes.NewRuntime(logger, serviceConfig, providerConfigs)
+	if err != nil {
+		// we do this as no point trying to continue
+		startUpFailed(serviceConfig, err, "Failed to create runtime", logger)
+	}
+
+	logger.Info("Runtime created", "runtime", runtime.Name())
+
+	srv, err := server.NewServer(logger, serviceConfig, providerConfigs, storage, validate, runtime)
 	if err != nil {
 		// we do this as no point trying to continue
 		startUpFailed(serviceConfig, err, "Failed to create server", logger)
@@ -73,12 +88,17 @@ func main() {
 		"build_date", serviceConfig.Service.BuildDate,
 		"storage", storage.GetDatasourceName(),
 		"validator", validate != nil,
+		"local", serviceConfig.Service.LocalMode,
 	)
 
 	// Start server in a goroutine
 	go func() {
-		if err := srv.Start(); err != nil && err != http.ErrServerClosed {
+		if err := srv.Start(); err != nil {
 			// we do this as no point trying to continue
+			if err == http.ErrServerClosed {
+				logger.Info("Server closed gracefully")
+				return
+			}
 			startUpFailed(serviceConfig, err, "Server failed to start", logger)
 		}
 	}()

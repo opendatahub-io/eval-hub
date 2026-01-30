@@ -28,7 +28,8 @@ func NewLogger() (*slog.Logger, ShutdownFunc, error) {
 		return nil, nil, err
 	}
 	f := newShutdownFunc(zapLog.Core())
-	return slog.New(zapslog.NewHandler(zapLog.Core())), f, nil
+	// we want the caller in our logs for debugging purposes, for now this is always set to true
+	return slog.New(zapslog.NewHandler(zapLog.Core(), zapslog.WithCaller(true))), f, nil
 }
 
 func FallbackLogger() *slog.Logger {
@@ -39,6 +40,11 @@ func newShutdownFunc(core zapcore.Core) ShutdownFunc {
 	return func() error {
 		return core.Sync()
 	}
+}
+
+func LogRequestStarted(ctx *executioncontext.ExecutionContext) {
+	// log the successful request, the request details and requestId have already been added to the logger
+	ctx.Logger.Info("Request started")
 }
 
 func LogRequestFailed(ctx *executioncontext.ExecutionContext, code int, errorMessage string) {

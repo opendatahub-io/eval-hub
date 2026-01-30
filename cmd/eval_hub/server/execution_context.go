@@ -2,10 +2,13 @@ package server
 
 import (
 	"context"
+	"encoding/json"
+	"io"
 	"net/http"
-	"time"
 
 	"github.com/eval-hub/eval-hub/internal/executioncontext"
+	"github.com/eval-hub/eval-hub/internal/logging"
+	"github.com/eval-hub/eval-hub/pkg/api"
 )
 
 // newExecutionContext creates a new ExecutionContext with default values. This function
@@ -31,29 +34,102 @@ func (s *Server) newExecutionContext(r *http.Request) *executioncontext.Executio
 	// Enhance logger with request-specific fields
 	requestID, enhancedLogger := s.loggerWithRequest(r)
 
-	scheme := "http"
-	if r.TLS != nil {
-		scheme = "https"
-	}
-	baseURL := scheme + "://" + r.Host
-
 	return executioncontext.NewExecutionContext(
 		context.Background(),
 		requestID,
 		enhancedLogger,
-		r.Method,
-		r.URL.Path,
-		baseURL,
-		r.URL.RawQuery,
-		r.Header,
-		r.Body,
-		"",
-		"",
-		"",
-		time.Minute*60,
 		3,
-		make(map[string]interface{}),
 		nil,
-		"",
+		s.providerConfigs,
+		&ReqWrapper{Request: r},
 	)
+}
+
+// Abstract request objects to not depende on the underlying http framework.
+type ReqWrapper struct {
+	Request *http.Request
+}
+
+func (r *ReqWrapper) Method() string {
+	return r.Request.Method
+}
+
+func (r *ReqWrapper) URI() string {
+	return r.Request.URL.String()
+}
+
+func (r *ReqWrapper) Path() string {
+	return r.Request.URL.Path
+}
+
+func (r *ReqWrapper) Query(key string) []string {
+	return r.Request.URL.Query()[key]
+}
+
+func (r *ReqWrapper) Header(key string) string {
+	return r.Request.Header.Get(key)
+}
+
+func (r *ReqWrapper) BodyAsBytes() ([]byte, error) {
+	bodyBytes, err := io.ReadAll(r.Request.Body)
+	if err != nil {
+		return nil, err
+	}
+
+	return bodyBytes, nil
+}
+
+func (r *ReqWrapper) SetHeader(key string, value string) {
+	r.Request.Header.Set(key, value)
+}
+
+type RespWrapper struct {
+	Response http.ResponseWriter
+	ctx      *executioncontext.ExecutionContext
+}
+
+func NewRespWrapper(response http.ResponseWriter, ctx *executioncontext.ExecutionContext) RespWrapper {
+	return RespWrapper{
+		Response: response,
+		ctx:      ctx,
+	}
+}
+
+func (r RespWrapper) SetHeader(key string, value string) {
+	r.Response.Header().Set(key, value)
+}
+
+func (r RespWrapper) DeleteHeader(key string) {
+	r.Response.Header().Del(key)
+}
+
+func (r RespWrapper) Write(buf []byte) (int, error) {
+	return r.Response.Write(buf)
+}
+
+func (r RespWrapper) WriteJSON(v any, code int) {
+	r.SetHeader("Content-Type", "application/json")
+	r.SetStatusCode(code)
+
+	if v != nil {
+		err := json.NewEncoder(r.Response).Encode(v)
+		if err != nil {
+			logging.LogRequestFailed(r.ctx, code, err.Error())
+			return
+		}
+	}
+	logging.LogRequestSuccess(r.ctx, code, v)
+}
+
+func (r RespWrapper) SetStatusCode(code int) {
+	r.Response.WriteHeader(code)
+}
+
+func (r RespWrapper) Error(errorMessage string, code int, requestId string) {
+	r.DeleteHeader("Content-Length")
+
+	r.SetHeader("X-Content-Type-Options", "nosniff")
+	r.WriteJSON(api.Error{Message: errorMessage, Code: code, Trace: requestId}, code)
+
+	logging.LogRequestFailed(r.ctx, code, errorMessage)
 }

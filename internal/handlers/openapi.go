@@ -1,41 +1,45 @@
 package handlers
 
 import (
-	"net/http"
 	"os"
 	"path/filepath"
 	"strings"
 
 	"github.com/eval-hub/eval-hub/internal/executioncontext"
+	"github.com/eval-hub/eval-hub/internal/http_wrappers"
 )
 
-func (h *Handlers) HandleOpenAPI(ctx *executioncontext.ExecutionContext, w http.ResponseWriter) {
-	if ctx.Method != http.MethodGet {
-		http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
-		return
-	}
+func (h *Handlers) HandleOpenAPI(ctx *executioncontext.ExecutionContext, w http_wrappers.ResponseWrapper) {
 
 	// Determine content type based on Accept header
-	accept := ctx.GetHeader("Accept")
+	accept := ctx.Request.Header("Accept")
 	contentType := "application/yaml"
 	if strings.Contains(accept, "application/json") {
 		contentType = "application/json"
 	}
 
-	w.Header().Set("Content-Type", contentType)
+	w.SetHeader("Content-Type", contentType)
 
 	// Find the OpenAPI spec file relative to the working directory
 	// Try multiple possible locations
 	possiblePaths := []string{
-		"api/openapi.yaml",
-		"../../api/openapi.yaml",
-		filepath.Join("api", "openapi.yaml"),
+		filepath.Join("docs", "openapi.yaml"),
+		filepath.Join("..", "docs", "openapi.yaml"),
+		filepath.Join("..", "..", "docs", "openapi.yaml"),
+		filepath.Join("..", "..", "..", "docs", "openapi.yaml"),
 	}
 
+	var paths []string
 	var spec []byte
 	var err error
 	for _, path := range possiblePaths {
-		spec, err = os.ReadFile(path)
+		absPath, aerr := filepath.Abs(path)
+		if aerr != nil {
+			ctx.Logger.Error("Failed to get absolute path for OpenAPI spec", "path", path, "error", aerr.Error())
+			continue
+		}
+		paths = append(paths, absPath)
+		spec, err = os.ReadFile(absPath)
 		if err == nil {
 			break
 		}
@@ -46,27 +50,25 @@ func (h *Handlers) HandleOpenAPI(ctx *executioncontext.ExecutionContext, w http.
 		exePath, _ := os.Executable()
 		if exePath != "" {
 			exeDir := filepath.Dir(exePath)
-			specPath := filepath.Join(exeDir, "api", "openapi.yaml")
+			specPath := filepath.Join(exeDir, "docs", "openapi.yaml")
+			paths = append(paths, specPath)
 			spec, err = os.ReadFile(specPath)
 		}
 	}
 
 	if err != nil {
-		http.Error(w, "Failed to read OpenAPI spec: "+err.Error(), http.StatusInternalServerError)
+		ctx.Logger.Error("Failed to read OpenAPI spec", "paths", paths, "error", err.Error())
+		w.Error("Failed to read OpenAPI spec", 500, ctx.RequestID)
 		return
 	}
 
 	w.Write(spec)
 }
 
-func (h *Handlers) HandleDocs(ctx *executioncontext.ExecutionContext, w http.ResponseWriter) {
-	if ctx.Method != http.MethodGet {
-		http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
-		return
-	}
+func (h *Handlers) HandleDocs(ctx *executioncontext.ExecutionContext, w http_wrappers.ResponseWrapper) {
 
 	// Get the base URL for the OpenAPI spec
-	baseURL := ctx.BaseURL
+	baseURL := ctx.Request.URI()
 
 	html := `<!DOCTYPE html>
 <html>
@@ -112,6 +114,6 @@ func (h *Handlers) HandleDocs(ctx *executioncontext.ExecutionContext, w http.Res
 </body>
 </html>`
 
-	w.Header().Set("Content-Type", "text/html; charset=utf-8")
+	w.SetHeader("Content-Type", "text/html; charset=utf-8")
 	w.Write([]byte(html))
 }

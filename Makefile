@@ -1,4 +1,4 @@
-.PHONY: help autoupdate-precommit pre-commit clean build start-service stop-service lint test fmt vet update-deps
+.PHONY: help autoupdate-precommit pre-commit clean build start-service stop-service lint test test-fvt-server test-all test-coverage test-fvt-coverage test-all-coverage install-deps update-deps get-deps fmt vet update-deps
 
 # Variables
 BINARY_NAME = eval-hub
@@ -33,7 +33,6 @@ clean: ## Remove build artifacts
 	@echo "Cleaning..."
 	@rm -rf $(BIN_DIR)
 	@rm -f $(BINARY_NAME)
-	@rm -f coverage.out coverage.html
 	@go clean ${CLEAN_OPTS}
 	@echo "Clean complete"
 
@@ -57,7 +56,6 @@ SERVICE_LOG ?= $(BIN_DIR)/service.log
 
 start-service: ${SERVER_PID_FILE} build ## Run the application in background
 	@echo "Running $(BINARY_NAME) on port $(PORT)..."
-	# @PORT=$(PORT) go run -ldflags "${LDFLAGS}" $(CMD_PATH)/main.go > ${SERVICE_LOG}
 	@./scripts/start_server.sh "${SERVER_PID_FILE}" "${BIN_DIR}/$(BINARY_NAME)" "${SERVICE_LOG}" ${PORT} ""
 
 stop-service:
@@ -88,17 +86,22 @@ test-fvt: ## Run FVT (Functional Verification Tests) using godog
 
 test-all: test test-fvt ## Run all tests (unit + FVT)
 
+SERVER_URL ?= http://localhost:8080
+
+test-fvt-server: start-service ## Run FVT tests using godog against a running server
+	@SERVER_URL="${SERVER_URL}" make test-fvt; status=$$?; make stop-service; exit $$status
+
 test-coverage: ## Run unit tests with coverage
 	@echo "Running unit tests with coverage..."
 	@mkdir -p $(BIN_DIR)
-	@go test -v -coverprofile=$(BIN_DIR)/coverage.out ./internal/...
+	@go test -v -race -coverprofile=$(BIN_DIR)/coverage.out -covermode=atomic ./internal/... ./cmd/...
 	@go tool cover -html=$(BIN_DIR)/coverage.out -o $(BIN_DIR)/coverage.html
 	@echo "Coverage report generated: $(BIN_DIR)/coverage.html"
 
 test-fvt-coverage: ## Run integration (FVT) tests with coverage
 	@echo "Running integration (FVT) tests with coverage..."
 	@mkdir -p $(BIN_DIR)
-	@go test -v -coverprofile=$(BIN_DIR)/coverage-fvt.out ./tests/features/...
+	@go test -v -race -coverprofile=$(BIN_DIR)/coverage-fvt.out -covermode=atomic ./tests/features/...
 	@go tool cover -html=$(BIN_DIR)/coverage-fvt.out -o $(BIN_DIR)/coverage-fvt.html
 	@echo "Coverage report generated: $(BIN_DIR)/coverage-fvt.html"
 
@@ -164,3 +167,30 @@ grant-permissions:
 .PHONY: cls
 cls:
 	printf "\33c\e[3J"
+
+## Targets for the API documentation
+
+.PHONY: generate-public-docs verify-api-docs generate-ignore-file
+
+REDOCLY_CLI ?= ${PWD}/node_modules/.bin/redocly
+
+${REDOCLY_CLI}:
+	npm i @redocly/cli@latest
+
+clean-docs:
+	rm -f docs/openapi.yaml docs/openapi.json docs/openapi-internal.yaml docs/openapi-internal.json docs/*.html
+
+generate-public-docs: ${REDOCLY_CLI}
+	cd docs && ${REDOCLY_CLI} bundle external@latest --output openapi.yaml --remove-unused-components
+	cd docs && ${REDOCLY_CLI} bundle external@latest --ext json --output openapi.json
+	cd docs && ${REDOCLY_CLI} bundle internal@latest --output openapi-internal.yaml --remove-unused-components
+	cd docs && ${REDOCLY_CLI} bundle internal@latest --ext json --output openapi-internal.json
+	cd docs && ${REDOCLY_CLI} build-docs openapi.json --output=index-public.html
+	cd docs && ${REDOCLY_CLI} build-docs openapi-internal.json --output=index.html
+
+verify-api-docs: ${REDOCLY_CLI}
+	${REDOCLY_CLI} lint ./docs/openapi.yaml
+	echo "See https://editor.swagger.io/?url=https://raw.githubusercontent.com/julpayne/eval-hub/refs/heads/api-updates/docs/openapi.yaml"
+
+generate-ignore-file: ${REDOCLY_CLI}
+	${REDOCLY_CLI} lint --generate-ignore-file ./docs/openapi.yaml

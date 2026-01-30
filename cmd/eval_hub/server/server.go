@@ -12,6 +12,7 @@ import (
 	"github.com/eval-hub/eval-hub/internal/config"
 	"github.com/eval-hub/eval-hub/internal/constants"
 	"github.com/eval-hub/eval-hub/internal/handlers"
+	"github.com/eval-hub/eval-hub/pkg/api"
 	"github.com/go-playground/validator/v10"
 
 	"github.com/google/uuid"
@@ -19,12 +20,14 @@ import (
 )
 
 type Server struct {
-	httpServer    *http.Server
-	port          int
-	logger        *slog.Logger
-	serviceConfig *config.Config
-	storage       abstractions.Storage
-	validate      *validator.Validate
+	httpServer      *http.Server
+	port            int
+	logger          *slog.Logger
+	serviceConfig   *config.Config
+	providerConfigs map[string]api.ProviderResource
+	storage         abstractions.Storage
+	validate        *validator.Validate
+	runtime         abstractions.Runtime
 }
 
 // NewServer creates a new HTTP server instance with the provided logger and configuration.
@@ -46,7 +49,13 @@ type Server struct {
 // Returns:
 //   - *Server: A configured server instance
 //   - error: An error if logger or serviceConfig is nil
-func NewServer(logger *slog.Logger, serviceConfig *config.Config, storage abstractions.Storage, validate *validator.Validate) (*Server, error) {
+func NewServer(logger *slog.Logger,
+	serviceConfig *config.Config,
+	providerConfigs map[string]api.ProviderResource,
+	storage abstractions.Storage,
+	validate *validator.Validate,
+	runtime abstractions.Runtime) (*Server, error) {
+
 	if logger == nil {
 		return nil, fmt.Errorf("logger is required for the server")
 	}
@@ -61,11 +70,13 @@ func NewServer(logger *slog.Logger, serviceConfig *config.Config, storage abstra
 	}
 
 	return &Server{
-		port:          serviceConfig.Service.Port,
-		logger:        logger,
-		serviceConfig: serviceConfig,
-		storage:       storage,
-		validate:      validate,
+		port:            serviceConfig.Service.Port,
+		logger:          logger,
+		serviceConfig:   serviceConfig,
+		providerConfigs: providerConfigs,
+		storage:         storage,
+		validate:        validate,
+		runtime:         runtime,
 	}, nil
 }
 
@@ -158,109 +169,175 @@ func (s *Server) setupRoutes() (http.Handler, error) {
 	// Health and status endpoints
 	router.HandleFunc("/api/v1/health", func(w http.ResponseWriter, r *http.Request) {
 		ctx := s.newExecutionContext(r)
-		h.HandleHealth(ctx, w)
+		resp := NewRespWrapper(w, ctx)
+		switch r.Method {
+		case http.MethodGet:
+			h.HandleHealth(ctx, resp)
+		default:
+			resp.Error("Method not allowed", http.StatusMethodNotAllowed, ctx.RequestID)
+		}
+
 	})
+
 	router.HandleFunc("/api/v1/status", func(w http.ResponseWriter, r *http.Request) {
 		ctx := s.newExecutionContext(r)
-		h.HandleStatus(ctx, w)
+		resp := NewRespWrapper(w, ctx)
+		switch r.Method {
+		case http.MethodGet:
+			h.HandleStatus(ctx, resp)
+		default:
+			resp.Error("Method not allowed", http.StatusMethodNotAllowed, ctx.RequestID)
+		}
 	})
 
 	// Evaluation jobs endpoints
 	router.HandleFunc("/api/v1/evaluations/jobs", func(w http.ResponseWriter, r *http.Request) {
 		ctx := s.newExecutionContext(r)
+		resp := NewRespWrapper(w, ctx)
 		switch r.Method {
 		case http.MethodPost:
-			h.HandleCreateEvaluation(ctx, w)
+			h.HandleCreateEvaluation(ctx, resp)
 		case http.MethodGet:
-			h.HandleListEvaluations(ctx, w)
+			h.HandleListEvaluations(ctx, resp)
 		default:
-			http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
+			resp.Error("Method not allowed", http.StatusMethodNotAllowed, ctx.RequestID)
 		}
 	})
-	// Handle summary endpoint first (more specific)
+
+	// Handle update endpoint first (more specific)
 	router.HandleFunc("/api/v1/evaluations/jobs/", func(w http.ResponseWriter, r *http.Request) {
 		ctx := s.newExecutionContext(r)
 		path := r.URL.Path
-		if strings.HasSuffix(path, "/summary") && r.Method == http.MethodGet {
-			h.HandleGetEvaluationSummary(ctx, w)
+		resp := NewRespWrapper(w, ctx)
+		if strings.HasSuffix(path, "/update") && r.Method == http.MethodPost {
+			h.HandleUpdateEvaluation(ctx, resp)
 			return
 		}
 		// Handle individual job endpoints
 		switch r.Method {
 		case http.MethodGet:
-			h.HandleGetEvaluation(ctx, w)
+			h.HandleGetEvaluation(ctx, resp)
 		case http.MethodDelete:
-			h.HandleCancelEvaluation(ctx, w)
+			h.HandleCancelEvaluation(ctx, resp)
 		default:
-			http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
+			resp.Error("Method not allowed", http.StatusMethodNotAllowed, ctx.RequestID)
 		}
 	})
 
 	// Benchmarks endpoint
 	router.HandleFunc("/api/v1/evaluations/benchmarks", func(w http.ResponseWriter, r *http.Request) {
 		ctx := s.newExecutionContext(r)
-		h.HandleListBenchmarks(ctx, w)
+		resp := NewRespWrapper(w, ctx)
+		switch r.Method {
+		case http.MethodGet:
+			h.HandleListBenchmarks(ctx, resp)
+		default:
+			resp.Error("Method not allowed", http.StatusMethodNotAllowed, ctx.RequestID)
+		}
 	})
 
 	// Collections endpoints
 	router.HandleFunc("/api/v1/evaluations/collections", func(w http.ResponseWriter, r *http.Request) {
 		ctx := s.newExecutionContext(r)
+		resp := NewRespWrapper(w, ctx)
 		switch r.Method {
 		case http.MethodPost:
-			h.HandleCreateCollection(ctx, w)
+			h.HandleCreateCollection(ctx, resp)
 		case http.MethodGet:
-			h.HandleListCollections(ctx, w)
+			h.HandleListCollections(ctx, resp)
 		default:
-			http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
+			resp.Error("Method not allowed", http.StatusMethodNotAllowed, ctx.RequestID)
 		}
 	})
+
 	router.HandleFunc("/api/v1/evaluations/collections/", func(w http.ResponseWriter, r *http.Request) {
 		ctx := s.newExecutionContext(r)
+		resp := NewRespWrapper(w, ctx)
 		switch r.Method {
 		case http.MethodGet:
-			h.HandleGetCollection(ctx, w)
+			h.HandleGetCollection(ctx, resp)
 		case http.MethodPut:
-			h.HandleUpdateCollection(ctx, w)
+			h.HandleUpdateCollection(ctx, resp)
 		case http.MethodPatch:
-			h.HandlePatchCollection(ctx, w)
+			h.HandlePatchCollection(ctx, resp)
 		case http.MethodDelete:
-			h.HandleDeleteCollection(ctx, w)
+			h.HandleDeleteCollection(ctx, resp)
 		default:
-			http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
+			resp.Error("Method not allowed", http.StatusMethodNotAllowed, ctx.RequestID)
 		}
 	})
 
 	// Providers endpoints
 	router.HandleFunc("/api/v1/evaluations/providers", func(w http.ResponseWriter, r *http.Request) {
 		ctx := s.newExecutionContext(r)
-		h.HandleListProviders(ctx, w)
+		resp := NewRespWrapper(w, ctx)
+		switch r.Method {
+		case http.MethodGet:
+			h.HandleListProviders(ctx, resp)
+		default:
+			resp.Error("Method not allowed", http.StatusMethodNotAllowed, ctx.RequestID)
+		}
 	})
+
 	router.HandleFunc("/api/v1/evaluations/providers/", func(w http.ResponseWriter, r *http.Request) {
 		ctx := s.newExecutionContext(r)
-		h.HandleGetProvider(ctx, w)
+		resp := NewRespWrapper(w, ctx)
+		switch r.Method {
+		case http.MethodGet:
+			h.HandleGetProvider(ctx, resp)
+		default:
+			resp.Error("Method not allowed", http.StatusMethodNotAllowed, ctx.RequestID)
+		}
 	})
 
 	// System metrics endpoint
 	router.HandleFunc("/api/v1/metrics/system", func(w http.ResponseWriter, r *http.Request) {
 		ctx := s.newExecutionContext(r)
-		h.HandleGetSystemMetrics(ctx, w)
+		resp := NewRespWrapper(w, ctx)
+		switch r.Method {
+		case http.MethodGet:
+			h.HandleGetSystemMetrics(ctx, resp)
+		default:
+			resp.Error("Method not allowed", http.StatusMethodNotAllowed, ctx.RequestID)
+		}
 	})
 
 	// OpenAPI documentation endpoints
 	router.HandleFunc("/openapi.yaml", func(w http.ResponseWriter, r *http.Request) {
 		ctx := s.newExecutionContext(r)
-		h.HandleOpenAPI(ctx, w)
+		resp := NewRespWrapper(w, ctx)
+		switch r.Method {
+		case http.MethodGet:
+			h.HandleOpenAPI(ctx, resp)
+		default:
+			resp.Error("Method not allowed", http.StatusMethodNotAllowed, ctx.RequestID)
+		}
 	})
+
 	router.HandleFunc("/docs", func(w http.ResponseWriter, r *http.Request) {
 		ctx := s.newExecutionContext(r)
-		h.HandleDocs(ctx, w)
+		resp := NewRespWrapper(w, ctx)
+		switch r.Method {
+		case http.MethodGet:
+			h.HandleDocs(ctx, resp)
+		default:
+			resp.Error("Method not allowed", http.StatusMethodNotAllowed, ctx.RequestID)
+		}
 	})
 
 	// Prometheus metrics endpoint
 	router.Handle("/metrics", promhttp.Handler())
 
-	// Wrap router with metrics middleware
-	return Middleware(router), nil
+	// Enable CORS in local mode only (for development/testing)
+	handler := http.Handler(router)
+	if s.serviceConfig.Service.LocalMode {
+		handler = CorsMiddleware(handler, s.serviceConfig)
+	}
+
+	// Wrap with metrics middleware (outermost for complete observability)
+	handler = Middleware(handler)
+
+	return handler, nil
 }
 
 // SetupRoutes exposes the route setup for testing
@@ -292,10 +369,6 @@ func (s *Server) Start() error {
 }
 
 func (s *Server) Shutdown(ctx context.Context) error {
-	if s.httpServer == nil {
-		return nil
-	}
-
 	s.logger.Info("Shutting down server gracefully...")
 	// do we need to flush the logs?
 
