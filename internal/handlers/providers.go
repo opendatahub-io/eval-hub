@@ -2,6 +2,7 @@ package handlers
 
 import (
 	"maps"
+	"slices"
 
 	"strings"
 
@@ -13,16 +14,9 @@ import (
 // HandleListProviders handles GET /api/v1/evaluations/providers
 func (h *Handlers) HandleListProviders(ctx *executioncontext.ExecutionContext, w http_wrappers.ResponseWrapper) {
 
-	// Remove runtime configuration from the provider configs. This is internal information
-	configs := make([]api.ProviderResource, 0, len(ctx.ProviderConfigs))
-	for config := range maps.Values(ctx.ProviderConfigs) {
-		config.Runtime = nil
-		configs = append(configs, config)
-	}
-
 	list := api.ProviderResourceList{
 		TotalCount: len(ctx.ProviderConfigs),
-		Items:      configs,
+		Items:      slices.Collect(maps.Values(ctx.ProviderConfigs)),
 	}
 
 	w.WriteJSON(list, 200)
@@ -44,7 +38,7 @@ func (h *Handlers) HandleGetProvider(ctx *executioncontext.ExecutionContext, r h
 
 		return
 	}
-	p.Runtime = nil
+
 	w.WriteJSON(p, 200)
 
 }
