@@ -16,7 +16,7 @@ func TestBuildConfigMap(t *testing.T) {
 	}
 
 	configMap := buildConfigMap(cfg)
-	expectedName := jobPrefix + cfg.jobID + specSuffix
+	expectedName := jobPrefix + cfg.jobID + "-" + cfg.benchmarkID + specSuffix
 	if configMap.Name != expectedName {
 		t.Fatalf("expected configmap name %s, got %s", expectedName, configMap.Name)
 	}

@@ -16,6 +16,7 @@ const (
 	defaultCPULimit        = "1"
 	defaultMemoryLimit     = "2Gi"
 	defaultNamespace       = "default"
+	serviceURLEnv          = "SERVICE_URL"
 	inClusterNamespaceFile = "/var/run/secrets/kubernetes.io/serviceaccount/namespace"
 )
 
@@ -26,6 +27,7 @@ type jobConfig struct {
 	benchmarkID   string
 	retryAttempts int
 	adapterImage  string
+	entrypoint    string
 	defaultEnv    []api.EnvVar
 	cpuRequest    string
 	memoryRequest string
@@ -39,12 +41,12 @@ type jobSpec struct {
 	BenchmarkID     string            `json:"benchmark_id"`
 	Model           api.ModelRef      `json:"model"`
 	NumExamples     *int              `json:"num_examples,omitempty"`
-	BenchmarkConfig map[string]any    `json:"benchmark_config,omitempty"`
+	BenchmarkConfig map[string]any    `json:"benchmark_config"`
 	ExperimentName  string            `json:"experiment_name,omitempty"`
 	Tags            map[string]string `json:"tags,omitempty"`
 	TimeoutSeconds  *int              `json:"timeout_seconds,omitempty"`
 	RetryAttempts   *int              `json:"retry_attempts,omitempty"`
-	CallbackURL     *string           `json:"callback_url,omitempty"`
+	CallbackURL     *string           `json:"callback_url"`
 }
 
 func buildJobConfig(evaluation *api.EvaluationJobResource, provider *api.ProviderResource, benchmarkID string) (*jobConfig, error) {
@@ -61,6 +63,13 @@ func buildJobConfig(evaluation *api.EvaluationJobResource, provider *api.Provide
 	if runtime.K8s.Image == "" {
 		return nil, fmt.Errorf("runtime adapter image is required")
 	}
+	if evaluation.Model.URL == "" || evaluation.Model.Name == "" {
+		return nil, fmt.Errorf("model url and name are required")
+	}
+	serviceURL := strings.TrimSpace(os.Getenv(serviceURLEnv))
+	if serviceURL == "" {
+		return nil, fmt.Errorf("%s is required", serviceURLEnv)
+	}
 
 	retryAttempts := 0
 	if evaluation.RetryAttempts != nil {
@@ -74,19 +83,24 @@ func buildJobConfig(evaluation *api.EvaluationJobResource, provider *api.Provide
 	if err != nil {
 		return nil, err
 	}
+	benchmarkParams := copyParams(benchmarkConfig.Parameters)
+	numExamples := numExamplesFromParameters(benchmarkParams)
+	delete(benchmarkParams, "num_examples")
+	if len(benchmarkParams) == 0 {
+		return nil, fmt.Errorf("benchmark_config is required")
+	}
 	timeoutSeconds := timeoutSecondsFromMinutes(evaluation.TimeoutMinutes)
-	numExamples := numExamplesFromParameters(benchmarkConfig.Parameters)
 	spec := jobSpec{
 		JobID:           evaluation.Resource.ID,
 		BenchmarkID:     benchmarkID,
 		Model:           evaluation.Model,
 		NumExamples:     numExamples,
-		BenchmarkConfig: benchmarkConfig.Parameters,
+		BenchmarkConfig: benchmarkParams,
 		ExperimentName:  evaluation.Experiment.Name,
 		Tags:            evaluation.Experiment.Tags,
 		TimeoutSeconds:  timeoutSeconds,
 		RetryAttempts:   evaluation.RetryAttempts,
-		CallbackURL:     evaluation.CallbackURL,
+		CallbackURL:     &serviceURL,
 	}
 	specJSON, err := json.MarshalIndent(spec, "", "  ")
 	if err != nil {
@@ -100,6 +114,7 @@ func buildJobConfig(evaluation *api.EvaluationJobResource, provider *api.Provide
 		benchmarkID:   benchmarkID,
 		retryAttempts: retryAttempts,
 		adapterImage:  runtime.K8s.Image,
+		entrypoint:    runtime.K8s.Entrypoint,
 		defaultEnv:    runtime.K8s.Env,
 		cpuRequest:    cpuRequest,
 		memoryRequest: memoryRequest,
@@ -151,6 +166,17 @@ func timeoutSecondsFromMinutes(minutes *int) *int {
 	}
 	seconds := *minutes * 60
 	return &seconds
+}
+
+func copyParams(source map[string]any) map[string]any {
+	if len(source) == 0 {
+		return map[string]any{}
+	}
+	clone := make(map[string]any, len(source))
+	for key, value := range source {
+		clone[key] = value
+	}
+	return clone
 }
 
 func numExamplesFromParameters(parameters map[string]any) *int {

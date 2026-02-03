@@ -9,19 +9,27 @@ import (
 
 func TestBuildJobConfigDefaults(t *testing.T) {
 	retry := 2
-	callbackURL := "https://example.org/eval/callback"
+	serviceURL := "http://eval-hub"
+	t.Setenv(serviceURLEnv, serviceURL)
 	evaluation := &api.EvaluationJobResource{
 		Resource: api.EvaluationResource{
 			Resource:           api.Resource{ID: "job-123"},
 			MLFlowExperimentID: nil,
 		},
 		EvaluationJobConfig: api.EvaluationJobConfig{
+			Model: api.ModelRef{
+				URL:  "http://model",
+				Name: "model",
+			},
 			RetryAttempts: &retry,
-			CallbackURL:   &callbackURL,
 			Benchmarks: []api.BenchmarkConfig{
 				{
-					Ref:        api.Ref{ID: "bench-1"},
-					Parameters: map[string]any{"num_examples": 50},
+					Ref: api.Ref{ID: "bench-1"},
+					Parameters: map[string]any{
+						"num_examples": 50,
+						"max_tokens":   128,
+						"temperature":  0.2,
+					},
 				},
 			},
 		},
@@ -78,16 +86,36 @@ func TestBuildJobConfigDefaults(t *testing.T) {
 	if numExamples, ok := decoded["num_examples"].(float64); !ok || int(numExamples) != 50 {
 		t.Fatalf("expected job spec json num_examples to be %d, got %v", 50, decoded["num_examples"])
 	}
-	if callback, ok := decoded["callback_url"].(string); !ok || callback != callbackURL {
-		t.Fatalf("expected job spec json callback_url to be %q, got %v", callbackURL, decoded["callback_url"])
+	benchmarkConfig, ok := decoded["benchmark_config"].(map[string]any)
+	if !ok {
+		t.Fatalf("expected job spec json benchmark_config to be a map, got %T", decoded["benchmark_config"])
+	}
+	if _, exists := benchmarkConfig["num_examples"]; exists {
+		t.Fatalf("expected benchmark_config not to include num_examples")
+	}
+	if benchmarkConfig["max_tokens"] != float64(128) {
+		t.Fatalf("expected benchmark_config.max_tokens to be %d, got %v", 128, benchmarkConfig["max_tokens"])
+	}
+	if benchmarkConfig["temperature"] != 0.2 {
+		t.Fatalf("expected benchmark_config.temperature to be 0.2, got %v", benchmarkConfig["temperature"])
+	}
+	if callback, ok := decoded["callback_url"].(string); !ok || callback != serviceURL {
+		t.Fatalf("expected job spec json callback_url to be %q, got %v", serviceURL, decoded["callback_url"])
 	}
 }
 
 func TestBuildJobConfigMissingRuntime(t *testing.T) {
+	t.Setenv(serviceURLEnv, "http://eval-hub")
 	evaluation := &api.EvaluationJobResource{
 		Resource: api.EvaluationResource{
 			Resource:           api.Resource{ID: "job-123"},
 			MLFlowExperimentID: nil,
+		},
+		EvaluationJobConfig: api.EvaluationJobConfig{
+			Model: api.ModelRef{
+				URL:  "http://model",
+				Name: "model",
+			},
 		},
 	}
 	provider := &api.ProviderResource{
@@ -101,10 +129,17 @@ func TestBuildJobConfigMissingRuntime(t *testing.T) {
 }
 
 func TestBuildJobConfigMissingAdapterImage(t *testing.T) {
+	t.Setenv(serviceURLEnv, "http://eval-hub")
 	evaluation := &api.EvaluationJobResource{
 		Resource: api.EvaluationResource{
 			Resource:           api.Resource{ID: "job-123"},
 			MLFlowExperimentID: nil,
+		},
+		EvaluationJobConfig: api.EvaluationJobConfig{
+			Model: api.ModelRef{
+				URL:  "http://model",
+				Name: "model",
+			},
 		},
 	}
 	provider := &api.ProviderResource{
@@ -115,5 +150,73 @@ func TestBuildJobConfigMissingAdapterImage(t *testing.T) {
 	_, err := buildJobConfig(evaluation, provider, "bench-1")
 	if err == nil {
 		t.Fatalf("expected error for missing adapter image")
+	}
+}
+
+func TestBuildJobConfigMissingServiceURL(t *testing.T) {
+	evaluation := &api.EvaluationJobResource{
+		Resource: api.EvaluationResource{
+			Resource:           api.Resource{ID: "job-123"},
+			MLFlowExperimentID: nil,
+		},
+		EvaluationJobConfig: api.EvaluationJobConfig{
+			Model: api.ModelRef{
+				URL:  "http://model",
+				Name: "model",
+			},
+			Benchmarks: []api.BenchmarkConfig{
+				{
+					Ref:        api.Ref{ID: "bench-1"},
+					Parameters: map[string]any{"num_examples": 50},
+				},
+			},
+		},
+	}
+	provider := &api.ProviderResource{
+		ProviderID: "provider-1",
+		Runtime: &api.Runtime{
+			K8s: &api.K8sRuntime{
+				Image: "adapter:latest",
+			},
+		},
+	}
+
+	_, err := buildJobConfig(evaluation, provider, "bench-1")
+	if err == nil {
+		t.Fatalf("expected error for missing %s", serviceURLEnv)
+	}
+}
+
+func TestBuildJobConfigMissingBenchmarkConfig(t *testing.T) {
+	t.Setenv(serviceURLEnv, "http://eval-hub")
+	evaluation := &api.EvaluationJobResource{
+		Resource: api.EvaluationResource{
+			Resource:           api.Resource{ID: "job-123"},
+			MLFlowExperimentID: nil,
+		},
+		EvaluationJobConfig: api.EvaluationJobConfig{
+			Model: api.ModelRef{
+				URL:  "http://model",
+				Name: "model",
+			},
+			Benchmarks: []api.BenchmarkConfig{
+				{
+					Ref: api.Ref{ID: "bench-1"},
+				},
+			},
+		},
+	}
+	provider := &api.ProviderResource{
+		ProviderID: "provider-1",
+		Runtime: &api.Runtime{
+			K8s: &api.K8sRuntime{
+				Image: "adapter:latest",
+			},
+		},
+	}
+
+	_, err := buildJobConfig(evaluation, provider, "bench-1")
+	if err == nil {
+		t.Fatalf("expected error for missing benchmark_config")
 	}
 }

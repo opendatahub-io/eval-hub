@@ -8,11 +8,13 @@ import (
 type Handlers struct {
 	storage  abstractions.Storage
 	validate *validator.Validate
+	runtime  abstractions.Runtime
 }
 
-func New(storage abstractions.Storage, validate *validator.Validate) *Handlers {
+func New(storage abstractions.Storage, validate *validator.Validate, runtime abstractions.Runtime) *Handlers {
 	return &Handlers{
 		storage:  storage,
 		validate: validate,
+		runtime:  runtime,
 	}
 }

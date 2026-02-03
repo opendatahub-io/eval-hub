@@ -164,7 +164,7 @@ func (s *Server) loggerWithRequest(r *http.Request) (string, *slog.Logger) {
 
 func (s *Server) setupRoutes() (http.Handler, error) {
 	router := http.NewServeMux()
-	h := handlers.New(s.storage, s.validate)
+	h := handlers.New(s.storage, s.validate, s.runtime)
 
 	// Health and status endpoints
 	router.HandleFunc("/api/v1/health", func(w http.ResponseWriter, r *http.Request) {

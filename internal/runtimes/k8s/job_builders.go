@@ -36,7 +36,7 @@ const (
 
 func buildConfigMap(cfg *jobConfig) *corev1.ConfigMap {
 	labels := jobLabels(cfg.jobID, cfg.providerID, cfg.benchmarkID)
-	name := configMapName(cfg.jobID)
+	name := configMapName(cfg.jobID, cfg.benchmarkID)
 	return &corev1.ConfigMap{
 		ObjectMeta: metav1.ObjectMeta{
 			Name:      name,
@@ -54,8 +54,8 @@ func buildJob(cfg *jobConfig) (*batchv1.Job, error) {
 		return nil, fmt.Errorf("adapter image is required")
 	}
 	labels := jobLabels(cfg.jobID, cfg.providerID, cfg.benchmarkID)
-	jobName := jobName(cfg.jobID)
-	configMap := configMapName(cfg.jobID)
+	jobName := jobName(cfg.jobID, cfg.benchmarkID)
+	configMap := configMapName(cfg.jobID, cfg.benchmarkID)
 
 	ttl := defaultJobTTLSeconds
 	backoff := int32(cfg.retryAttempts)
@@ -86,6 +86,7 @@ func buildJob(cfg *jobConfig) (*batchv1.Job, error) {
 							Name:            adapterContainerName,
 							Image:           cfg.adapterImage,
 							ImagePullPolicy: corev1.PullIfNotPresent,
+							Command:         containerCommand(cfg.entrypoint),
 							Env:             envVars,
 							Resources:       resources,
 							SecurityContext: defaultSecurityContext(),
@@ -123,6 +124,13 @@ func buildJob(cfg *jobConfig) (*batchv1.Job, error) {
 			},
 		},
 	}, nil
+}
+
+func containerCommand(entrypoint string) []string {
+	if entrypoint == "" {
+		return nil
+	}
+	return []string{entrypoint}
 }
 
 func defaultSecurityContext() *corev1.SecurityContext {
@@ -213,12 +221,12 @@ func buildResources(cfg *jobConfig) (corev1.ResourceRequirements, error) {
 	return resources, nil
 }
 
-func jobName(jobID string) string {
-	return jobPrefix + jobID
+func jobName(jobID, benchmarkID string) string {
+	return jobPrefix + jobID + "-" + benchmarkID
 }
 
-func configMapName(jobID string) string {
-	return jobPrefix + jobID + specSuffix
+func configMapName(jobID, benchmarkID string) string {
+	return jobPrefix + jobID + "-" + benchmarkID + specSuffix
 }
 
 func jobLabels(jobID, providerID, benchmarkID string) map[string]string {
