@@ -496,8 +496,10 @@ func findAndUpdateBenchmarkStatus(benchmarkStatus []api.BenchmarkStatus, runStat
 			Name:  runStatus.StatusEvent.BenchmarkName,
 			State: runStatus.StatusEvent.Status,
 		}
-		if runStatus.StatusEvent.Artifacts != nil && runStatus.StatusEvent.Artifacts["logs"] != nil && runStatus.StatusEvent.Artifacts["logs"].(string) != "" {
-			newBenchmarkStatus.Logs = &api.BenchmarkStatusLogs{Path: runStatus.StatusEvent.Artifacts["logs"].(string)}
+		if runStatus.StatusEvent.Artifacts != nil {
+			if logsPath, ok := runStatus.StatusEvent.Artifacts["logs"].(string); ok && logsPath != "" {
+				newBenchmarkStatus.Logs = &api.BenchmarkStatusLogs{Path: logsPath}
+			}
 		}
 		if runStatus.StatusEvent.Status == api.StateRunning {
 			newBenchmarkStatus.StartedAt = runStatus.StatusEvent.StartedAt
@@ -505,7 +507,7 @@ func findAndUpdateBenchmarkStatus(benchmarkStatus []api.BenchmarkStatus, runStat
 		if runStatus.StatusEvent.Status == api.StateCompleted || runStatus.StatusEvent.Status == api.StateFailed {
 			newBenchmarkStatus.CompletedAt = runStatus.StatusEvent.CompletedAt
 		}
-		if runStatus.StatusEvent.Status == api.StateFailed {
+		if runStatus.StatusEvent.Status == api.StateFailed && runStatus.StatusEvent.ErrorMessage != nil {
 			newBenchmarkStatus.Message = &api.MessageInfo{
 				Message:     runStatus.StatusEvent.ErrorMessage.Message,
 				MessageCode: runStatus.StatusEvent.ErrorMessage.MessageCode,
