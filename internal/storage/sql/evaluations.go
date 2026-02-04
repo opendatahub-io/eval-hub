@@ -1,7 +1,6 @@
 package sql
 
 import (
-	"context"
 	"database/sql"
 	"encoding/json"
 	"time"
@@ -146,7 +145,7 @@ func (s *SQLStorage) GetEvaluationJobs(limit int, offset int, statusFilter strin
 	if len(countArgs) > 0 {
 		err = s.pool.QueryRowContext(s.ctx, countQuery, countArgs...).Scan(&totalCount)
 	} else {
-		err = s.pool.QueryRowContext(context.Background(), countQuery).Scan(&totalCount)
+		err = s.pool.QueryRowContext(s.ctx, countQuery).Scan(&totalCount)
 	}
 	if err != nil {
 		s.logger.Error("Failed to count evaluation jobs", "error", err)
