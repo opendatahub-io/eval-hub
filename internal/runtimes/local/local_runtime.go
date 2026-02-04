@@ -1,6 +1,7 @@
 package local
 
 import (
+	"context"
 	"log/slog"
 
 	"github.com/eval-hub/eval-hub/internal/abstractions"
@@ -9,6 +10,7 @@ import (
 
 type LocalRuntime struct {
 	logger *slog.Logger
+	ctx    context.Context
 }
 
 func NewLocalRuntime(logger *slog.Logger) (abstractions.Runtime, error) {
@@ -18,6 +20,14 @@ func NewLocalRuntime(logger *slog.Logger) (abstractions.Runtime, error) {
 func (r *LocalRuntime) WithLogger(logger *slog.Logger) abstractions.Runtime {
 	return &LocalRuntime{
 		logger: logger,
+		ctx:    r.ctx,
+	}
+}
+
+func (r *LocalRuntime) WithContext(ctx context.Context) abstractions.Runtime {
+	return &LocalRuntime{
+		logger: r.logger,
+		ctx:    ctx,
 	}
 }
 

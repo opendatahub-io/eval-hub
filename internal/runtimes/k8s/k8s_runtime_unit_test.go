@@ -18,7 +18,9 @@ import (
 )
 
 type fakeStorage struct {
+	logger *slog.Logger
 	called bool
+	ctx    context.Context
 }
 
 func (f *fakeStorage) GetDatasourceName() string  { return "fake" }
@@ -56,18 +58,23 @@ func (f *fakeStorage) DeleteCollection(_ string) error {
 }
 func (f *fakeStorage) Close() error { return nil }
 
-func (f *fakeStorage) WithLogger(_ *slog.Logger) abstractions.Storage {
-	return f
+func (f *fakeStorage) WithLogger(logger *slog.Logger) abstractions.Storage {
+	return &fakeStorage{logger: logger, ctx: f.ctx}
 }
+func (f *fakeStorage) WithContext(ctx context.Context) abstractions.Storage {
+	return &fakeStorage{logger: f.logger, ctx: ctx}
+}
+
 func TestPersistJobFailureNoStorage(t *testing.T) {
 	runtime := &K8sRuntime{logger: slog.New(slog.NewTextHandler(io.Discard, nil))}
 	runtime.persistJobFailure(nil, nil, context.Canceled)
 }
 
 func TestPersistJobFailureUpdatesStatus(t *testing.T) {
-	storage := &fakeStorage{}
+	logger := slog.New(slog.NewTextHandler(io.Discard, nil))
+	storage := &fakeStorage{logger: logger, ctx: context.Background()}
 	var store abstractions.Storage = storage
-	runtime := &K8sRuntime{logger: nil}
+	runtime := &K8sRuntime{logger: logger, ctx: context.Background()}
 	evaluation := &api.EvaluationJobResource{
 		Resource: api.EvaluationResource{
 			Resource: api.Resource{ID: "job-1"},

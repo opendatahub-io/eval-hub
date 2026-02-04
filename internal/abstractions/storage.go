@@ -1,6 +1,7 @@
 package abstractions
 
 import (
+	"context"
 	"log/slog"
 	"time"
 
@@ -14,6 +15,8 @@ type QueryResults[T any] struct {
 
 type Storage interface {
 	WithLogger(logger *slog.Logger) Storage
+	WithContext(ctx context.Context) Storage
+
 	// This is used to identify the storage implementation in the logs and error messages
 	GetDatasourceName() string
 

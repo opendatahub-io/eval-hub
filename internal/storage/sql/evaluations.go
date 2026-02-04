@@ -85,7 +85,7 @@ func (s *SQLStorage) GetEvaluationJob(id string) (*api.EvaluationJobResource, er
 	var statusStr string
 	var entityJSON string
 
-	err = s.pool.QueryRowContext(context.Background(), selectQuery, id).Scan(&dbID, &createdAt, &updatedAt, &statusStr, &entityJSON)
+	err = s.pool.QueryRowContext(s.ctx, selectQuery, id).Scan(&dbID, &createdAt, &updatedAt, &statusStr, &entityJSON)
 	if err != nil {
 		if err == sql.ErrNoRows {
 			return nil, serviceerrors.NewServiceError(messages.ResourceNotFound, "Type", "evaluation job", "ResourceId", id)
@@ -144,7 +144,7 @@ func (s *SQLStorage) GetEvaluationJobs(limit int, offset int, statusFilter strin
 
 	var totalCount int
 	if len(countArgs) > 0 {
-		err = s.pool.QueryRowContext(context.Background(), countQuery, countArgs...).Scan(&totalCount)
+		err = s.pool.QueryRowContext(s.ctx, countQuery, countArgs...).Scan(&totalCount)
 	} else {
 		err = s.pool.QueryRowContext(context.Background(), countQuery).Scan(&totalCount)
 	}

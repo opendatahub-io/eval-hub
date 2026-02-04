@@ -19,6 +19,7 @@ type K8sRuntime struct {
 	logger    *slog.Logger
 	helper    *KubernetesHelper
 	providers map[string]api.ProviderResource
+	ctx       context.Context
 }
 
 // NewK8sRuntime creates a Kubernetes runtime.
@@ -35,11 +36,20 @@ func (r *K8sRuntime) WithLogger(logger *slog.Logger) abstractions.Runtime {
 		logger:    logger,
 		helper:    r.helper,
 		providers: r.providers,
+		ctx:       r.ctx,
+	}
+}
+
+func (r *K8sRuntime) WithContext(ctx context.Context) abstractions.Runtime {
+	return &K8sRuntime{
+		logger:    r.logger,
+		helper:    r.helper,
+		providers: r.providers,
+		ctx:       ctx,
 	}
 }
 
 func (r *K8sRuntime) RunEvaluationJob(evaluation *api.EvaluationJobResource, storage *abstractions.Storage) error {
-	_ = storage
 	if evaluation == nil {
 		return fmt.Errorf("evaluation is required")
 	}

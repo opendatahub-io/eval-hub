@@ -59,7 +59,7 @@ func getParam[T string | int | bool](r http_wrappers.RequestWrapper, name string
 
 // HandleCreateEvaluation handles POST /api/v1/evaluations/jobs
 func (h *Handlers) HandleCreateEvaluation(ctx *executioncontext.ExecutionContext, req http_wrappers.RequestWrapper, w http_wrappers.ResponseWrapper) {
-	storage := h.storage.WithLogger(ctx.Logger)
+	storage := h.storage.WithLogger(ctx.Logger).WithContext(ctx.Ctx)
 
 	logging.LogRequestStarted(ctx)
 
@@ -90,7 +90,7 @@ func (h *Handlers) HandleCreateEvaluation(ctx *executioncontext.ExecutionContext
 					ctx.Logger.Error("panic in RunEvaluationJob goroutine", "panic", recovered, "stack", string(debug.Stack()), "job_id", job.Resource.ID)
 				}
 			}()
-			if err := h.runtime.RunEvaluationJob(job, &storage); err != nil {
+			if err := h.runtime.WithContext(ctx.Ctx).RunEvaluationJob(job, &storage); err != nil {
 				ctx.Logger.Error("RunEvaluationJob failed", "error", err, "job_id", job.Resource.ID)
 			}
 		}()
@@ -101,7 +101,7 @@ func (h *Handlers) HandleCreateEvaluation(ctx *executioncontext.ExecutionContext
 
 // HandleListEvaluations handles GET /api/v1/evaluations/jobs
 func (h *Handlers) HandleListEvaluations(ctx *executioncontext.ExecutionContext, r http_wrappers.RequestWrapper, w http_wrappers.ResponseWrapper) {
-	storage := h.storage.WithLogger(ctx.Logger)
+	storage := h.storage.WithLogger(ctx.Logger).WithContext(ctx.Ctx)
 
 	logging.LogRequestStarted(ctx)
 
@@ -138,7 +138,7 @@ func (h *Handlers) HandleListEvaluations(ctx *executioncontext.ExecutionContext,
 
 // HandleGetEvaluation handles GET /api/v1/evaluations/jobs/{id}
 func (h *Handlers) HandleGetEvaluation(ctx *executioncontext.ExecutionContext, r http_wrappers.RequestWrapper, w http_wrappers.ResponseWrapper) {
-	storage := h.storage.WithLogger(ctx.Logger)
+	storage := h.storage.WithLogger(ctx.Logger).WithContext(ctx.Ctx)
 	logging.LogRequestStarted(ctx)
 
 	// Extract ID from path
@@ -158,7 +158,7 @@ func (h *Handlers) HandleGetEvaluation(ctx *executioncontext.ExecutionContext, r
 }
 
 func (h *Handlers) HandleUpdateEvaluation(ctx *executioncontext.ExecutionContext, r http_wrappers.RequestWrapper, w http_wrappers.ResponseWrapper) {
-	storage := h.storage.WithLogger(ctx.Logger)
+	storage := h.storage.WithLogger(ctx.Logger).WithContext(ctx.Ctx)
 	logging.LogRequestStarted(ctx)
 
 	// Extract ID from path
@@ -192,7 +192,7 @@ func (h *Handlers) HandleUpdateEvaluation(ctx *executioncontext.ExecutionContext
 
 // HandleCancelEvaluation handles DELETE /api/v1/evaluations/jobs/{id}
 func (h *Handlers) HandleCancelEvaluation(ctx *executioncontext.ExecutionContext, r http_wrappers.RequestWrapper, w http_wrappers.ResponseWrapper) {
-	storage := h.storage.WithLogger(ctx.Logger)
+	storage := h.storage.WithLogger(ctx.Logger).WithContext(ctx.Ctx)
 	logging.LogRequestStarted(ctx)
 
 	// Extract ID from path

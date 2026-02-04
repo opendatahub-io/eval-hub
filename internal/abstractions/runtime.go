@@ -1,6 +1,7 @@
 package abstractions
 
 import (
+	"context"
 	"log/slog"
 
 	"github.com/eval-hub/eval-hub/pkg/api"
@@ -12,6 +13,7 @@ import (
 
 type Runtime interface {
 	WithLogger(logger *slog.Logger) Runtime
+	WithContext(ctx context.Context) Runtime
 	Name() string
 	RunEvaluationJob(evaluation *api.EvaluationJobResource, storage *Storage) error
 }

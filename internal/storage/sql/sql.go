@@ -26,6 +26,7 @@ type SQLStorage struct {
 	sqlConfig *SQLDatabaseConfig
 	pool      *sql.DB
 	logger    *slog.Logger
+	ctx       context.Context
 }
 
 func NewStorage(config map[string]any, logger *slog.Logger) (abstractions.Storage, error) {
@@ -66,6 +67,7 @@ func NewStorage(config map[string]any, logger *slog.Logger) (abstractions.Storag
 		sqlConfig: &sqlConfig,
 		pool:      pool,
 		logger:    logger,
+		ctx:       context.Background(),
 	}
 
 	// ping the database to verify the DSN provided by the user is valid and the server is accessible
@@ -98,7 +100,7 @@ func (s *SQLStorage) GetDatasourceName() string {
 }
 
 func (s *SQLStorage) exec(query string, args ...any) (sql.Result, error) {
-	return s.pool.ExecContext(context.Background(), query, args...)
+	return s.pool.ExecContext(s.ctx, query, args...)
 }
 
 func (s *SQLStorage) ensureSchema() error {
@@ -130,5 +132,15 @@ func (s *SQLStorage) WithLogger(logger *slog.Logger) abstractions.Storage {
 		sqlConfig: s.sqlConfig,
 		pool:      s.pool,
 		logger:    logger,
+		ctx:       s.ctx,
+	}
+}
+
+func (s *SQLStorage) WithContext(ctx context.Context) abstractions.Storage {
+	return &SQLStorage{
+		sqlConfig: s.sqlConfig,
+		pool:      s.pool,
+		logger:    s.logger,
+		ctx:       ctx,
 	}
 }
