@@ -75,7 +75,6 @@ func (h *Handlers) HandleCreateEvaluation(ctx *executioncontext.ExecutionContext
 		w.Error(err, ctx.RequestID)
 		return
 	}
-
 	response, err := storage.CreateEvaluationJob(evaluation)
 	if err != nil {
 		w.Error(err, ctx.RequestID)
@@ -84,16 +83,35 @@ func (h *Handlers) HandleCreateEvaluation(ctx *executioncontext.ExecutionContext
 
 	if h.runtime != nil {
 		job := response
-		go func() {
+		var runErr error
+		func() {
 			defer func() {
 				if recovered := recover(); recovered != nil {
-					ctx.Logger.Error("panic in RunEvaluationJob goroutine", "panic", recovered, "stack", string(debug.Stack()), "job_id", job.Resource.ID)
+					ctx.Logger.Error("panic in RunEvaluationJob", "panic", recovered, "stack", string(debug.Stack()), "job_id", job.Resource.ID)
+					runErr = serviceerrors.NewServiceError(messages.InternalServerError, "Error", fmt.Sprint(recovered))
 				}
 			}()
-			if err := h.runtime.WithContext(ctx.Ctx).RunEvaluationJob(job, &storage); err != nil {
-				ctx.Logger.Error("RunEvaluationJob failed", "error", err, "job_id", job.Resource.ID)
-			}
+			runErr = h.runtime.WithLogger(ctx.Logger).WithContext(ctx.Ctx).RunEvaluationJob(job, &storage)
 		}()
+		if runErr != nil {
+			ctx.Logger.Error("RunEvaluationJob failed", "error", runErr, "job_id", job.Resource.ID)
+			status := &api.StatusEvent{
+				StatusEvent: &api.EvaluationJobStatus{
+					EvaluationJobState: api.EvaluationJobState{
+						State: api.StateFailed,
+						Message: &api.MessageInfo{
+							Message:     runErr.Error(),
+							MessageCode: constants.MESSAGE_CODE_EVALUATION_JOB_FAILED,
+						},
+					},
+				},
+			}
+			if err := storage.UpdateEvaluationJobStatus(job.Resource.ID, status); err != nil {
+				ctx.Logger.Error("failed to update evaluation status", "error", err, "job_id", job.Resource.ID)
+			}
+			w.Error(runErr, ctx.RequestID)
+			return
+		}
 	}
 
 	w.WriteJSON(response, 202)
