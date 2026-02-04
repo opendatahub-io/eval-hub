@@ -31,9 +31,11 @@ func NewK8sRuntime(logger *slog.Logger, providerConfigs map[string]api.ProviderR
 }
 
 func (r *K8sRuntime) WithLogger(logger *slog.Logger) abstractions.Runtime {
-	newRuntime := r
-	newRuntime.logger = logger
-	return newRuntime
+	return &K8sRuntime{
+		logger:    logger,
+		helper:    r.helper,
+		providers: r.providers,
+	}
 }
 
 func (r *K8sRuntime) RunEvaluationJob(evaluation *api.EvaluationJobResource, storage *abstractions.Storage) error {

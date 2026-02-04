@@ -16,9 +16,9 @@ func NewLocalRuntime(logger *slog.Logger) (abstractions.Runtime, error) {
 }
 
 func (r *LocalRuntime) WithLogger(logger *slog.Logger) abstractions.Runtime {
-	newRuntime := r
-	newRuntime.logger = logger
-	return newRuntime
+	return &LocalRuntime{
+		logger: logger,
+	}
 }
 
 func (r *LocalRuntime) RunEvaluationJob(evaluation *api.EvaluationJobResource, storage *abstractions.Storage) error {
