@@ -117,7 +117,7 @@ func buildJob(cfg *jobConfig) (*batchv1.Job, error) {
 							Name:            adapterContainerName,
 							Image:           cfg.adapterImage,
 							ImagePullPolicy: corev1.PullIfNotPresent,
-							Command:         containerCommand(cfg.entrypoint),
+							Command:         buildContainerCommand(cfg.entrypoint),
 							Env:             envVars,
 							Resources:       resources,
 							SecurityContext: defaultSecurityContext(),
@@ -157,11 +157,22 @@ func buildJob(cfg *jobConfig) (*batchv1.Job, error) {
 	}, nil
 }
 
-func containerCommand(entrypoint string) []string {
-	if entrypoint == "" {
+func buildContainerCommand(entrypoint []string) []string {
+	if len(entrypoint) == 0 {
 		return nil
 	}
-	return []string{entrypoint}
+	var command []string
+	for _, part := range entrypoint {
+		item := strings.TrimSpace(part)
+		if item == "" {
+			continue
+		}
+		command = append(command, item)
+	}
+	if len(command) == 0 {
+		return nil
+	}
+	return command
 }
 
 func defaultSecurityContext() *corev1.SecurityContext {

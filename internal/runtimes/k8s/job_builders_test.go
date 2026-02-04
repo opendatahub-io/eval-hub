@@ -89,3 +89,20 @@ func TestBuildJobSecurityContext(t *testing.T) {
 		t.Fatalf("expected seccomp profile to be set")
 	}
 }
+
+func TestContainerCommandList(t *testing.T) {
+	command := buildContainerCommand([]string{"/bin/sh", "-c", "echo hello"})
+	if len(command) != 3 {
+		t.Fatalf("expected 3 command parts, got %d", len(command))
+	}
+	if command[0] != "/bin/sh" || command[1] != "-c" || command[2] != "echo hello" {
+		t.Fatalf("unexpected command parts: %v", command)
+	}
+}
+
+func TestContainerCommandTrimsEmptyItems(t *testing.T) {
+	command := buildContainerCommand([]string{"  entrypoint ", "", " "})
+	if len(command) != 1 || command[0] != "entrypoint" {
+		t.Fatalf("unexpected command: %v", command)
+	}
+}

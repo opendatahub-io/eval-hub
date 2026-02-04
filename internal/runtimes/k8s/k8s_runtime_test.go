@@ -43,7 +43,7 @@ func TestRunEvaluationJobCreatesResources(t *testing.T) {
 				Runtime: &api.Runtime{
 					K8s: &api.K8sRuntime{
 						Image:       "docker.io/library/busybox:1.36",
-						Entrypoint:  "/bin/sh",
+						Entrypoint:  []string{"/bin/sh", "-c", "echo hello"},
 						CPULimit:    "500m",
 						MemoryLimit: "1Gi",
 						Env: []api.EnvVar{

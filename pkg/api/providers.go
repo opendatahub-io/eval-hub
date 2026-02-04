@@ -22,7 +22,8 @@ type Runtime struct {
 //
 //	runtime:
 //	  image: "quay.io/eval-hub/adapter:latest"
-//	  entrypoint: "/path/to/program"
+//	  entrypoint:
+//	    - "/path/to/program"
 //	  cpu_request: "250m"
 //	  memory_request: "512Mi"
 //	  cpu_limit: "1"
@@ -32,7 +33,7 @@ type Runtime struct {
 //	      value: "bar"
 type K8sRuntime struct {
 	Image         string   `mapstructure:"image" yaml:"image"`
-	Entrypoint    string   `mapstructure:"entrypoint" yaml:"entrypoint"`
+	Entrypoint    []string `mapstructure:"entrypoint" yaml:"entrypoint"`
 	CPURequest    string   `mapstructure:"cpu_request" yaml:"cpu_request"`
 	MemoryRequest string   `mapstructure:"memory_request" yaml:"memory_request"`
 	CPULimit      string   `mapstructure:"cpu_limit" yaml:"cpu_limit"`

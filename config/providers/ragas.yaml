@@ -5,8 +5,10 @@ provider_type: builtin
 base_url: null
 runtime:
   k8s:
-    image: quay.io/eval-hub/garak:latest
-    entrypoint: /path_to_program
+    image: quay.io/eval-hub/ragas:latest
+    entrypoint:
+      - python
+      - /opt/app-root/src/main.py
     cpu_request: 100m
     memory_request: 128Mi
     cpu_limit: 500m

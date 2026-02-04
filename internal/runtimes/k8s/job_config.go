@@ -27,7 +27,7 @@ type jobConfig struct {
 	benchmarkID   string
 	retryAttempts int
 	adapterImage  string
-	entrypoint    string
+	entrypoint    []string
 	defaultEnv    []api.EnvVar
 	cpuRequest    string
 	memoryRequest string
