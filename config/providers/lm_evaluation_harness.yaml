@@ -5,7 +5,7 @@ provider_type: builtin
 base_url: null
 runtime:
   k8s:
-    image: quay.io/ruimvieira/mock-lmeval:latest
+    image: quay.io/opendatahub/ta-lmes-job:odh-3.4
     entrypoint:
       - /opt/app-root/bin/python
       - /opt/app-root/src/main.py
