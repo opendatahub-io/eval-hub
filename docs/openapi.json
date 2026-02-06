@@ -780,10 +780,10 @@
             "title": "Provider Id",
             "description": "Provider identifier"
           },
-          "config": {
+          "parameters": {
             "additionalProperties": true,
             "type": "object",
-            "title": "Config",
+            "title": "Parameters",
             "description": "Benchmark configuration including num_fewshot, limit, batch_size, etc."
           }
         },
@@ -793,7 +793,7 @@
           "benchmark_id",
           "provider_id"
         ],
-        "title": "BenchmarkConfig",
+        "title": "Benchmark Config",
         "description": "New simplified benchmark specification."
       },
       "ExperimentTag": {
