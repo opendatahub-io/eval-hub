@@ -89,28 +89,26 @@ type BenchmarkStatusLogs struct {
 
 // BenchmarkStatus represents status of individual benchmark in evaluation
 type BenchmarkStatus struct {
-	ProviderID      string       `json:"provider_id"`
-	ID              string       `json:"id"`
-	Status          State        `json:"status,omitempty"`
-	ErrorMessage    *MessageInfo `json:"error_message,omitempty"`
-	StartedAt       *time.Time   `json:"started_at,omitempty"`
-	CompletedAt     *time.Time   `json:"completed_at,omitempty"`
-	DurationSeconds int64        `json:"duration_seconds,omitempty"`
+	ProviderID   string       `json:"provider_id"`
+	ID           string       `json:"id"`
+	Status       State        `json:"status,omitempty"`
+	ErrorMessage *MessageInfo `json:"error_message,omitempty"`
+	StartedAt    *time.Time   `json:"started_at,omitempty"`
+	CompletedAt  *time.Time   `json:"completed_at,omitempty"`
 }
 
 // BenchmarkStatusEvent is used when the job runtime needs to updated the status of a benchmark
 type BenchmarkStatusEvent struct {
-	ProviderID      string         `json:"provider_id"`
-	ID              string         `json:"id"`
-	Status          State          `json:"status,omitempty"`
-	Metrics         map[string]any `json:"metrics,omitempty"`
-	Artifacts       map[string]any `json:"artifacts,omitempty"`
-	ErrorMessage    *MessageInfo   `json:"error_message,omitempty"`
-	StartedAt       *time.Time     `json:"started_at,omitempty"`
-	CompletedAt     *time.Time     `json:"completed_at,omitempty"`
-	DurationSeconds int64          `json:"duration_seconds,omitempty"`
-	MLFlowRunID     string         `json:"mlflow_run_id,omitempty"`
-	LogsPath        string         `json:"logs_path,omitempty"`
+	ProviderID   string         `json:"provider_id"`
+	ID           string         `json:"id"`
+	Status       State          `json:"status,omitempty"`
+	Metrics      map[string]any `json:"metrics,omitempty"`
+	Artifacts    map[string]any `json:"artifacts,omitempty"`
+	ErrorMessage *MessageInfo   `json:"error_message,omitempty"`
+	StartedAt    *time.Time     `json:"started_at,omitempty"`
+	CompletedAt  *time.Time     `json:"completed_at,omitempty"`
+	MLFlowRunID  string         `json:"mlflow_run_id,omitempty"`
+	LogsPath     string         `json:"logs_path,omitempty"`
 }
 
 type EvaluationJobState struct {
