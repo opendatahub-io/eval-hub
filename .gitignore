@@ -238,3 +238,11 @@ go.work.sum
 
 # sqlite database if you want to create a persisent database in the project root
 /.sqlite
+
+package-lock.json
+node_modules/
+
+# MLflow
+mlflow.db
+mlruns/
+mlflow.log
