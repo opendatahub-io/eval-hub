@@ -472,8 +472,9 @@ func findAndUpdateBenchmarkStatus(benchmarkStatus []api.BenchmarkStatus, runStat
 	if !found {
 		// if the benchmark is not found, create a new benchmark status
 		newBenchmarkStatus := api.BenchmarkStatus{
-			ID:     runStatus.BenchmarkStatusEvent.ID,
-			Status: runStatus.BenchmarkStatusEvent.Status,
+			ProviderID: runStatus.BenchmarkStatusEvent.ProviderID,
+			ID:         runStatus.BenchmarkStatusEvent.ID,
+			Status:     runStatus.BenchmarkStatusEvent.Status,
 		}
 		if runStatus.BenchmarkStatusEvent.Status == api.StateFailed && runStatus.BenchmarkStatusEvent.ErrorMessage != nil {
 			newBenchmarkStatus.ErrorMessage = &api.MessageInfo{
@@ -505,10 +506,11 @@ func findAndUpdateBenchmarkResults(benchmarkResults *api.EvaluationJobResults, r
 	if !found {
 		if runStatus.BenchmarkStatusEvent.Status == api.StateCompleted {
 			newBenchmarkResult := api.BenchmarkStatus{
-				ID:        runStatus.BenchmarkStatusEvent.ID,
-				Status:    runStatus.BenchmarkStatusEvent.Status,
-				Metrics:   runStatus.BenchmarkStatusEvent.Metrics,
-				Artifacts: runStatus.BenchmarkStatusEvent.Artifacts,
+				ProviderID: runStatus.BenchmarkStatusEvent.ProviderID,
+				ID:         runStatus.BenchmarkStatusEvent.ID,
+				Status:     runStatus.BenchmarkStatusEvent.Status,
+				Metrics:    runStatus.BenchmarkStatusEvent.Metrics,
+				Artifacts:  runStatus.BenchmarkStatusEvent.Artifacts,
 			}
 			benchmarkResults.Benchmarks = append(benchmarkResults.Benchmarks, newBenchmarkResult)
 		}
