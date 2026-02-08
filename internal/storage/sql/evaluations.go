@@ -33,7 +33,23 @@ type EvaluationJobEntity struct {
 // the evaluation job is stored in the evaluations table as a JSON string
 // the evaluation job is returned as a EvaluationJobResource
 // This should use transactions etc and requires cleaning up
-func (s *SQLStorage) CreateEvaluationJob(evaluation *api.EvaluationJobConfig, mlflowExperimentID string) (*api.EvaluationJobResource, error) {
+func (s *SQLStorage) CreateEvaluationJob(evaluation *api.EvaluationJobConfig, mlflowExperimentID string) (*api.EvaluationJobResource, error) { // we have to get the evaluation job and update the status so we need a transaction
+	txn, err := s.pool.BeginTx(s.ctx, nil)
+	if err != nil {
+		s.logger.Error("Failed to begin create evaluation job transaction", "error", err)
+		return nil, serviceerrors.NewServiceError(messages.DatabaseOperationFailed, "Type", "evaluation job", "ResourceId", "<cretion>", "Error", err.Error())
+	}
+	jobID := s.generateID()
+	committed := false
+	defer func() {
+		if !committed {
+			err := txn.Rollback()
+			if err != nil {
+				s.logger.Error("Failed to rollback create evaluation job transaction", "error", err, "id", jobID)
+			}
+		}
+	}()
+
 	tenant, err := s.getTenant()
 	if err != nil {
 		return nil, err
@@ -57,29 +73,26 @@ func (s *SQLStorage) CreateEvaluationJob(evaluation *api.EvaluationJobConfig, ml
 	if err != nil {
 		return nil, err
 	}
-	jobID := s.generateID()
 	s.logger.Info("Creating evaluation job", "id", jobID, "tenant", tenant, "status", api.StatePending, "experiment_id", mlflowExperimentID)
 	// (id, tenant_id, status, experiment_id, entity)
-	_, err = s.exec(nil, addEntityStatement, jobID, tenant, api.StatePending, mlflowExperimentID, string(evaluationJSON))
+	_, err = s.exec(txn, addEntityStatement, jobID, tenant, api.StatePending, mlflowExperimentID, string(evaluationJSON))
 	if err != nil {
 		return nil, err
 	}
-	evaluationResource := &api.EvaluationJobResource{
-		Resource: api.EvaluationResource{
-			Resource: api.Resource{
-				ID:        jobID,
-				Tenant:    api.Tenant(tenant),
-				CreatedAt: time.Now(),
-				UpdatedAt: time.Now(),
-			},
-			MLFlowExperimentID: mlflowExperimentID,
-			Message:            status.Message,
-		},
-		EvaluationJobConfig: *evaluation,
-		Status:              status,
-		Results:             nil,
+
+	// now get the evaluation job so that we don't have to recreate it by hand
+	evaluationJob, err := s.getEvaluationJobTransactional(txn, jobID)
+	if err != nil {
+		return nil, err
 	}
-	return evaluationResource, nil
+
+	if err := txn.Commit(); err != nil {
+		s.logger.Error("Failed to commit create evaluation transaction", "error", err, "id", jobID)
+		return nil, serviceerrors.NewServiceError(messages.DatabaseOperationFailed, "Type", "evaluation job", "ResourceId", jobID, "Error", err.Error())
+	}
+	committed = true
+
+	return evaluationJob, nil
 }
 
 func (s *SQLStorage) createEvaluationJobEntity(evaluation *api.EvaluationJobConfig, status *api.EvaluationJobStatus, results *api.EvaluationJobResults) ([]byte, error) {
@@ -284,7 +297,7 @@ func (s *SQLStorage) UpdateEvaluationJobStatus(id string, state api.OverallState
 	// we have to get the evaluation job and update the status so we need a transaction
 	txn, err := s.pool.BeginTx(s.ctx, nil)
 	if err != nil {
-		s.logger.Error("Failed to begin update evaluation job statustransaction", "error", err, "id", id)
+		s.logger.Error("Failed to begin update evaluation job status transaction", "error", err, "id", id)
 		return serviceerrors.NewServiceError(messages.DatabaseOperationFailed, "Type", "evaluation job", "ResourceId", id, "Error", err.Error())
 	}
 	committed := false
