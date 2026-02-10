@@ -39,36 +39,20 @@ func (f *fakeStorage) WithLogger(_ *slog.Logger) abstractions.Storage { return f
 func (f *fakeStorage) WithContext(_ context.Context) abstractions.Storage {
 	return f
 }
-func (f *fakeStorage) GetDatasourceName() string  { return "fake" }
-func (f *fakeStorage) Ping(_ time.Duration) error { return nil }
-func (f *fakeStorage) CreateEvaluationJob(_ *api.EvaluationJobConfig, _ string) (*api.EvaluationJobResource, error) {
+
+func (f *fakeStorage) CreateEvaluationJob(_ *api.EvaluationJobConfig, _ string, _ string) (*api.EvaluationJobResource, error) {
 	return &api.EvaluationJobResource{
 		Resource: api.EvaluationResource{
 			Resource: api.Resource{ID: "job-1"},
 		},
 	}, nil
 }
-func (f *fakeStorage) GetEvaluationJob(_ string) (*api.EvaluationJobResource, error) { return nil, nil }
-func (f *fakeStorage) GetEvaluationJobs(_ int, _ int, _ string) (*abstractions.QueryResults[api.EvaluationJobResource], error) {
-	return nil, nil
-}
-func (f *fakeStorage) DeleteEvaluationJob(_ string, _ bool) error { return nil }
+
 func (f *fakeStorage) UpdateEvaluationJobStatus(id string, state api.OverallState, message *api.MessageInfo) error {
 	f.lastStatusID = id
 	f.lastStatus = state
 	return nil
 }
-func (f *fakeStorage) UpdateEvaluationJob(_ string, _ *api.StatusEvent) error { return nil }
-func (f *fakeStorage) CreateCollection(_ *api.CollectionResource) error       { return nil }
-func (f *fakeStorage) GetCollection(_ string, _ bool) (*api.CollectionResource, error) {
-	return nil, nil
-}
-func (f *fakeStorage) GetCollections(_ int, _ int) (*abstractions.QueryResults[api.CollectionResource], error) {
-	return nil, nil
-}
-func (f *fakeStorage) UpdateCollection(_ *api.CollectionResource) error { return nil }
-func (f *fakeStorage) DeleteCollection(_ string) error                  { return nil }
-func (f *fakeStorage) Close() error                                     { return nil }
 
 type fakeRuntime struct {
 	err    error
@@ -87,6 +71,7 @@ func (r *fakeRuntime) RunEvaluationJob(_ *api.EvaluationJobResource, _ *abstract
 
 func TestHandleCreateEvaluationMarksFailedWhenRuntimeErrors(t *testing.T) {
 	logger := slog.New(slog.NewTextHandler(io.Discard, nil))
+	// note that the fake storage only implements the functions that are used in this test
 	storage := &fakeStorage{}
 	runtime := &fakeRuntime{err: errors.New("runtime failed")}
 	validate := validator.New()
@@ -144,5 +129,55 @@ func TestHandleCreateEvaluationSucceedsWhenRuntimeOk(t *testing.T) {
 	}
 	if recorder.Code != 202 {
 		t.Fatalf("expected status 202, got %d", recorder.Code)
+	}
+}
+
+func TestHandleCreateEvaluationRejectsMissingBenchmarkID(t *testing.T) {
+	logger := slog.New(slog.NewTextHandler(io.Discard, nil))
+	storage := &fakeStorage{}
+	runtime := &fakeRuntime{}
+	validate := validator.New()
+	h := handlers.New(storage, validate, runtime, nil, nil, nil)
+
+	req := &bodyRequest{
+		MockRequest: createMockRequest("POST", "/api/v1/evaluations/jobs"),
+		body:        []byte(`{"model":{"url":"http://test.com","name":"test"},"benchmarks":[{"provider_id":"garak"}]}`),
+	}
+	ctx := executioncontext.NewExecutionContext(context.Background(), "req-3", logger, time.Second)
+	recorder := httptest.NewRecorder()
+	resp := MockResponseWrapper{recorder: recorder}
+
+	h.HandleCreateEvaluation(ctx, req, resp)
+
+	if runtime.called {
+		t.Fatalf("did not expect runtime to be invoked")
+	}
+	if recorder.Code != 400 {
+		t.Fatalf("expected status 400, got %d", recorder.Code)
+	}
+}
+
+func TestHandleCreateEvaluationRejectsMissingProviderID(t *testing.T) {
+	logger := slog.New(slog.NewTextHandler(io.Discard, nil))
+	storage := &fakeStorage{}
+	runtime := &fakeRuntime{}
+	validate := validator.New()
+	h := handlers.New(storage, validate, runtime, nil, nil, nil)
+
+	req := &bodyRequest{
+		MockRequest: createMockRequest("POST", "/api/v1/evaluations/jobs"),
+		body:        []byte(`{"model":{"url":"http://test.com","name":"test"},"benchmarks":[{"id":"bench-1"}]}`),
+	}
+	ctx := executioncontext.NewExecutionContext(context.Background(), "req-4", logger, time.Second)
+	recorder := httptest.NewRecorder()
+	resp := MockResponseWrapper{recorder: recorder}
+
+	h.HandleCreateEvaluation(ctx, req, resp)
+
+	if runtime.called {
+		t.Fatalf("did not expect runtime to be invoked")
+	}
+	if recorder.Code != 400 {
+		t.Fatalf("expected status 400, got %d", recorder.Code)
 	}
 }

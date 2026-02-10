@@ -78,13 +78,18 @@ func (h *Handlers) HandleCreateEvaluation(ctx *executioncontext.ExecutionContext
 		return
 	}
 
-	mlflowExperimentID, err := mlflow.GetExperimentID(ctx, h.mlflowClient, evaluation.Experiment)
-	if err != nil {
-		w.Error(err, ctx.RequestID)
-		return
+	mlflowExperimentID := ""
+	mlflowExperimentURL := ""
+	if h.mlflowClient != nil {
+		client := h.mlflowClient.WithContext(ctx.Ctx).WithLogger(ctx.Logger)
+		mlflowExperimentID, mlflowExperimentURL, err = mlflow.GetExperimentID(client, evaluation.Experiment)
+		if err != nil {
+			w.Error(err, ctx.RequestID)
+			return
+		}
 	}
 
-	response, err := storage.CreateEvaluationJob(evaluation, mlflowExperimentID)
+	response, err := storage.CreateEvaluationJob(evaluation, mlflowExperimentID, mlflowExperimentURL)
 	if err != nil {
 		w.Error(err, ctx.RequestID)
 		return
