@@ -78,13 +78,18 @@ func (h *Handlers) HandleCreateEvaluation(ctx *executioncontext.ExecutionContext
 		return
 	}
 
-	mlflowExperimentID, err := mlflow.GetExperimentID(ctx, h.mlflowClient, evaluation.Experiment)
-	if err != nil {
-		w.Error(err, ctx.RequestID)
-		return
+	mlflowExperimentID := ""
+	mlflowExperimentURL := ""
+	if h.mlflowClient != nil {
+		client := h.mlflowClient.WithContext(ctx.Ctx).WithLogger(ctx.Logger)
+		mlflowExperimentID, mlflowExperimentURL, err = mlflow.GetExperimentID(client, evaluation.Experiment)
+		if err != nil {
+			w.Error(err, ctx.RequestID)
+			return
+		}
 	}
 
-	response, err := storage.CreateEvaluationJob(evaluation, mlflowExperimentID)
+	response, err := storage.CreateEvaluationJob(evaluation, mlflowExperimentID, mlflowExperimentURL)
 	if err != nil {
 		w.Error(err, ctx.RequestID)
 		return
@@ -230,11 +235,37 @@ func (h *Handlers) HandleCancelEvaluation(ctx *executioncontext.ExecutionContext
 		return
 	}
 
-	err = storage.DeleteEvaluationJob(evaluationJobID, hardDelete)
-	if err != nil {
-		ctx.Logger.Info("Failed to delete evaluation job", "error", err.Error(), "id", evaluationJobID, "hardDelete", hardDelete)
-		w.Error(err, ctx.RequestID)
-		return
+	if hardDelete && h.runtime != nil {
+		job, err := storage.GetEvaluationJob(evaluationJobID)
+		if err != nil {
+			w.Error(err, ctx.RequestID)
+			return
+		}
+		if job != nil {
+			if err := h.runtime.WithLogger(ctx.Logger).WithContext(ctx.Ctx).DeleteEvaluationJobResources(job); err != nil {
+				// Cleanup failures shouldn't block deleting the storage record.
+				ctx.Logger.Error("Failed to delete evaluation runtime resources", "error", err, "id", evaluationJobID)
+			}
+		}
+	}
+
+	if !hardDelete {
+		err = storage.UpdateEvaluationJobStatus(evaluationJobID, api.OverallStateCancelled, &api.MessageInfo{
+			Message:     "Evaluation job cancelled",
+			MessageCode: constants.MESSAGE_CODE_EVALUATION_JOB_CANCELLED,
+		})
+		if err != nil {
+			ctx.Logger.Info("Failed to cancel evaluation job", "error", err.Error(), "id", evaluationJobID)
+			w.Error(err, ctx.RequestID)
+			return
+		}
+	} else {
+		err = storage.DeleteEvaluationJob(evaluationJobID)
+		if err != nil {
+			ctx.Logger.Info("Failed to delete evaluation job", "error", err.Error(), "id", evaluationJobID)
+			w.Error(err, ctx.RequestID)
+			return
+		}
 	}
 	w.WriteJSON(nil, 204)
 }
