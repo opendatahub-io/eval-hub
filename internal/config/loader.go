@@ -196,13 +196,31 @@ func LoadConfig(logger *slog.Logger, version string, build string, buildDate str
 	if len(dirs) == 0 {
 		dirs = []string{"config", "./config", "../../config", "tests"} // tests is for running the service on a local machine (not local mode)
 	}
+
 	configValues, err := readConfig(logger, "config", "yaml", dirs...)
 	if err != nil {
 		logger.Error("Failed to read configuration file config.yaml", "error", err.Error(), "dirs", dirs)
 		return nil, err
 	}
 
-	// now load the cluster config if found
+	// If CONFIG_PATH is set, load the operator-mounted config and apply its
+	// top-level keys over the bundled defaults. This replaces (not deep-merges)
+	// sections like secrets, so bundled secret mappings don't leak through.
+	// Values not present in the operator config (e.g. service) are preserved.
+	if configPath := os.Getenv("CONFIG_PATH"); configPath != "" {
+		logger.Info("CONFIG_PATH set, applying operator config", "config_path", configPath)
+		operatorConfig := viper.New()
+		operatorConfig.SetConfigFile(configPath)
+		if err := operatorConfig.ReadInConfig(); err != nil {
+			logger.Error("Failed to read CONFIG_PATH config", "config_path", configPath, "error", err.Error())
+			return nil, err
+		}
+		for key, value := range operatorConfig.AllSettings() {
+			configValues.Set(key, value)
+		}
+		logger.Info("Applied operator config", "config_path", configPath)
+	}
+
 	// set up the secrets from the secrets directory
 	secrets := SecretMap{}
 	if secretsSub := configValues.Sub("secrets"); secretsSub != nil {
