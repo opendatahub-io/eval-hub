@@ -203,22 +203,22 @@ func LoadConfig(logger *slog.Logger, version string, build string, buildDate str
 		return nil, err
 	}
 
-	// If CONFIG_PATH is set, merge the operator-mounted config on top of the
-	// bundled defaults so that values like service.port are preserved while
-	// the operator can override database, secrets, etc.
+	// If CONFIG_PATH is set, load the operator-mounted config and apply its
+	// top-level keys over the bundled defaults. This replaces (not deep-merges)
+	// sections like secrets, so bundled secret mappings don't leak through.
+	// Values not present in the operator config (e.g. service) are preserved.
 	if configPath := os.Getenv("CONFIG_PATH"); configPath != "" {
-		logger.Info("CONFIG_PATH set, merging operator config", "config_path", configPath)
-		// Clear secrets before merge — MergeInConfig deep-merges maps, so
-		// bundled secret mappings would persist alongside operator ones.
-		// Secrets are deployment-specific and must come entirely from the
-		// operator config.
-		configValues.Set("secrets", map[string]any{})
-		configValues.SetConfigFile(configPath)
-		if err := configValues.MergeInConfig(); err != nil {
-			logger.Error("Failed to merge CONFIG_PATH config", "config_path", configPath, "error", err.Error())
+		logger.Info("CONFIG_PATH set, applying operator config", "config_path", configPath)
+		operatorConfig := viper.New()
+		operatorConfig.SetConfigFile(configPath)
+		if err := operatorConfig.ReadInConfig(); err != nil {
+			logger.Error("Failed to read CONFIG_PATH config", "config_path", configPath, "error", err.Error())
 			return nil, err
 		}
-		logger.Info("Merged operator config", "config_path", configPath)
+		for key, value := range operatorConfig.AllSettings() {
+			configValues.Set(key, value)
+		}
+		logger.Info("Applied operator config", "config_path", configPath)
 	}
 
 	// set up the secrets from the secrets directory
