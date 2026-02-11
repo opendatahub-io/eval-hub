@@ -457,7 +457,11 @@ func (tc *scenarioConfig) iSendARequestToWithBody(method, path, body string) err
 	}
 	defer tc.response.Body.Close()
 
-	logDebug("Response status %d for %s\n", tc.response.StatusCode, endpoint)
+	if len(tc.body) > 0 && len(tc.body) < 512 {
+		logDebug("Response status %d for %s with body %s\n", tc.response.StatusCode, endpoint, string(tc.body))
+	} else {
+		logDebug("Response status %d for %s\n", tc.response.StatusCode, endpoint)
+	}
 
 	// this is just for a create evaluation job request
 	if method == http.MethodPost && tc.response.StatusCode == http.StatusAccepted {
@@ -639,14 +643,21 @@ func (tc *scenarioConfig) theResponseShouldContainAtJSONPath(expectedValue strin
 
 	// make this contains and not equals
 	// if foundValue == strings.TrimSpace(expectedValue) {
-	values := strings.Split(expectedValue, "|")
-	for _, value := range values {
+	values := strings.SplitSeq(expectedValue, "|")
+	for value := range values {
 		if strings.Contains(foundValue, value) {
 			return nil
 		}
 	}
 
 	return logError(fmt.Errorf("expected %s to be %s but was %s", jsonPath, expectedValue, foundValue))
+}
+
+func (tc *scenarioConfig) theResponseShouldNotContainAtJSONPath(expectedValue string, jsonPath string) error {
+	if tc.theResponseShouldContainAtJSONPath(expectedValue, jsonPath) == nil {
+		return logError(fmt.Errorf("expected %s to not contain %s but it did", jsonPath, expectedValue))
+	}
+	return nil
 }
 
 func getJsonPointer(path string) string {
@@ -810,6 +821,7 @@ func InitializeScenario(ctx *godog.ScenarioContext) {
 	ctx.Step(`^the response should have schema as:$`, tc.theResponseShouldHaveSchemaAs)
 	ctx.Step(`^the "([^"]*)" field in the response should be saved as "([^"]*)"$`, tc.theFieldShouldBeSaved)
 	ctx.Step(`^the response should contain the value "([^"]*)" at path "([^"]*)"$`, tc.theResponseShouldContainAtJSONPath)
+	ctx.Step(`^the response should not contain the value "([^"]*)" at path "([^"]*)"$`, tc.theResponseShouldNotContainAtJSONPath)
 	// Other steps
 	ctx.Step(`^fix this step$`, tc.fixThisStep)
 }
