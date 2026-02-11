@@ -196,6 +196,14 @@ func LoadConfig(logger *slog.Logger, version string, build string, buildDate str
 	if len(dirs) == 0 {
 		dirs = []string{"config", "./config", "../../config", "tests"} // tests is for running the service on a local machine (not local mode)
 	}
+
+	// If CONFIG_PATH is set, prepend its directory so the operator-mounted
+	// config is found before the image's built-in defaults.
+	if configPath := os.Getenv("CONFIG_PATH"); configPath != "" {
+		dir := filepath.Dir(configPath)
+		logger.Info("CONFIG_PATH set, prepending config directory", "config_path", configPath, "dir", dir)
+		dirs = append([]string{dir}, dirs...)
+	}
 	configValues, err := readConfig(logger, "config", "yaml", dirs...)
 	if err != nil {
 		logger.Error("Failed to read configuration file config.yaml", "error", err.Error(), "dirs", dirs)
