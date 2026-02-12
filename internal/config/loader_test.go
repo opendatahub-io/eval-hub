@@ -3,6 +3,7 @@ package config_test
 import (
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 
@@ -14,15 +15,6 @@ func TestLoadConfig(t *testing.T) {
 	logger := logging.FallbackLogger()
 
 	t.Run("loading config from tests directory", func(t *testing.T) {
-		secret := "mysecret"
-		secretPath := "/tmp/db_password"
-		err := os.WriteFile(secretPath, []byte(secret), 0600)
-		if err != nil {
-			t.Fatalf("Failed to create secret: %v", err)
-		}
-		t.Cleanup(func() {
-			os.Remove(secretPath)
-		})
 		serviceConfig, err := config.LoadConfig(logger, "0.0.1", "local", time.Now().Format(time.RFC3339), "../../tests")
 		if err != nil {
 			t.Fatalf("Failed to load config: %v", err)
@@ -39,15 +31,6 @@ func TestLoadConfig(t *testing.T) {
 	})
 
 	t.Run("setting environment variables", func(t *testing.T) {
-		secret := "mysecret"
-		secretPath := "/tmp/db_password"
-		err := os.WriteFile(secretPath, []byte(secret), 0600)
-		if err != nil {
-			t.Fatalf("Failed to create secret: %v", err)
-		}
-		t.Cleanup(func() {
-			os.Remove(secretPath)
-		})
 		os.Setenv("MLFLOW_TRACKING_URI", "http://localhost:9999")
 		t.Cleanup(func() {
 			os.Unsetenv("MLFLOW_TRACKING_URI")
@@ -222,7 +205,7 @@ secrets:
 		t.Cleanup(func() {
 			os.Remove(secretPath)
 		})
-		serviceConfig, err := config.LoadConfig(logger, "0.0.1", "local", time.Now().Format(time.RFC3339), "../../tests")
+		serviceConfig, err := config.LoadConfig(logger, "0.0.1", "local", time.Now().Format(time.RFC3339), "../../tests/secrets")
 		if err != nil {
 			t.Fatalf("Failed to load config: %v", err)
 		}
@@ -241,4 +224,71 @@ secrets:
 			t.Fatalf("Database password is not set")
 		}
 	})
+}
+
+func TestRedactedJSON(t *testing.T) {
+	type inner struct {
+		URL      string `json:"url"`
+		Driver   string `json:"driver"`
+		Password string `json:"password"`
+	}
+	type outer struct {
+		Database inner  `json:"database"`
+		Name     string `json:"name"`
+	}
+
+	t.Run("redacts password with [redacted]", func(t *testing.T) {
+		v := outer{
+			Database: inner{Password: "s3cret", Driver: "pgx"},
+			Name:     "test",
+		}
+		result := config.RedactedJSON(v, []string{"database.password"})
+		if !contains(result, `"password":"[redacted]"`) {
+			t.Fatalf("Expected password to be [redacted], got %s", result)
+		}
+		if !contains(result, `"name":"test"`) {
+			t.Fatalf("Expected name to be preserved, got %s", result)
+		}
+	})
+
+	t.Run("sanitises URL by stripping password", func(t *testing.T) {
+		v := outer{
+			Database: inner{
+				URL:    "postgres://user:p4ss@db-host:5432/evalhub",
+				Driver: "pgx",
+			},
+		}
+		result := config.RedactedJSON(v, []string{"database.url"})
+		if contains(result, "p4ss") {
+			t.Fatalf("Password should be stripped from URL, got %s", result)
+		}
+		if !contains(result, "user@db-host:5432") {
+			t.Fatalf("Expected sanitised URL with user and host, got %s", result)
+		}
+	})
+
+	t.Run("no redacted fields returns full JSON", func(t *testing.T) {
+		v := outer{
+			Database: inner{Password: "s3cret"},
+			Name:     "test",
+		}
+		result := config.RedactedJSON(v, nil)
+		if !contains(result, "s3cret") {
+			t.Fatalf("Expected unredacted output, got %s", result)
+		}
+	})
+
+	t.Run("non-existent field path is a no-op", func(t *testing.T) {
+		v := outer{
+			Database: inner{Password: "s3cret"},
+		}
+		result := config.RedactedJSON(v, []string{"database.missing"})
+		if !contains(result, "s3cret") {
+			t.Fatalf("Expected password to be untouched, got %s", result)
+		}
+	})
+}
+
+func contains(s, substr string) bool {
+	return strings.Contains(s, substr)
 }
