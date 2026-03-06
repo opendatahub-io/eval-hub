@@ -2,6 +2,7 @@ package k8s
 
 // Contains the builder functions that construct Kubernetes objects
 import (
+	"encoding/json"
 	"fmt"
 	"regexp"
 	"strings"
@@ -14,17 +15,20 @@ import (
 
 const (
 	maxK8sNameLength                = 63
+	maxK8sLabelValueLength          = 63
 	defaultJobTTLSeconds            = int32(3600)
 	defaultJobBackoffLimit          = int32(3)
 	adapterContainerName            = "adapter"
+	initContainerName               = "init"
 	jobSpecVolumeName               = "job-spec"
 	dataVolumeName                  = "data"
+	testDataVolumeName              = "test-data"
 	serviceCAVolumeName             = "evalhub-service-ca"
 	jobSpecFileName                 = "job.json"
 	jobSpecMountPath                = "/meta/job.json"
 	dataMountPath                   = "/data"
+	testDataMountPath               = "/test_data"
 	serviceCAMountPath              = "/etc/pki/ca-trust/source/anchors"
-	jobPrefix                       = "eval-job-"
 	specSuffix                      = "-spec"
 	envJobIDName                    = "JOB_ID"
 	envEvalHubURLName               = "EVALHUB_URL"
@@ -34,26 +38,47 @@ const (
 	mlflowTokenVolumeName           = "mlflow-token"
 	mlflowTokenMountPath            = "/var/run/secrets/mlflow"
 	mlflowTokenFile                 = "token"
+	ociCredentialsVolumeName        = "oci-credentials"
+	ociCredentialsMountPath         = "/etc/evalhub/.docker/config.json"
+	ociCredentialsSubPath           = ".dockerconfigjson"
+	envOCIAuthConfigPathName        = "OCI_AUTH_CONFIG_PATH"
+	modelAuthVolumeName             = "model-auth"
+	modelAuthMountPath              = "/var/run/secrets/model"
+	testDataSecretVolumeName        = "test-data-secret"
+	testDataSecretMountPath         = "/var/run/secrets/test-data"
+	testDataInitImage               = "quay.io/evalhub/evalhub:latest"
 	serviceCABundleFile             = "service-ca.crt"
-	envRequestsCABundleName         = "REQUESTS_CA_BUNDLE"
+	envMLFlowCertPathName           = "MLFLOW_TRACKING_SERVER_CERT_PATH"
+	envTestDataS3BucketName         = "TEST_DATA_S3_BUCKET"
+	envTestDataS3KeyName            = "TEST_DATA_S3_KEY"
+	defaultInitCPURequest           = "100m"
+	defaultInitCPULimit             = "500m"
+	defaultInitMemoryRequest        = "128Mi"
+	defaultInitMemoryLimit          = "512Mi"
 	defaultAllowPrivilegeEscalation = false
 	//defaultRunAsUser                = int64(1000)
 	//defaultRunAsGroup               = int64(1000)
-	labelAppKey         = "app"
-	labelComponentKey   = "component"
-	labelJobIDKey       = "job_id"
-	labelProviderIDKey  = "provider_id"
-	labelBenchmarkIDKey = "benchmark_id"
-	labelAppValue       = "evalhub"
-	labelComponentValue = "evaluation-job"
-	capabilityDropAll   = "ALL"
+	labelAppKey              = "app"
+	labelComponentKey        = "component"
+	labelJobIDKey            = "job_id"
+	labelProviderIDKey       = "provider_id"
+	labelBenchmarkIDKey      = "benchmark_id"
+	labelAppValue            = "evalhub"
+	labelComponentValue      = "evaluation-job"
+	capabilityDropAll        = "ALL"
+	annotationJobIDKey       = "eval-hub.github.io/job_id"
+	annotationProviderIDKey  = "eval-hub.github.io/provider_id"
+	annotationBenchmarkIDKey = "eval-hub.github.io/benchmark_id"
 )
 
-var dnsLabelSanitizer = regexp.MustCompile(`[^a-z0-9-]+`)
+var (
+	k8sResourceNameSanitizer = regexp.MustCompile(`[^a-z0-9-]+`)
+	k8sLabelValueSanitizer   = regexp.MustCompile(`[^a-z0-9-_.]+`)
+)
 
 func sanitizeDNS1123Label(value string) string {
 	safe := strings.ToLower(value)
-	safe = dnsLabelSanitizer.ReplaceAllString(safe, "-")
+	safe = k8sResourceNameSanitizer.ReplaceAllString(safe, "-")
 	safe = strings.Trim(safe, "-")
 	if safe == "" {
 		return "x"
@@ -61,35 +86,59 @@ func sanitizeDNS1123Label(value string) string {
 	return safe
 }
 
-func buildK8sName(jobID, benchmarkID, suffix string) string {
-	base := jobPrefix + sanitizeDNS1123Label(jobID) + "-" + sanitizeDNS1123Label(benchmarkID)
-	maxBase := maxK8sNameLength - len(suffix)
-	if maxBase < 1 {
-		maxBase = 1
+func sanitizeLabelValue(value string) string {
+	safe := strings.ToLower(value)
+	safe = k8sLabelValueSanitizer.ReplaceAllString(safe, "-")
+	if len(safe) > maxK8sLabelValueLength {
+		safe = safe[:maxK8sLabelValueLength]
 	}
-	if len(base) > maxBase {
-		base = strings.Trim(base[:maxBase], "-")
+	safe = strings.Trim(safe, "-_.")
+	if safe == "" {
+		return "x"
 	}
-	name := base + suffix
+	return safe
+}
+
+// buildK8sName returns a DNS-1123-safe name for Jobs and ConfigMaps:
+// base = "<jobID>-<guid>", plus optional suffix (e.g. "-spec" for ConfigMaps),
+// all kept within 63 chars.
+func buildK8sName(jobID, resourceGUID, suffix string) string {
+	safeJobID := sanitizeDNS1123Label(jobID)
+	safeGUID := sanitizeDNS1123Label(resourceGUID)
+	maxJobID := maxK8sNameLength - len(suffix) - len(safeGUID) - 1
+	if maxJobID < 1 {
+		maxJobID = 1
+	}
+	if len(safeJobID) > maxJobID {
+		safeJobID = strings.Trim(safeJobID[:maxJobID], "-")
+	}
+	name := safeJobID + "-" + safeGUID + suffix
 	if len(name) > maxK8sNameLength {
 		name = strings.Trim(name[:maxK8sNameLength], "-")
 	}
 	return name
 }
 
-func buildConfigMap(cfg *jobConfig) *corev1.ConfigMap {
+func buildConfigMap(cfg *jobConfig) (*corev1.ConfigMap, error) {
 	labels := jobLabels(cfg.jobID, cfg.providerID, cfg.benchmarkID)
-	name := configMapName(cfg.jobID, cfg.benchmarkID)
+	annotations := jobAnnotations(cfg.jobID, cfg.providerID, cfg.benchmarkID)
+	name := configMapName(cfg.jobID, cfg.resourceGUID)
+
+	specJSON, err := json.MarshalIndent(cfg.jobSpec, "", "  ")
+	if err != nil {
+		return nil, fmt.Errorf("marshal job spec: %w", err)
+	}
 	return &corev1.ConfigMap{
 		ObjectMeta: metav1.ObjectMeta{
-			Name:      name,
-			Namespace: cfg.namespace,
-			Labels:    labels,
+			Name:        name,
+			Namespace:   cfg.namespace,
+			Labels:      labels,
+			Annotations: annotations,
 		},
 		Data: map[string]string{
-			jobSpecFileName: cfg.jobSpecJSON,
+			jobSpecFileName: string(specJSON),
 		},
-	}
+	}, nil
 }
 
 func buildJob(cfg *jobConfig) (*batchv1.Job, error) {
@@ -97,8 +146,9 @@ func buildJob(cfg *jobConfig) (*batchv1.Job, error) {
 		return nil, fmt.Errorf("adapter image is required")
 	}
 	labels := jobLabels(cfg.jobID, cfg.providerID, cfg.benchmarkID)
-	jobName := jobName(cfg.jobID, cfg.benchmarkID)
-	configMap := configMapName(cfg.jobID, cfg.benchmarkID)
+	annotations := jobAnnotations(cfg.jobID, cfg.providerID, cfg.benchmarkID)
+	jobName := jobName(cfg.jobID, cfg.resourceGUID)
+	configMap := configMapName(cfg.jobID, cfg.resourceGUID)
 
 	ttl := defaultJobTTLSeconds
 	backoff := defaultJobBackoffLimit
@@ -176,24 +226,121 @@ func buildJob(cfg *jobConfig) (*batchv1.Job, error) {
 		})
 	}
 
+	// Add OCI credentials volume/mount when a K8s secret connection is configured.
+	if cfg.ociCredentialsSecret != "" {
+		volumes = append(volumes, corev1.Volume{
+			Name: ociCredentialsVolumeName,
+			VolumeSource: corev1.VolumeSource{
+				Secret: &corev1.SecretVolumeSource{
+					SecretName: cfg.ociCredentialsSecret,
+				},
+			},
+		})
+		volumeMounts = append(volumeMounts, corev1.VolumeMount{
+			Name:      ociCredentialsVolumeName,
+			MountPath: ociCredentialsMountPath,
+			SubPath:   ociCredentialsSubPath,
+			ReadOnly:  true,
+		})
+	}
+
+	// Add model auth secret when configured.
+	if cfg.modelAuthSecretRef != "" {
+		volumes = append(volumes, corev1.Volume{
+			Name: modelAuthVolumeName,
+			VolumeSource: corev1.VolumeSource{
+				Secret: &corev1.SecretVolumeSource{
+					SecretName: cfg.modelAuthSecretRef,
+				},
+			},
+		})
+		volumeMounts = append(volumeMounts, corev1.VolumeMount{
+			Name:      modelAuthVolumeName,
+			MountPath: modelAuthMountPath,
+			ReadOnly:  true,
+		})
+	}
+
+	// Add test data volumes and init container when S3 test data is configured.
+	var initContainers []corev1.Container
+	if hasS3TestData(cfg) {
+		initCommand := defaultTestDataInitCmd
+		initImage := defaultIfEmpty(cfg.testDataInitImage, testDataInitImage)
+		initResources := corev1.ResourceRequirements{
+			Requests: corev1.ResourceList{
+				corev1.ResourceCPU:    resource.MustParse(defaultInitCPURequest),
+				corev1.ResourceMemory: resource.MustParse(defaultInitMemoryRequest),
+			},
+			Limits: corev1.ResourceList{
+				corev1.ResourceCPU:    resource.MustParse(defaultInitCPULimit),
+				corev1.ResourceMemory: resource.MustParse(defaultInitMemoryLimit),
+			},
+		}
+		volumes = append(volumes, corev1.Volume{
+			Name: testDataVolumeName,
+			VolumeSource: corev1.VolumeSource{
+				EmptyDir: &corev1.EmptyDirVolumeSource{},
+			},
+		})
+		volumes = append(volumes, corev1.Volume{
+			Name: testDataSecretVolumeName,
+			VolumeSource: corev1.VolumeSource{
+				Secret: &corev1.SecretVolumeSource{
+					SecretName: cfg.testDataS3.secretRef,
+				},
+			},
+		})
+		volumeMounts = append(volumeMounts, corev1.VolumeMount{
+			Name:      testDataVolumeName,
+			MountPath: testDataMountPath,
+		})
+
+		initContainers = append(initContainers, corev1.Container{
+			Name:            initContainerName,
+			Image:           initImage,
+			ImagePullPolicy: corev1.PullAlways,
+			Command:         []string{initCommand},
+			Resources:       initResources,
+			Env: []corev1.EnvVar{
+				{Name: envTestDataS3BucketName, Value: cfg.testDataS3.bucket},
+				{Name: envTestDataS3KeyName, Value: normalizeS3Key(cfg.testDataS3.key)},
+			},
+			SecurityContext: defaultSecurityContext(),
+			VolumeMounts: []corev1.VolumeMount{
+				{
+					Name:      testDataVolumeName,
+					MountPath: testDataMountPath,
+				},
+				{
+					Name:      testDataSecretVolumeName,
+					MountPath: testDataSecretMountPath,
+					ReadOnly:  true,
+				},
+			},
+		})
+	}
+
 	// Set ServiceAccount if configured
 	// applied below in template spec
 
 	return &batchv1.Job{
 		ObjectMeta: metav1.ObjectMeta{
-			Name:      jobName,
-			Namespace: cfg.namespace,
-			Labels:    labels,
+			Name:        jobName,
+			Namespace:   cfg.namespace,
+			Labels:      labels,
+			Annotations: annotations,
 		},
 		Spec: batchv1.JobSpec{
 			BackoffLimit:            &backoff,
 			TTLSecondsAfterFinished: &ttl,
 			Template: corev1.PodTemplateSpec{
 				ObjectMeta: metav1.ObjectMeta{
-					Labels: labels,
+					Labels:      labels,
+					Annotations: annotations,
 				},
 				Spec: corev1.PodSpec{
-					RestartPolicy: corev1.RestartPolicyNever,
+					RestartPolicy:  corev1.RestartPolicyNever,
+					InitContainers: initContainers,
 					Containers: []corev1.Container{
 						{
 							Name:            adapterContainerName,
@@ -261,6 +408,17 @@ func buildContainerCommand(entrypoint []string) []string {
 	return command
 }
 
+func hasS3TestData(cfg *jobConfig) bool {
+	if cfg.testDataS3.secretRef == "" || cfg.testDataS3.bucket == "" {
+		return false
+	}
+	return normalizeS3Key(cfg.testDataS3.key) != ""
+}
+
+func normalizeS3Key(key string) string {
+	return strings.TrimPrefix(strings.TrimSpace(key), "/")
+}
+
 func defaultSecurityContext() *corev1.SecurityContext {
 	return &corev1.SecurityContext{
 		AllowPrivilegeEscalation: boolPtr(defaultAllowPrivilegeEscalation),
@@ -324,14 +482,27 @@ func buildEnvVars(cfg *jobConfig) []corev1.EnvVar {
 		seen[envMLFlowWorkspaceName] = true
 	}
 
-	// Set REQUESTS_CA_BUNDLE so Python's requests library (used by mlflow)
-	// trusts the OpenShift service-serving CA certificate.
-	if cfg.serviceCAConfigMap != "" {
+	// Add OCI auth config path when credentials secret is configured
+	if cfg.ociCredentialsSecret != "" {
 		env = append(env, corev1.EnvVar{
-			Name:  envRequestsCABundleName,
+			Name:  envOCIAuthConfigPathName,
+			Value: ociCredentialsMountPath,
+		})
+		seen[envOCIAuthConfigPathName] = true
+	}
+
+	// Set MLFLOW_TRACKING_SERVER_CERT_PATH so mlflow's tracking client
+	// trusts the OpenShift service-serving CA certificate for internal calls.
+	// Note: we intentionally do NOT set REQUESTS_CA_BUNDLE, because it
+	// overrides the system CA bundle globally for all Python requests calls,
+	// breaking external HTTPS connections (e.g. HuggingFace tokenizer downloads).
+	// The adapter SDK's httpx client auto-detects the service CA independently.
+	if cfg.serviceCAConfigMap != "" && cfg.mlflowTrackingURI != "" {
+		env = append(env, corev1.EnvVar{
+			Name:  envMLFlowCertPathName,
 			Value: serviceCAMountPath + "/" + serviceCABundleFile,
 		})
-		seen[envRequestsCABundleName] = true
+		seen[envMLFlowCertPathName] = true
 	}
 
 	// Add provider-specific environment variables
@@ -390,20 +561,28 @@ func buildResources(cfg *jobConfig) (corev1.ResourceRequirements, error) {
 	return resources, nil
 }
 
-func jobName(jobID, benchmarkID string) string {
-	return buildK8sName(jobID, benchmarkID, "")
+func jobName(jobID, resourceGUID string) string {
+	return buildK8sName(jobID, resourceGUID, "")
 }
 
-func configMapName(jobID, benchmarkID string) string {
-	return buildK8sName(jobID, benchmarkID, specSuffix)
+func configMapName(jobID, resourceGUID string) string {
+	return buildK8sName(jobID, resourceGUID, specSuffix)
 }
 
 func jobLabels(jobID, providerID, benchmarkID string) map[string]string {
 	return map[string]string{
 		labelAppKey:         labelAppValue,
 		labelComponentKey:   labelComponentValue,
-		labelJobIDKey:       jobID,
-		labelProviderIDKey:  providerID,
-		labelBenchmarkIDKey: benchmarkID,
+		labelJobIDKey:       sanitizeLabelValue(jobID),
+		labelProviderIDKey:  sanitizeLabelValue(providerID),
+		labelBenchmarkIDKey: sanitizeLabelValue(benchmarkID),
+	}
+}
+
+func jobAnnotations(jobID, providerID, benchmarkID string) map[string]string {
+	return map[string]string{
+		annotationJobIDKey:       jobID,
+		annotationProviderIDKey:  providerID,
+		annotationBenchmarkIDKey: benchmarkID,
 	}
 }

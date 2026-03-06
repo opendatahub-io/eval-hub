@@ -1,15 +1,15 @@
-.PHONY: help autoupdate-precommit pre-commit clean build build-coverage start-service stop-service lint test test-fvt-server test-all test-coverage test-fvt-coverage test-fvt-server-coverage test-all-coverage install-deps update-deps get-deps fmt vet update-deps generate-public-docs verify-api-docs generate-ignore-file documentation check-unused-components
+.PHONY: help autoupdate-precommit pre-commit clean build build-coverage start-service stop-service lint test test-fvt-server test-all test-coverage test-fvt-coverage test-fvt-server-coverage test-all-coverage install-deps update-deps get-deps fmt vet update-deps generate-public-docs verify-api-docs generate-ignore-file documentation check-unused-components fvt-report
 
 # Variables
 BINARY_NAME = eval-hub
 CMD_PATH = ./cmd/eval_hub
+INIT_BINARY_NAME = eval-hub-init
+INIT_CMD_PATH = ./cmd/eval_hub_init
 BIN_DIR = bin
 PORT ?= 8080
 
 # Default target
 .DEFAULT_GOAL := help
-
-UNAME := $(shell uname)
 
 # Auto-detect platform for cross-compilation and wheel building
 # Uses Go's native platform detection - override by setting CROSS_GOOS/CROSS_GOARCH env vars if needed.
@@ -45,19 +45,25 @@ $(BIN_DIR):
 	@mkdir -p $(BIN_DIR)
 
 BUILD_PACKAGE ?= main
-FULL_BUILD_NUMBER ?= 0.0.1
+FULL_BUILD_NUMBER ?= 0.2.0
 LDFLAGS_X = -X "${BUILD_PACKAGE}.Build=${FULL_BUILD_NUMBER}" -X "${BUILD_PACKAGE}.BuildDate=$(DATE)"
 LDFLAGS = -buildmode=exe ${LDFLAGS_X}
 
-build: $(BIN_DIR) ## Build the binary
+build: $(BIN_DIR) ## Build the binaries
 	@echo "Building $(BINARY_NAME) with ${LDFLAGS}"
 	@go build -race -ldflags "${LDFLAGS}" -o $(BIN_DIR)/$(BINARY_NAME) $(CMD_PATH)
 	@echo "Build complete: $(BIN_DIR)/$(BINARY_NAME)"
+	@echo "Building $(INIT_BINARY_NAME) with ${LDFLAGS}"
+	@go build -race -ldflags "${LDFLAGS}" -o $(BIN_DIR)/$(INIT_BINARY_NAME) $(INIT_CMD_PATH)
+	@echo "Build complete: $(BIN_DIR)/$(INIT_BINARY_NAME)"
 
-build-coverage: $(BIN_DIR) ## Build the binary with coverage
+build-coverage: $(BIN_DIR) ## Build the binaries with coverage
 	@echo "Building $(BINARY_NAME)-cov with -cover -covermode=atomic -ldflags ${LDFLAGS} "
 	@go build -race -cover -covermode=atomic -coverpkg=./... -ldflags "${LDFLAGS}" -o $(BIN_DIR)/$(BINARY_NAME)-cov $(CMD_PATH)
 	@echo "Build complete: $(BIN_DIR)/$(BINARY_NAME)-cov"
+	@echo "Building $(INIT_BINARY_NAME)-cov with -cover -covermode=atomic -ldflags ${LDFLAGS} "
+	@go build -race -cover -covermode=atomic -coverpkg=./... -ldflags "${LDFLAGS}" -o $(BIN_DIR)/$(INIT_BINARY_NAME)-cov $(INIT_CMD_PATH)
+	@echo "Build complete: $(BIN_DIR)/$(INIT_BINARY_NAME)-cov"
 
 SERVER_PID_FILE ?= $(BIN_DIR)/pid
 
@@ -95,11 +101,31 @@ vet: ## Run go vet
 
 test: ## Run unit tests
 	@echo "Running unit tests..."
-	@go test -v ./internal/... ./cmd/...
+	@go test -v ./auth/... ./internal/... ./cmd/...
+
+GOBIN := $(shell go env GOPATH)/bin
+
+$(GOBIN)/gotest:
+	GOBIN=$(GOBIN) go install github.com/rakyll/gotest@latest
+
+test-color: $(GOBIN)/gotest
+	@echo "Running unit tests with color..."
+	@$(GOBIN)/gotest -v -race ./internal/... ./cmd/...
+	@echo "Unit tests complete"
 
 test-fvt: $(BIN_DIR) ## Run FVT (Functional Verification Tests) using godog
 	@echo "Running FVT tests..."
 	@go test -v -race ./tests/features/...
+
+fvt-report: ## Generate HTML report for FVT tests
+	@echo "Generating FVT JSON report..."
+	@GODOG_FORMAT=cucumber GODOG_OUTPUT="$${PWD}/cucumber-fvt.json" go test -v -race ./tests/features/...; status=$$?; \
+	echo "Converting JSON report to HTML..."; \
+	node -e "require('cucumber-html-reporter').generate({theme:'bootstrap',jsonFile:'cucumber-fvt.json',output:'cucumber-report.html'})" 2>&1; \
+	report_status=$$?; \
+	if [ $$report_status -ne 0 ]; then echo "Report generation failed (see output above)."; fi; \
+	if [ -f cucumber-report.html ]; then echo "Report generated: cucumber-report.html"; else echo "Report not generated: cucumber-report.html"; fi; \
+	exit $$status
 
 test-all: test test-fvt ## Run all tests (unit + FVT)
 
@@ -111,8 +137,10 @@ test-fvt-server: start-service ## Run FVT tests using godog against a running se
 test-coverage: $(BIN_DIR) ## Run unit tests with coverage
 	@echo "Running unit tests with coverage..."
 	@go test -v -race -coverprofile=$(BIN_DIR)/coverage.out -covermode=atomic ./internal/... ./cmd/...
+	@go test -v -race -coverprofile=$(BIN_DIR)/coverage-init.out -covermode=atomic ./cmd/eval_hub_init
 	@go tool cover -html=$(BIN_DIR)/coverage.out -o $(BIN_DIR)/coverage.html
-	@echo "Coverage report generated: $(BIN_DIR)/coverage.html"
+	@go tool cover -html=$(BIN_DIR)/coverage-init.out -o $(BIN_DIR)/coverage-init.html
+	@echo "Coverage report generated: $(BIN_DIR)/coverage.html and $(BIN_DIR)/coverage-init.html"
 
 test-fvt-coverage: $(BIN_DIR)## Run integration (FVT) tests with coverage
 	@echo "Running integration (FVT) tests with coverage..."
@@ -144,45 +172,6 @@ get-deps: ## Get all dependencies
 	@go get ./...
 	@go get -t ./...
 	@echo "Dependencies updated"
-
-POSTGRES_VERSION ?= 18
-
-ifeq (${UNAME}, Darwin)
-install-postgres:
-	brew install postgresql@${POSTGRES_VERSION}
-else ifeq ($(UNAME), Linux)
-install-postgres:
-	sudo apt-get install postgresql
-else
-install-postgres:
-	echo "Unsupported platform: ${UNAME}"
-	exit 1
-endif
-
-ifeq (${UNAME}, Darwin)
-start-postgres:
-	brew services start postgresql@${POSTGRES_VERSION}
-else ifeq ($(UNAME), Linux)
-start-postgres:
-	sudo systemctl start postgresql
-endif
-
-ifeq (${UNAME}, Darwin)
-stop-postgres:
-	brew services stop postgresql@${POSTGRES_VERSION}
-else ifeq ($(UNAME), Linux)
-stop-postgres:
-	sudo systemctl stop postgresql
-endif
-
-create-database:
-	sudo -u postgres createdb eval_hub
-
-create-user:
-	sudo -u postgres createuser -s -d -r eval_hub
-
-grant-permissions:
-	sudo -u postgres psql -c "GRANT ALL PRIVILEGES ON DATABASE eval_hub TO eval_hub;"
 
 # Cross-compilation variables
 CROSS_OUTPUT_SUFFIX = $(CROSS_GOOS)-$(CROSS_GOARCH)
@@ -314,4 +303,5 @@ check-unused-components:
 documentation: check-unused-components generate-public-docs verify-api-docs
 
 update-redocly-cli:
-	npm i @redocly/cli@latest
+	rm -f package-lock.json
+	npm install @redocly/cli@latest

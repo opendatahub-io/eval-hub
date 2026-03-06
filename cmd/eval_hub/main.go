@@ -3,6 +3,7 @@ package main
 import (
 	"context"
 	"errors"
+	"flag"
 	"fmt"
 	"log"
 	"log/slog"
@@ -12,10 +13,12 @@ import (
 	"syscall"
 	"time"
 
+	"github.com/eval-hub/eval-hub/auth"
 	"github.com/eval-hub/eval-hub/cmd/eval_hub/server"
 	"github.com/eval-hub/eval-hub/internal/config"
 	"github.com/eval-hub/eval-hub/internal/logging"
 	"github.com/eval-hub/eval-hub/internal/mlflow"
+	"github.com/eval-hub/eval-hub/internal/otel"
 	"github.com/eval-hub/eval-hub/internal/runtimes"
 	"github.com/eval-hub/eval-hub/internal/storage"
 	"github.com/eval-hub/eval-hub/internal/validation"
@@ -23,25 +26,50 @@ import (
 
 var (
 	// Version can be set during the compilation
-	Version string = "0.0.1"
+	Version string = "0.2.0"
 	// Build is set during the compilation
 	Build string
 	// BuildDate is set during the compilation
 	BuildDate string
 )
 
+type Args struct {
+	ConfigDir string
+	LocalMode bool
+}
+
+func args() Args {
+	configDir := ""
+	dir := flag.String("configdir", configDir, "Directory to search for configuration files.")
+	local := flag.Bool("local", false, "Server operates in local mode or not.")
+	flag.Parse()
+	configDir = *dir
+	if configDir == "" {
+		configDir = os.Getenv("EVAL_HUB_CONFIG_DIR")
+	}
+
+	return Args{
+		ConfigDir: configDir,
+		LocalMode: *local,
+	}
+}
+
 func main() {
+	args := args()
+
 	logger, logShutdown, err := logging.NewLogger()
 	if err != nil {
 		// we do this as no point trying to continue
 		startUpFailed(nil, err, "Failed to create service logger", logging.FallbackLogger())
 	}
 
-	serviceConfig, err := config.LoadConfig(logger, Version, Build, BuildDate)
+	serviceConfig, err := config.LoadConfig(logger, Version, Build, BuildDate, args.ConfigDir)
 	if err != nil {
 		// we do this as no point trying to continue
 		startUpFailed(nil, err, "Failed to create service config", logger)
 	}
+
+	serviceConfig.Service.LocalMode = args.LocalMode
 
 	// set up the validator
 	validate, err := validation.NewValidator()
@@ -51,14 +79,14 @@ func main() {
 	}
 
 	// set up the storage
-	storage, err := storage.NewStorage(serviceConfig.Database, logger)
+	storage, err := storage.NewStorage(serviceConfig.Database, serviceConfig.IsOTELEnabled(), logger)
 	if err != nil {
 		// we do this as no point trying to continue
 		startUpFailed(serviceConfig, err, "Failed to create storage", logger)
 	}
 
 	// set up the provider configs
-	providerConfigs, err := config.LoadProviderConfigs(logger)
+	providerConfigs, err := config.LoadProviderConfigs(logger, args.ConfigDir)
 	if err != nil {
 		// we do this as no point trying to continue
 		startUpFailed(serviceConfig, err, "Failed to create provider configs", logger)
@@ -77,7 +105,36 @@ func main() {
 		startUpFailed(serviceConfig, err, "Failed to create MLFlow client", logger)
 	}
 
-	srv, err := server.NewServer(logger, serviceConfig, providerConfigs, storage, validate, runtime, mlflowClient)
+	// setup OTEL
+	var otelShutdown func(context.Context) error
+	if serviceConfig.IsOTELEnabled() {
+		// TODO CHECK TO SEE WHY WE HAVE TO PASS IN A CONTEXT HERE
+		shutdown, err := otel.SetupOTEL(context.Background(), serviceConfig.OTEL, logger)
+		if err != nil {
+			// we do this as no point trying to continue
+			startUpFailed(serviceConfig, err, "Failed to setup OTEL", logger)
+		}
+		otelShutdown = shutdown
+	}
+
+	var authConfig *auth.AuthConfig = nil
+	if !serviceConfig.Service.DisableAuth {
+		authConfig, err = config.LoadAuthConfig(logger, args.ConfigDir)
+		if err != nil {
+			startUpFailed(serviceConfig, err, "Failed to setup authentication and authorization", logger)
+		}
+	}
+
+	// create the server
+	srv, err := server.NewServer(logger,
+		serviceConfig,
+		providerConfigs,
+		authConfig,
+		storage,
+		validate,
+		runtime,
+		mlflowClient)
+
 	if err != nil {
 		// we do this as no point trying to continue
 		startUpFailed(serviceConfig, err, "Failed to create server", logger)
@@ -91,7 +148,10 @@ func main() {
 		"build_date", serviceConfig.Service.BuildDate,
 		"validator", validate != nil,
 		"local", serviceConfig.Service.LocalMode,
+		"tls", serviceConfig.Service.TLSEnabled(),
 		"mlflow_tracking", mlflowClient != nil,
+		"otel", serviceConfig.IsOTELEnabled(),
+		"prometheus", serviceConfig.IsPrometheusEnabled(),
 	)
 
 	// Start server in a goroutine
@@ -111,20 +171,28 @@ func main() {
 	signal.Notify(quit, syscall.SIGINT, syscall.SIGTERM)
 	<-quit
 
-	logger.Info("Shutting down server...")
+	// Create a context with timeout for graceful shutdown
+	waitForShutdown := 30 * time.Second
+	shutdownCtx, cancel := context.WithTimeout(context.Background(), waitForShutdown)
+	defer cancel()
 
 	// shutdown the storage
+	logger.Info("Shutting down storage...")
 	if err := storage.Close(); err != nil {
 		logger.Error("Failed to close storage", "error", err.Error())
 	}
 
-	// Create a context with timeout for graceful shutdown
-	waitForShutdown := 30 * time.Second
-	ctx, cancel := context.WithTimeout(context.Background(), waitForShutdown)
-	defer cancel()
+	// shutdown the otel tracing
+	if otelShutdown != nil {
+		logger.Info("Shutting down OTEL...")
+		if err := otelShutdown(shutdownCtx); err != nil {
+			logger.Error("Failed to shutdown OTEL", "error", err.Error())
+		}
+	}
 
 	// shutdown the logger
-	if err := srv.Shutdown(ctx); err != nil {
+	logger.Info("Shutting down server...")
+	if err := srv.Shutdown(shutdownCtx); err != nil {
 		logger.Error("Server forced to shutdown", "error", err.Error(), "timeout", waitForShutdown)
 		_ = logShutdown() // ignore the error
 	} else {

@@ -65,7 +65,7 @@ make clean              # Remove build artifacts and coverage files
 ### Project Structure
 This project follows the standard Go project layout with a clear separation between public entry points (`cmd/`) and private application code (`internal/`).
 
-- **cmd/eval_hub/** - Main application entry point 
+- **cmd/eval_hub/** - Main application entry point
 - **internal/config/** - Configuration loading with Viper
 - **internal/constants/** - Shared constants (log field names, etc.)
 - **internal/executioncontext/** - ExecutionContext pattern implementation
@@ -103,7 +103,7 @@ Configuration uses Viper with a sophisticated loading strategy:
 
 
 Configuration supports:
-- **Environment variable mapping**: Define in `env.mappings` (e.g., `PORT` → `service.port`)
+- **Environment variable mapping**: Define in `env_mappings` (e.g., `PORT` → `service.port`)
 - **Secrets from files**: Define in `secrets.mappings` with `secrets.dir` (e.g., `/tmp/db_password` → `database.password`)
 - Values cascade from config.yaml to env vars to secrets
 

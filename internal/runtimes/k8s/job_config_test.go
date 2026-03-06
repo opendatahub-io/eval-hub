@@ -1,15 +1,23 @@
 package k8s
 
 import (
-	"encoding/json"
 	"testing"
 
+	"github.com/eval-hub/eval-hub/internal/runtimes/shared"
 	"github.com/eval-hub/eval-hub/pkg/api"
 )
 
 func TestBuildJobConfigDefaults(t *testing.T) {
 	serviceURL := "http://eval-hub"
 	t.Setenv(serviceURLEnv, serviceURL)
+	benchmark := api.BenchmarkConfig{
+		Ref: api.Ref{ID: "bench-1"},
+		Parameters: map[string]any{
+			"num_examples": 50,
+			"max_tokens":   128,
+			"temperature":  0.2,
+		},
+	}
 	evaluation := &api.EvaluationJobResource{
 		Resource: api.EvaluationResource{
 			Resource:           api.Resource{ID: "job-123"},
@@ -21,27 +29,22 @@ func TestBuildJobConfigDefaults(t *testing.T) {
 				Name: "model",
 			},
 			Benchmarks: []api.BenchmarkConfig{
-				{
-					Ref: api.Ref{ID: "bench-1"},
-					Parameters: map[string]any{
-						"num_examples": 50,
-						"max_tokens":   128,
-						"temperature":  0.2,
-					},
-				},
+				benchmark,
 			},
 		},
 	}
 	provider := &api.ProviderResource{
-		ID: "provider-1",
-		Runtime: &api.Runtime{
-			K8s: &api.K8sRuntime{
-				Image: "adapter:latest",
+		Resource: api.Resource{ID: "provider-1"},
+		ProviderConfig: api.ProviderConfig{
+			Runtime: &api.Runtime{
+				K8s: &api.K8sRuntime{
+					Image: "adapter:latest",
+				},
 			},
 		},
 	}
 
-	cfg, err := buildJobConfig(evaluation, provider, "bench-1")
+	cfg, err := buildJobConfig(evaluation, provider, &benchmark, 0)
 	if err != nil {
 		t.Fatalf("buildJobConfig returned error: %v", err)
 	}
@@ -66,36 +69,162 @@ func TestBuildJobConfigDefaults(t *testing.T) {
 	if cfg.memoryLimit != defaultMemoryLimit {
 		t.Fatalf("expected memory limit %s, got %s", defaultMemoryLimit, cfg.memoryLimit)
 	}
-	var decoded map[string]any
-	if err := json.Unmarshal([]byte(cfg.jobSpecJSON), &decoded); err != nil {
-		t.Fatalf("unmarshal job spec json: %v", err)
+
+	spec := cfg.jobSpec
+	jobID := spec.JobID
+	if jobID != "job-123" {
+		t.Fatalf("expected job spec json id to be %q, got %v", "job-123", jobID)
 	}
-	jobID, ok := decoded["id"].(string)
-	if !ok || jobID != "job-123" {
-		t.Fatalf("expected job spec json id to be %q, got %v", "job-123", decoded["id"])
+	benchmarkID := spec.BenchmarkID
+	if benchmarkID != "bench-1" {
+		t.Fatalf("expected job spec json benchmark_id to be %q, got %v", "bench-1", benchmarkID)
 	}
-	benchmarkID, ok := decoded["benchmark_id"].(string)
-	if !ok || benchmarkID != "bench-1" {
-		t.Fatalf("expected job spec json benchmark_id to be %q, got %v", "bench-1", decoded["benchmark_id"])
+	numExamples := spec.NumExamples
+	if numExamples == nil || *numExamples != 50 {
+		t.Fatalf("expected job spec json num_examples to be %d, got %v", 50, numExamples)
 	}
-	if numExamples, ok := decoded["num_examples"].(float64); !ok || int(numExamples) != 50 {
-		t.Fatalf("expected job spec json num_examples to be %d, got %v", 50, decoded["num_examples"])
-	}
-	benchmarkConfig, ok := decoded["benchmark_config"].(map[string]any)
-	if !ok {
-		t.Fatalf("expected job spec json benchmark_config to be a map, got %T", decoded["benchmark_config"])
-	}
+	benchmarkConfig := spec.BenchmarkConfig
+
 	if _, exists := benchmarkConfig["num_examples"]; exists {
 		t.Fatalf("expected benchmark_config not to include num_examples")
 	}
-	if benchmarkConfig["max_tokens"] != float64(128) {
+	if benchmarkConfig["max_tokens"] != 128 {
 		t.Fatalf("expected benchmark_config.max_tokens to be %d, got %v", 128, benchmarkConfig["max_tokens"])
 	}
 	if benchmarkConfig["temperature"] != 0.2 {
 		t.Fatalf("expected benchmark_config.temperature to be 0.2, got %v", benchmarkConfig["temperature"])
 	}
-	if callback, ok := decoded["callback_url"].(string); !ok || callback != serviceURL {
-		t.Fatalf("expected job spec json callback_url to be %q, got %v", serviceURL, decoded["callback_url"])
+	callback := spec.CallbackURL
+	if callback == nil || *callback != serviceURL {
+		t.Fatalf("expected job spec json callback_url to be %q, got %v", serviceURL, callback)
+	}
+}
+
+func TestBuildJobConfigModelAuthSecretRefPresent(t *testing.T) {
+	t.Setenv(serviceURLEnv, "http://eval-hub")
+	evaluation := &api.EvaluationJobResource{
+		Resource: api.EvaluationResource{
+			Resource: api.Resource{ID: "job-789"},
+		},
+		EvaluationJobConfig: api.EvaluationJobConfig{
+			Model: api.ModelRef{
+				URL:  "http://model",
+				Name: "model",
+				Auth: &api.ModelAuth{SecretRef: "my-secret"},
+			},
+			Benchmarks: []api.BenchmarkConfig{
+				{
+					Ref: api.Ref{ID: "bench-1"},
+				},
+			},
+		},
+	}
+	provider := &api.ProviderResource{
+		Resource: api.Resource{ID: "provider-1"},
+		ProviderConfig: api.ProviderConfig{
+			Runtime: &api.Runtime{
+				K8s: &api.K8sRuntime{
+					Image: "adapter:latest",
+				},
+			},
+		},
+	}
+
+	cfg, err := buildJobConfig(evaluation, provider, &evaluation.Benchmarks[0], 0)
+	if err != nil {
+		t.Fatalf("buildJobConfig returned error: %v", err)
+	}
+	if cfg.modelAuthSecretRef != "my-secret" {
+		t.Fatalf("expected modelAuthSecretRef %q, got %q", "my-secret", cfg.modelAuthSecretRef)
+	}
+}
+
+func TestBuildJobConfigModelAuthSecretRefEmptyWhenNil(t *testing.T) {
+	t.Setenv(serviceURLEnv, "http://eval-hub")
+	evaluation := &api.EvaluationJobResource{
+		Resource: api.EvaluationResource{
+			Resource: api.Resource{ID: "job-790"},
+		},
+		EvaluationJobConfig: api.EvaluationJobConfig{
+			Model: api.ModelRef{
+				URL:  "http://model",
+				Name: "model",
+			},
+			Benchmarks: []api.BenchmarkConfig{
+				{
+					Ref: api.Ref{ID: "bench-1"},
+				},
+			},
+		},
+	}
+	provider := &api.ProviderResource{
+		Resource: api.Resource{ID: "provider-1"},
+		ProviderConfig: api.ProviderConfig{
+			Runtime: &api.Runtime{
+				K8s: &api.K8sRuntime{
+					Image: "adapter:latest",
+				},
+			},
+		},
+	}
+
+	cfg, err := buildJobConfig(evaluation, provider, &evaluation.Benchmarks[0], 0)
+	if err != nil {
+		t.Fatalf("buildJobConfig returned error: %v", err)
+	}
+	if cfg.modelAuthSecretRef != "" {
+		t.Fatalf("expected modelAuthSecretRef to be empty, got %q", cfg.modelAuthSecretRef)
+	}
+}
+
+func TestBuildJobConfigTestDataS3(t *testing.T) {
+	t.Setenv(serviceURLEnv, "http://eval-hub")
+	evaluation := &api.EvaluationJobResource{
+		Resource: api.EvaluationResource{
+			Resource: api.Resource{ID: "job-901"},
+		},
+		EvaluationJobConfig: api.EvaluationJobConfig{
+			Model: api.ModelRef{
+				URL:  "http://model",
+				Name: "model",
+			},
+			Benchmarks: []api.BenchmarkConfig{
+				{
+					Ref: api.Ref{ID: "bench-1"},
+					TestDataRef: &api.TestDataRef{
+						S3: &api.S3TestDataRef{
+							Bucket:    "bucket-1",
+							Key:       "/a/b",
+							SecretRef: "s3-secret",
+						},
+					},
+				},
+			},
+		},
+	}
+	provider := &api.ProviderResource{
+		Resource: api.Resource{ID: "provider-1"},
+		ProviderConfig: api.ProviderConfig{
+			Runtime: &api.Runtime{
+				K8s: &api.K8sRuntime{
+					Image: "adapter:latest",
+				},
+			},
+		},
+	}
+
+	cfg, err := buildJobConfig(evaluation, provider, &evaluation.Benchmarks[0], 0)
+	if err != nil {
+		t.Fatalf("buildJobConfig returned error: %v", err)
+	}
+	if cfg.testDataS3.bucket != "bucket-1" {
+		t.Fatalf("expected testDataS3Bucket %q, got %q", "bucket-1", cfg.testDataS3.bucket)
+	}
+	if cfg.testDataS3.key != "/a/b" {
+		t.Fatalf("expected testDataS3Key %q, got %q", "/a/b", cfg.testDataS3.key)
+	}
+	if cfg.testDataS3.secretRef != "s3-secret" {
+		t.Fatalf("expected testDataS3SecretRef %q, got %q", "s3-secret", cfg.testDataS3.secretRef)
 	}
 }
 
@@ -120,29 +249,29 @@ func TestBuildJobConfigAllowsNumExamplesOnly(t *testing.T) {
 		},
 	}
 	provider := &api.ProviderResource{
-		ID: "provider-1",
-		Runtime: &api.Runtime{
-			K8s: &api.K8sRuntime{
-				Image: "adapter:latest",
+		Resource: api.Resource{ID: "provider-1"},
+		ProviderConfig: api.ProviderConfig{
+			Runtime: &api.Runtime{
+				K8s: &api.K8sRuntime{
+					Image: "adapter:latest",
+				},
 			},
 		},
 	}
 
-	cfg, err := buildJobConfig(evaluation, provider, "bench-1")
+	cfg, err := buildJobConfig(evaluation, provider, &evaluation.Benchmarks[0], 0)
 	if err != nil {
 		t.Fatalf("expected no error for num_examples-only benchmark_config, got %v", err)
 	}
-	var decoded map[string]any
-	if err := json.Unmarshal([]byte(cfg.jobSpecJSON), &decoded); err != nil {
-		t.Fatalf("unmarshal job spec json: %v", err)
+
+	spec := cfg.jobSpec
+	numExamples := spec.NumExamples
+	if numExamples == nil || *numExamples != 10 {
+		t.Fatalf("expected job spec json num_examples to be %d, got %v", 10, numExamples)
 	}
-	if numExamples, ok := decoded["num_examples"].(float64); !ok || int(numExamples) != 10 {
-		t.Fatalf("expected job spec json num_examples to be %d, got %v", 10, decoded["num_examples"])
-	}
-	benchmarkConfig, ok := decoded["benchmark_config"].(map[string]any)
-	if !ok {
-		t.Fatalf("expected benchmark_config to be a map, got %T", decoded["benchmark_config"])
-	}
+
+	benchmarkConfig := spec.BenchmarkConfig
+
 	if len(benchmarkConfig) != 0 {
 		t.Fatalf("expected empty benchmark_config, got %v", benchmarkConfig)
 	}
@@ -163,10 +292,13 @@ func TestBuildJobConfigMissingRuntime(t *testing.T) {
 		},
 	}
 	provider := &api.ProviderResource{
-		ID: "provider-1",
+		Resource: api.Resource{ID: "provider-1"},
+		ProviderConfig: api.ProviderConfig{
+			Runtime: &api.Runtime{},
+		},
 	}
 
-	_, err := buildJobConfig(evaluation, provider, "bench-1")
+	_, err := buildJobConfig(evaluation, provider, &api.BenchmarkConfig{}, 0)
 	if err == nil {
 		t.Fatalf("expected error for missing runtime")
 	}
@@ -187,17 +319,20 @@ func TestBuildJobConfigMissingAdapterImage(t *testing.T) {
 		},
 	}
 	provider := &api.ProviderResource{
-		ID:      "provider-1",
-		Runtime: &api.Runtime{},
+		Resource: api.Resource{ID: "provider-1"},
+		ProviderConfig: api.ProviderConfig{
+			Runtime: &api.Runtime{},
+		},
 	}
 
-	_, err := buildJobConfig(evaluation, provider, "bench-1")
+	_, err := buildJobConfig(evaluation, provider, nil, 0)
 	if err == nil {
 		t.Fatalf("expected error for missing adapter image")
 	}
 }
 
 func TestBuildJobConfigMissingServiceURL(t *testing.T) {
+	t.Setenv(serviceURLEnv, "")
 	evaluation := &api.EvaluationJobResource{
 		Resource: api.EvaluationResource{
 			Resource:           api.Resource{ID: "job-123"},
@@ -217,15 +352,17 @@ func TestBuildJobConfigMissingServiceURL(t *testing.T) {
 		},
 	}
 	provider := &api.ProviderResource{
-		ID: "provider-1",
-		Runtime: &api.Runtime{
-			K8s: &api.K8sRuntime{
-				Image: "adapter:latest",
+		Resource: api.Resource{ID: "provider-1"},
+		ProviderConfig: api.ProviderConfig{
+			Runtime: &api.Runtime{
+				K8s: &api.K8sRuntime{
+					Image: "adapter:latest",
+				},
 			},
 		},
 	}
 
-	_, err := buildJobConfig(evaluation, provider, "bench-1")
+	_, err := buildJobConfig(evaluation, provider, &evaluation.Benchmarks[0], 0)
 	if err == nil {
 		t.Fatalf("expected error for missing %s", serviceURLEnv)
 	}
@@ -251,29 +388,101 @@ func TestBuildJobConfigAllowsEmptyBenchmarkConfig(t *testing.T) {
 		},
 	}
 	provider := &api.ProviderResource{
-		ID: "provider-1",
-		Runtime: &api.Runtime{
-			K8s: &api.K8sRuntime{
-				Image: "adapter:latest",
+		Resource: api.Resource{ID: "provider-1"},
+		ProviderConfig: api.ProviderConfig{
+			Runtime: &api.Runtime{
+				K8s: &api.K8sRuntime{
+					Image: "adapter:latest",
+				},
 			},
 		},
 	}
 
-	cfg, err := buildJobConfig(evaluation, provider, "bench-1")
+	cfg, err := buildJobConfig(evaluation, provider, &evaluation.Benchmarks[0], 0)
 	if err != nil {
 		t.Fatalf("expected no error for empty benchmark_config, got %v", err)
 	}
-	var decoded map[string]any
-	if err := json.Unmarshal([]byte(cfg.jobSpecJSON), &decoded); err != nil {
-		t.Fatalf("unmarshal job spec json: %v", err)
-	}
-	benchmarkConfig, ok := decoded["benchmark_config"].(map[string]any)
-	if !ok {
-		t.Fatalf("expected benchmark_config to be a map, got %T", decoded["benchmark_config"])
-	}
+
+	spec := cfg.jobSpec
+	benchmarkConfig := spec.BenchmarkConfig
+
 	if len(benchmarkConfig) != 0 {
 		t.Fatalf("expected empty benchmark_config, got %v", benchmarkConfig)
 	}
+}
+
+func TestBuildJobConfigWithOCIExports(t *testing.T) {
+	t.Setenv(serviceURLEnv, "http://eval-hub")
+	evaluation := &api.EvaluationJobResource{
+		Resource: api.EvaluationResource{
+			Resource: api.Resource{ID: "job-oci"},
+		},
+		EvaluationJobConfig: api.EvaluationJobConfig{
+			Model: api.ModelRef{
+				URL:  "http://model",
+				Name: "model",
+			},
+			Benchmarks: []api.BenchmarkConfig{
+				{
+					Ref:        api.Ref{ID: "bench-1"},
+					Parameters: map[string]any{},
+				},
+			},
+			Exports: &api.EvaluationExports{
+				OCI: &api.EvaluationExportsOCI{
+					Coordinates: api.OCICoordinates{
+						OCIHost:       "quay.io",
+						OCIRepository: "my-org/my-repo",
+						OCITag:        "eval-123",
+					},
+					K8s: &api.OCIConnectionConfig{
+						Connection: "my-pull-secret",
+					},
+				},
+			},
+		},
+	}
+	provider := &api.ProviderResource{
+		Resource: api.Resource{ID: "provider-1"},
+		ProviderConfig: api.ProviderConfig{
+			Runtime: &api.Runtime{
+				K8s: &api.K8sRuntime{
+					Image: "adapter:latest",
+				},
+			},
+		},
+	}
+
+	cfg, err := buildJobConfig(evaluation, provider, &evaluation.Benchmarks[0], 0)
+	if err != nil {
+		t.Fatalf("buildJobConfig returned error: %v", err)
+	}
+
+	// ociCredentialsSecret should be extracted from k8s.connection
+	if cfg.ociCredentialsSecret != "my-pull-secret" {
+		t.Fatalf("expected ociCredentialsSecret %q, got %q", "my-pull-secret", cfg.ociCredentialsSecret)
+	}
+
+	// jobSpecJSON should contain coordinates but NOT k8s connection
+
+	spec := cfg.jobSpec
+	exports := spec.Exports
+	if exports == nil {
+		t.Fatalf("expected exports object, got %v", exports)
+	}
+	oci := exports.OCI
+	if oci == nil {
+		t.Fatalf("expected exports.oci, got %v", oci)
+	}
+	coords := oci.Coordinates
+
+	if coords.OCIHost != "quay.io" {
+		t.Fatalf("expected oci_host %q, got %v", "quay.io", coords.OCIHost)
+	}
+	if coords.OCIRepository != "my-org/my-repo" {
+		t.Fatalf("expected oci_repository %q, got %v", "my-org/my-repo", coords.OCIRepository)
+	}
+
 }
 
 func TestNumExamplesFromParametersTypes(t *testing.T) {
@@ -292,7 +501,7 @@ func TestNumExamplesFromParametersTypes(t *testing.T) {
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			got := numExamplesFromParameters(tt.parameters)
+			got := shared.NumExamplesFromParameters(tt.parameters)
 			if tt.want == nil && got != nil {
 				t.Fatalf("expected nil, got %v", *got)
 			}
@@ -308,7 +517,7 @@ func TestNumExamplesFromParametersTypes(t *testing.T) {
 
 func TestCopyParamsCreatesCopy(t *testing.T) {
 	original := map[string]any{"num_examples": 1, "temp": 0.2}
-	copied := copyParams(original)
+	copied := shared.CopyParams(original)
 	if len(copied) != len(original) {
 		t.Fatalf("expected copy size %d, got %d", len(original), len(copied))
 	}
