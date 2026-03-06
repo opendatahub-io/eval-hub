@@ -25,6 +25,7 @@ const (
 	serviceAccountNameSuffix = "-jobs"
 	serviceCAConfigMapSuffix = "-service-ca"
 	defaultEvalHubPort       = "8443"
+	defaultTestDataInitCmd   = "/app/eval-hub-init"
 )
 
 type jobConfig struct {
@@ -50,6 +51,14 @@ type jobConfig struct {
 	mlflowWorkspace      string
 	ociCredentialsSecret string
 	modelAuthSecretRef   string
+	testDataS3           s3TestDataConfig
+	testDataInitImage    string
+}
+
+type s3TestDataConfig struct {
+	bucket    string
+	key       string
+	secretRef string
 }
 
 func buildJobConfig(evaluation *api.EvaluationJobResource, provider *api.ProviderResource, benchmarkConfig *api.BenchmarkConfig, benchmarkIndex int) (*jobConfig, error) {
@@ -108,6 +117,13 @@ func buildJobConfig(evaluation *api.EvaluationJobResource, provider *api.Provide
 		modelAuthSecretRef = strings.TrimSpace(evaluation.Model.Auth.SecretRef)
 	}
 
+	var testDataS3Bucket, testDataS3Key, testDataS3SecretRef string
+	if benchmarkConfig.TestDataRef != nil && benchmarkConfig.TestDataRef.S3 != nil {
+		testDataS3Bucket = strings.TrimSpace(benchmarkConfig.TestDataRef.S3.Bucket)
+		testDataS3Key = strings.TrimSpace(benchmarkConfig.TestDataRef.S3.Key)
+		testDataS3SecretRef = strings.TrimSpace(benchmarkConfig.TestDataRef.S3.SecretRef)
+	}
+
 	return &jobConfig{
 		jobID:                evaluation.Resource.ID,
 		resourceGUID:         uuid.NewString(),
@@ -130,6 +146,11 @@ func buildJobConfig(evaluation *api.EvaluationJobResource, provider *api.Provide
 		mlflowWorkspace:      mlflowWorkspace,
 		ociCredentialsSecret: ociCredentialsSecret,
 		modelAuthSecretRef:   modelAuthSecretRef,
+		testDataS3: s3TestDataConfig{
+			bucket:    testDataS3Bucket,
+			key:       testDataS3Key,
+			secretRef: testDataS3SecretRef,
+		},
 	}, nil
 }
 
