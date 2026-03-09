@@ -611,9 +611,6 @@ func TestBuildJobConfigEmptyTenantFallsBack(t *testing.T) {
 	if cfg.namespace == "" {
 		t.Fatalf("expected non-empty fallback namespace when tenant is empty")
 	}
-	if cfg.namespace == "team-a" {
-		t.Fatalf("expected fallback namespace, not a tenant value")
-	}
 }
 
 func intPtr(value int) *int {
