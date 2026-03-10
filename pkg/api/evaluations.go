@@ -37,6 +37,10 @@ func (o OverallState) String() string {
 	return string(o)
 }
 
+func (o OverallState) IsTerminalState() bool {
+	return o == OverallStateCompleted || o == OverallStateFailed || o == OverallStateCancelled || o == OverallStatePartiallyFailed
+}
+
 func GetOverallState(s string) (OverallState, error) {
 	switch s {
 	case string(OverallStatePending):
@@ -219,8 +223,8 @@ type EvaluationJobConfig struct {
 	Tags         []string           `json:"tags,omitempty"`
 	Model        ModelRef           `json:"model" validate:"required"`
 	PassCriteria *PassCriteria      `json:"pass_criteria,omitempty"`
-	Benchmarks   []BenchmarkConfig  `json:"benchmarks" validate:"required_without=Collection,dive"`
-	Collection   *Ref               `json:"collection,omitempty"`
+	Benchmarks   []BenchmarkConfig  `json:"benchmarks,omitempty" validate:"omitempty,required_without=Collection,dive"`
+	Collection   *Ref               `json:"collection,omitempty" validate:"omitempty,required_without=Benchmarks"`
 	Experiment   *ExperimentConfig  `json:"experiment,omitempty"`
 	Custom       *map[string]any    `json:"custom,omitempty"`
 	Exports      *EvaluationExports `json:"exports,omitempty"`
