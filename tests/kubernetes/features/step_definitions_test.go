@@ -58,11 +58,8 @@ type testContext struct {
 }
 
 func newTestContext() *testContext {
-	// Get SERVICE_URL from environment, default to localhost
-	serviceURL := os.Getenv("SERVICE_URL")
-	if serviceURL == "" {
-		serviceURL = "http://localhost:8080"
-	}
+	// Get SERVER_URL/SERVICE_URL from environment (no default fallback)
+	serviceURL, envName := serverURLFromEnv()
 
 	// Get namespace from environment, default to "default"
 	namespace := os.Getenv("KUBERNETES_NAMESPACE")
@@ -101,8 +98,16 @@ func newTestContext() *testContext {
 	if !configPrinted {
 		authToken := os.Getenv("AUTH_TOKEN")
 		fmt.Printf("\n[CONFIG] Test Environment:\n")
-		fmt.Printf("  SERVICE_URL: %s\n", serviceURL)
-		fmt.Printf("  KUBERNETES_NAMESPACE: %s\n", namespace)
+		if serviceURL == "" {
+			fmt.Printf("  SERVER_URL: ❌ NOT SET\n")
+		} else {
+			fmt.Printf("  %s: %s\n", envName, serviceURL)
+		}
+		if namespace == "" {
+			fmt.Printf("  KUBERNETES_NAMESPACE: ❌ NOT SET\n")
+		} else {
+			fmt.Printf("  KUBERNETES_NAMESPACE: %s\n", namespace)
+		}
 		fmt.Printf("  AUTH_TOKEN: %s\n", func() string {
 			if authToken == "" {
 				return "❌ NOT SET"
@@ -117,6 +122,13 @@ func newTestContext() *testContext {
 	}
 
 	return tc
+}
+
+func serverURLFromEnv() (string, string) {
+	if serverURL := os.Getenv("SERVER_URL"); serverURL != "" {
+		return serverURL, "SERVER_URL"
+	}
+	return "", ""
 }
 
 // initKubernetesClient initializes the real Kubernetes client
@@ -178,6 +190,7 @@ func (tc *testContext) cleanup(ctx context.Context) error {
 		}
 		req, err := http.NewRequestWithContext(ctx, "DELETE", tc.baseURL+"/api/v1/evaluations/jobs/"+jobID+"?hard_delete=true", nil)
 		if err == nil {
+			req.Header.Set("X-Tenant", tc.namespace)
 			authToken := os.Getenv("AUTH_TOKEN")
 			if authToken != "" {
 				req.Header.Set("Authorization", "Bearer "+authToken)
@@ -201,6 +214,10 @@ func InitializeScenario(ctx *godog.ScenarioContext) {
 	tc := newTestContext()
 
 	ctx.Before(func(ctx context.Context, sc *godog.Scenario) (context.Context, error) {
+		if missing := missingRequiredEnvVars(); len(missing) > 0 {
+			fmt.Printf("Skipping Kubernetes scenario; missing env vars: %s\n", strings.Join(missing, ", "))
+			return ctx, godog.ErrSkip
+		}
 		tc.reset()
 		return ctx, nil
 	})
@@ -267,7 +284,6 @@ func InitializeScenario(ctx *godog.ScenarioContext) {
 	ctx.Step(`^the Job pod template should have container named "([^"]*)"$`, tc.jobPodTemplateShouldHaveContainer)
 	ctx.Step(`^the container should have a non-empty image$`, tc.containerShouldHaveImage)
 	ctx.Step(`^the container should have "([^"]*)" set to "([^"]*)"$`, tc.containerShouldHaveValue)
-	ctx.Step(`^the container should have environment variable "([^"]*)" set to the job ID$`, tc.containerShouldHaveEnvVarWithJobID)
 	ctx.Step(`^the container securityContext should have "([^"]*)" set to (true|false)$`, tc.containerSecurityContextShouldHaveBoolValue)
 	ctx.Step(`^the container securityContext capabilities should drop "([^"]*)"$`, tc.containerSecurityContextCapabilitiesShouldDrop)
 	ctx.Step(`^the container securityContext should have seccompProfile type "([^"]*)"$`, tc.containerSecurityContextSeccompProfile)
@@ -277,13 +293,15 @@ func InitializeScenario(ctx *godog.ScenarioContext) {
 	ctx.Step(`^the container should have memory limit set$`, tc.containerShouldHaveMemoryLimitSet)
 	ctx.Step(`^the Job pod template should have serviceAccountName derived from service account name$`, tc.jobPodTemplateShouldHaveServiceAccountFromSA)
 	ctx.Step(`^the volume "([^"]*)" should reference ConfigMap derived from service account name$`, tc.volumeShouldReferenceConfigMapFromSA)
-	ctx.Step(`^the container should have environment variable "([^"]*)" derived from service account name$`, tc.containerEnvVarShouldBeDerivedFromSA)
 
 	// Volume & Mount Steps
 	ctx.Step(`^the Job pod template should have volume "([^"]*)" of type ConfigMap$`, tc.jobPodTemplateShouldHaveConfigMapVolume)
 	ctx.Step(`^the Job pod template should have volume "([^"]*)" of type EmptyDir$`, tc.jobPodTemplateShouldHaveEmptyDirVolume)
 	ctx.Step(`^the volume "([^"]*)" should reference the ConfigMap with suffix "([^"]*)"$`, tc.volumeShouldReferenceConfigMap)
 	ctx.Step(`^the container should have volumeMount "([^"]*)" at path "([^"]*)"$`, tc.containerShouldHaveVolumeMount)
+	ctx.Step(`^the container should have volumeMount "([^"]*)" at path "([^"]*)" with subPath "([^"]*)"$`, tc.containerShouldHaveVolumeMountWithSubPath)
+	ctx.Step(`^the sidecar container should have volumeMount "([^"]*)" at path "([^"]*)"$`, tc.sidecarContainerShouldHaveVolumeMount)
+	ctx.Step(`^the sidecar container should have volumeMount "([^"]*)" at path "([^"]*)" with subPath "([^"]*)"$`, tc.sidecarContainerShouldHaveVolumeMountWithSubPath)
 	ctx.Step(`^the volumeMount "([^"]*)" should have subPath "([^"]*)"$`, tc.volumeMountShouldHaveSubPath)
 	ctx.Step(`^the volumeMount "([^"]*)" should be readOnly$`, tc.volumeMountShouldBeReadOnly)
 
@@ -293,7 +311,6 @@ func InitializeScenario(ctx *godog.ScenarioContext) {
 	ctx.Step(`^the container command should not contain empty strings$`, tc.containerCommandShouldNotContainEmptyStrings)
 	ctx.Step(`^the container command should have trimmed whitespace from each element$`, tc.containerCommandShouldHaveTrimmedWhitespace)
 	ctx.Step(`^the container should have environment variables from the provider configuration$`, tc.containerShouldHaveProviderEnvVars)
-	ctx.Step(`^the environment variable "([^"]*)" should not be overridden by provider variables$`, tc.envVarShouldNotBeOverridden)
 
 	// Deletion Steps
 	ctx.Step(`^all Jobs associated with the evaluation job should be deleted$`, tc.allJobsShouldBeDeleted)
@@ -372,6 +389,8 @@ func (tc *testContext) iSendRequestWithBody(method, path, bodyFile string) error
 	if bodyReader != nil {
 		req.Header.Set("Content-Type", "application/json")
 	}
+
+	req.Header.Set("X-Tenant", tc.namespace)
 
 	// Add authentication token if available
 	authToken := os.Getenv("AUTH_TOKEN")
@@ -566,7 +585,11 @@ func (tc *testContext) theResponseCodeShouldBe(code int) error {
 func (tc *testContext) configMapShouldBeCreatedWithNamePattern(pattern string) error {
 	// Convert pattern to regex
 	regexPattern := strings.ReplaceAll(pattern, "{id}", ".*")
+	regexPattern = strings.ReplaceAll(regexPattern, "{guid}", ".*")
+	regexPattern = strings.ReplaceAll(regexPattern, "{resource_guid}", ".*")
 	regexPattern = strings.ReplaceAll(regexPattern, "{benchmark_id}", ".*")
+	regexPattern = strings.ReplaceAll(regexPattern, "{provider_id}", ".*")
+	regexPattern = strings.ReplaceAll(regexPattern, "{hash}", ".*")
 	regex := regexp.MustCompile(regexPattern)
 
 	// List ConfigMaps with job_id label if we have it
@@ -1057,7 +1080,11 @@ func (tc *testContext) configMapDataShouldContainFieldAsArray(dataKey, field str
 func (tc *testContext) jobShouldBeCreatedWithNamePattern(pattern string) error {
 	// Convert pattern to regex
 	regexPattern := strings.ReplaceAll(pattern, "{id}", ".*")
+	regexPattern = strings.ReplaceAll(regexPattern, "{guid}", ".*")
+	regexPattern = strings.ReplaceAll(regexPattern, "{resource_guid}", ".*")
 	regexPattern = strings.ReplaceAll(regexPattern, "{benchmark_id}", ".*")
+	regexPattern = strings.ReplaceAll(regexPattern, "{provider_id}", ".*")
+	regexPattern = strings.ReplaceAll(regexPattern, "{hash}", ".*")
 	regex := regexp.MustCompile(regexPattern)
 
 	// List Jobs with job_id label if we have it
@@ -1370,28 +1397,6 @@ func (tc *testContext) containerShouldHaveImage() error {
 	return nil
 }
 
-func (tc *testContext) containerShouldHaveEnvVarWithJobID(envVar string) error {
-	if tc.currentJob == nil {
-		return fmt.Errorf("no current Job")
-	}
-	if tc.lastJobID == "" {
-		return fmt.Errorf("no job ID tracked")
-	}
-
-	if len(tc.currentJob.Spec.Template.Spec.Containers) == 0 {
-		return fmt.Errorf("Job %s has no containers", tc.currentJob.Name)
-	}
-
-	container := tc.currentJob.Spec.Template.Spec.Containers[0]
-	for _, env := range container.Env {
-		if env.Name == envVar && env.Value == tc.lastJobID {
-			return nil
-		}
-	}
-
-	return fmt.Errorf("Container %s does not have env var %s with value %s", container.Name, envVar, tc.lastJobID)
-}
-
 func (tc *testContext) containerSecurityContextShouldHaveBoolValue(field, value string) error {
 	if tc.currentJob == nil {
 		return fmt.Errorf("no current Job")
@@ -1556,65 +1561,17 @@ func (tc *testContext) volumeShouldReferenceConfigMapFromSA(volumeName string) e
 	return tc.volumeShouldReferenceConfigMapByName(volumeName, expected)
 }
 
-func (tc *testContext) containerEnvVarShouldBeDerivedFromSA(targetEnvVar string) error {
-	if tc.currentJob == nil {
-		return fmt.Errorf("no current Job")
-	}
-	envValue, err := tc.instanceNameFromServiceAccount()
-	if err != nil {
-		return err
-	}
-	expected := fmt.Sprintf("https://%s.%s.svc.cluster.local:8443", envValue, tc.namespace)
-	return tc.containerEnvVarShouldEqualValue(targetEnvVar, expected)
-}
-
-func (tc *testContext) containerEnvVarShouldEqualValue(envVar, expected string) error {
-	if tc.currentJob == nil {
-		return fmt.Errorf("no current Job")
-	}
-	if len(tc.currentJob.Spec.Template.Spec.Containers) == 0 {
-		return fmt.Errorf("Job %s has no containers", tc.currentJob.Name)
-	}
-	container := tc.currentJob.Spec.Template.Spec.Containers[0]
-	for _, env := range container.Env {
-		if env.Name == envVar {
-			if env.Value != expected {
-				return fmt.Errorf("Container %s env var %s expected %s, got %s", container.Name, envVar, expected, env.Value)
-			}
-			return nil
-		}
-	}
-	return fmt.Errorf("Container %s does not have env var %s", container.Name, envVar)
-}
-
-func (tc *testContext) getContainerEnvValue(envVar string) (string, error) {
-	if tc.currentJob == nil {
-		return "", fmt.Errorf("no current Job")
-	}
-	if len(tc.currentJob.Spec.Template.Spec.Containers) == 0 {
-		return "", fmt.Errorf("Job %s has no containers", tc.currentJob.Name)
-	}
-	container := tc.currentJob.Spec.Template.Spec.Containers[0]
-	for _, env := range container.Env {
-		if env.Name == envVar {
-			if env.Value == "" {
-				return "", fmt.Errorf("Container %s env var %s is empty", container.Name, envVar)
-			}
-			return env.Value, nil
-		}
-	}
-	return "", fmt.Errorf("Container %s does not have env var %s", container.Name, envVar)
-}
-
 func (tc *testContext) instanceNameFromServiceAccount() (string, error) {
 	if tc.currentJob == nil {
 		return "", fmt.Errorf("no current Job")
 	}
 	serviceAccount := tc.currentJob.Spec.Template.Spec.ServiceAccountName
-	if strings.HasSuffix(serviceAccount, "-jobs") {
-		return strings.TrimSuffix(serviceAccount, "-jobs"), nil
+	// SA format is "{instanceName}-{namespace}-job"
+	suffix := "-" + tc.namespace + "-job"
+	if !strings.HasSuffix(serviceAccount, suffix) {
+		return "", fmt.Errorf("unable to derive instance name from serviceAccountName %q", serviceAccount)
 	}
-	return "", fmt.Errorf("unable to derive instance name from serviceAccountName %q", serviceAccount)
+	return strings.TrimSuffix(serviceAccount, suffix), nil
 }
 
 // ============================================================================
@@ -1682,6 +1639,66 @@ func (tc *testContext) containerShouldHaveVolumeMount(mountName, path string) er
 	}
 
 	return fmt.Errorf("Container %s does not have volumeMount %s at path %s", container.Name, mountName, path)
+}
+
+func (tc *testContext) containerShouldHaveVolumeMountWithSubPath(mountName, path, subPath string) error {
+	if tc.currentJob == nil {
+		return fmt.Errorf("no current Job")
+	}
+	if len(tc.currentJob.Spec.Template.Spec.Containers) == 0 {
+		return fmt.Errorf("Job %s has no containers", tc.currentJob.Name)
+	}
+	container := tc.currentJob.Spec.Template.Spec.Containers[0]
+	for _, mount := range container.VolumeMounts {
+		if mount.Name == mountName && mount.MountPath == path && mount.SubPath == subPath {
+			return nil
+		}
+	}
+	return fmt.Errorf("Container %s does not have volumeMount %s at path %s with subPath %s", container.Name, mountName, path, subPath)
+}
+
+func (tc *testContext) sidecarContainerShouldHaveVolumeMount(mountName, path string) error {
+	if tc.currentJob == nil {
+		return fmt.Errorf("no current Job")
+	}
+	var sidecar *corev1.Container
+	for i := range tc.currentJob.Spec.Template.Spec.Containers {
+		if tc.currentJob.Spec.Template.Spec.Containers[i].Name == "sidecar" {
+			sidecar = &tc.currentJob.Spec.Template.Spec.Containers[i]
+			break
+		}
+	}
+	if sidecar == nil {
+		return fmt.Errorf("Job %s has no container named %q", tc.currentJob.Name, "sidecar")
+	}
+	for _, mount := range sidecar.VolumeMounts {
+		if mount.Name == mountName && mount.MountPath == path {
+			return nil
+		}
+	}
+	return fmt.Errorf("sidecar container does not have volumeMount %s at path %s", mountName, path)
+}
+
+func (tc *testContext) sidecarContainerShouldHaveVolumeMountWithSubPath(mountName, path, subPath string) error {
+	if tc.currentJob == nil {
+		return fmt.Errorf("no current Job")
+	}
+	var sidecar *corev1.Container
+	for i := range tc.currentJob.Spec.Template.Spec.Containers {
+		if tc.currentJob.Spec.Template.Spec.Containers[i].Name == "sidecar" {
+			sidecar = &tc.currentJob.Spec.Template.Spec.Containers[i]
+			break
+		}
+	}
+	if sidecar == nil {
+		return fmt.Errorf("Job %s has no container named %q", tc.currentJob.Name, "sidecar")
+	}
+	for _, mount := range sidecar.VolumeMounts {
+		if mount.Name == mountName && mount.MountPath == path && mount.SubPath == subPath {
+			return nil
+		}
+	}
+	return fmt.Errorf("sidecar container does not have volumeMount %s at path %s with subPath %s", mountName, path, subPath)
 }
 
 func (tc *testContext) volumeMountShouldHaveSubPath(mountName, subPath string) error {
@@ -1832,35 +1849,6 @@ func (tc *testContext) containerShouldHaveProviderEnvVars() error {
 	container := tc.currentJob.Spec.Template.Spec.Containers[0]
 	if len(container.Env) == 0 {
 		return fmt.Errorf("Container %s has no environment variables", container.Name)
-	}
-
-	return nil
-}
-
-func (tc *testContext) envVarShouldNotBeOverridden(envVar string) error {
-	// Validates that JOB_ID is present and not overridden
-	if tc.currentJob == nil {
-		return fmt.Errorf("no current Job")
-	}
-
-	if len(tc.currentJob.Spec.Template.Spec.Containers) == 0 {
-		return fmt.Errorf("Job %s has no containers", tc.currentJob.Name)
-	}
-
-	container := tc.currentJob.Spec.Template.Spec.Containers[0]
-	foundCount := 0
-	for _, env := range container.Env {
-		if env.Name == envVar {
-			foundCount++
-		}
-	}
-
-	if foundCount == 0 {
-		return fmt.Errorf("Container %s does not have env var %s", container.Name, envVar)
-	}
-
-	if foundCount > 1 {
-		return fmt.Errorf("Container %s has multiple definitions of env var %s", container.Name, envVar)
 	}
 
 	return nil
@@ -2253,6 +2241,7 @@ func (tc *testContext) fetchBenchmarkStatuses() ([]string, error) {
 	if err != nil {
 		return nil, fmt.Errorf("failed to create request: %w", err)
 	}
+	req.Header.Set("X-Tenant", tc.namespace)
 	authToken := os.Getenv("AUTH_TOKEN")
 	if authToken != "" {
 		req.Header.Set("Authorization", "Bearer "+authToken)

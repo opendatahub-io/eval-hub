@@ -14,24 +14,26 @@ Feature: Kubernetes Resources Validation
     And Jobs should be created in the background
     And the number of Jobs created should equal the number of benchmarks
     And the number of ConfigMaps created should equal the number of benchmarks
-    And a ConfigMap should be created with name pattern "eval-job-{id}-{benchmark_id}-spec"
+    And a ConfigMap should be created with name pattern "{id}-{guid}-spec"
     And the ConfigMap should have label "app" with value "evalhub"
     And the ConfigMap should have label "component" with value "evaluation-job"
     And the ConfigMap should have label "job_id" matching the evaluation job ID
     And the ConfigMap should have label "provider_id" matching the provider ID
     And the ConfigMap should have label "benchmark_id" matching the benchmark ID
     And the ConfigMap should contain data key "job.json"
+    And the ConfigMap should contain data key "sidecar_config.json"
     And the ConfigMap data "job.json" should be valid JSON
+    And the ConfigMap data "sidecar_config.json" should be valid JSON
     And the ConfigMap data "job.json" should contain field "id" with the job ID
     And the ConfigMap data "job.json" should contain field "benchmark_id"
     And the ConfigMap data "job.json" should contain field "model.url"
     And the ConfigMap data "job.json" should contain field "model.name"
     And the ConfigMap data "job.json" should contain field "callback_url"
-    And the ConfigMap data "job.json" should contain field "benchmark_config" as object
+    And the ConfigMap data "job.json" should contain field "parameters" as object
     And the ConfigMap should have an ownerReference of kind "Job"
     And the ConfigMap ownerReference should have controller set to true
     And the ConfigMap ownerReference should reference the created Job
-    And a Kubernetes Job should be created with name pattern "eval-job-{id}-{benchmark_id}"
+    And a Kubernetes Job should be created with name pattern "{id}-{guid}"
     And the Job should have label "app" with value "evalhub"
     And the Job should have label "component" with value "evaluation-job"
     And the Job should have label "job_id" matching the evaluation job ID
@@ -51,6 +53,7 @@ Feature: Kubernetes Resources Validation
     And the Job pod template should have label "benchmark_id" matching the benchmark ID
     And the Job pod template should have volume "job-spec" of type ConfigMap
     And the Job pod template should have volume "data" of type EmptyDir
+    And the Job pod template should have volume "termination-file-volume" of type EmptyDir
     And the volume "job-spec" should reference the ConfigMap with suffix "-spec"
     And the Job pod template should have serviceAccountName derived from service account name
     And the Job pod template should have volume "evalhub-service-ca" of type ConfigMap
@@ -58,8 +61,6 @@ Feature: Kubernetes Resources Validation
     And the Job pod template should have container named "adapter"
     And the container should have a non-empty image
     And the container should have "imagePullPolicy" set to "Always"
-    And the container should have environment variable "JOB_ID" set to the job ID
-    And the container should have environment variable "EVALHUB_URL" derived from service account name
     And the container command should be a valid array
     And the container command should not contain empty strings
     And the container command should have trimmed whitespace from each element
@@ -73,12 +74,15 @@ Feature: Kubernetes Resources Validation
     And the container should have memory limit set
     And the container should have volumeMount "job-spec" at path "/meta/job.json"
     And the container should have volumeMount "data" at path "/data"
+    And the container should have volumeMount "termination-file-volume" at path "/shared"
     And the volumeMount "job-spec" should have subPath "job.json"
     And the volumeMount "job-spec" should be readOnly
     And the container should have volumeMount "evalhub-service-ca" at path "/etc/pki/ca-trust/source/anchors"
     And the volumeMount "evalhub-service-ca" should be readOnly
     And the container should have environment variables from the provider configuration
-    And the environment variable "JOB_ID" should not be overridden by provider variables
+    And the Job pod template should have container named "sidecar"
+    And the sidecar container should have volumeMount "job-spec" at path "/meta/sidecar_config.json" with subPath "sidecar_config.json"
+    And the sidecar container should have volumeMount "termination-file-volume" at path "/tmp/adapter"
 
   Scenario: Job and ConfigMap specification (multi-benchmark)
     When I send a POST request to "/api/v1/evaluations/jobs" with body "file:/evaluation_job_multi_benchmark.json"
@@ -90,9 +94,9 @@ Feature: Kubernetes Resources Validation
     And the number of ConfigMaps created should equal the number of benchmarks
     And each Job should have a unique benchmark_id label
     And each ConfigMap should have a unique benchmark_id label
-    And for benchmark "mmlu" the ConfigMap data "job.json" should contain field "num_examples" with value from parameters
-    And for benchmark "hellaswag" the ConfigMap data "job.json" field "benchmark_config" should not contain "num_examples"
-    And for benchmark "hellaswag" the ConfigMap data "job.json" should contain field "benchmark_config" as empty object
+    And for benchmark "arc_easy" the ConfigMap data "job.json" should contain field "num_examples" with value from parameters
+    And for benchmark "hellaswag" the ConfigMap data "job.json" field "parameters" should not contain "num_examples"
+    And for benchmark "hellaswag" the ConfigMap data "job.json" should contain field "parameters" as empty object
 
   Scenario: Delete evaluation job behaviors
     Given I send a POST request to "/api/v1/evaluations/jobs" with body "file:/evaluation_job_basic.json"
@@ -115,8 +119,9 @@ Feature: Kubernetes Resources Validation
     And DeleteEvaluationJobResources should be called
     And all 3 Jobs should be deleted from Kubernetes
     And all 3 ConfigMaps should be deleted from Kubernetes
-    
+
   Scenario: MLflow fields are included in job spec
+    Given MLflow is configured
     When I send a POST request to "/api/v1/evaluations/jobs" with body "file:/evaluation_job_with_experiment.json"
     Then the response code should be 202
     And the ConfigMap data "job.json" should contain field "experiment_name"

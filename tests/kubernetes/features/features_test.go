@@ -28,6 +28,17 @@ func TestFeatures(t *testing.T) {
 	}
 }
 
+func missingRequiredEnvVars() []string {
+	required := []string{"SERVER_URL", "KUBERNETES_NAMESPACE", "AUTH_TOKEN"}
+	missing := make([]string, 0, len(required))
+	for _, name := range required {
+		if os.Getenv(name) == "" {
+			missing = append(missing, name)
+		}
+	}
+	return missing
+}
+
 func TestMain(m *testing.M) {
 	os.Exit(m.Run())
 }
