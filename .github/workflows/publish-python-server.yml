@@ -6,6 +6,11 @@ on:
       - main
     tags: ['*']  # we haven't established a Tag strategy yet
   workflow_dispatch:
+    inputs:
+      publish-test-pypi:
+        description: 'Publish to TestPyPI'
+        type: boolean
+        default: true
 
 jobs:
   build-binaries:
@@ -35,10 +40,10 @@ jobs:
 
     steps:
       - name: Checkout
-        uses: actions/checkout@v4
+        uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
 
       - name: Set up Go
-        uses: actions/setup-go@v5
+        uses: actions/setup-go@40f1582b2485089dde7abd97c1529aa768e1baff # v5
         with:
           go-version: "1.25"
 
@@ -46,11 +51,11 @@ jobs:
         run: make cross-compile CROSS_GOOS=${{ matrix.goos }} CROSS_GOARCH=${{ matrix.goarch }}
 
       - name: Upload binary
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
         with:
           name: binary-${{ matrix.goos }}-${{ matrix.goarch }}
           path: ${{ matrix.output }}
-          retention-days: 1
+          retention-days: 7
 
   build-wheels:
     name: Build Python wheels
@@ -82,10 +87,10 @@ jobs:
 
     steps:
       - name: Checkout
-        uses: actions/checkout@v4
+        uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
 
       - name: Set up uv python
-        uses: astral-sh/setup-uv@v7
+        uses: astral-sh/setup-uv@37802adc94f370d6bfd71619e3f0bf239e1f3b78 # v7
         with:
           python-version: "3.11"
 
@@ -93,7 +98,7 @@ jobs:
         run: make install-wheel-tools
 
       - name: Download binary
-        uses: actions/download-artifact@v4
+        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
         with:
           pattern: ${{ matrix.binary-pattern }}
           path: python-server/evalhub_server/binaries/
@@ -121,19 +126,31 @@ jobs:
           fi
 
       - name: Build wheel
-        run: make build-wheel WHEEL_PLATFORM=${{ steps.platform.outputs.tag }} WHEEL_BINARY=${{ matrix.binary-name }}
+        run: |
+          DEV_SUFFIX_ARG=""
+          if [[ ! "${{ github.ref }}" == refs/tags/* ]]; then
+            DEV_SUFFIX_ARG="DEV_SUFFIX=dev${{ github.run_number }}"
+          fi
+          make build-wheel WHEEL_PLATFORM=${{ steps.platform.outputs.tag }} WHEEL_BINARY=${{ matrix.binary-name }} $DEV_SUFFIX_ARG
+
+      - name: Smoke test with python-server tests
+        if: matrix.platform == 'manylinux' && matrix.arch == 'x86_64'
+        continue-on-error: true
+        run: make test-python-server || echo "::warning::python-server smoke tests failed — wheel will still be published"
 
       - name: Upload wheel
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
         with:
           name: wheel-${{ matrix.platform }}-${{ matrix.arch }}
           path: python-server/dist/*.whl
-          retention-days: 1
+          retention-days: 7
 
   publish:
     name: Publish to PyPI
     needs: build-wheels
-    if: startsWith(github.ref, 'refs/tags/')  # only publish to PyPI on tag pushes
+    # Publish clean versions to PyPI only on actual tag pushes.
+    # The event_name check prevents workflow_dispatch targeting a tag ref from triggering this.
+    if: github.event_name == 'push' && startsWith(github.ref, 'refs/tags/')
     runs-on: ubuntu-latest
     environment:
       name: pypi
@@ -143,7 +160,7 @@ jobs:
 
     steps:
       - name: Download all wheels
-        uses: actions/download-artifact@v4
+        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
         with:
           pattern: wheel-*
           path: dist/
@@ -153,4 +170,34 @@ jobs:
         run: ls -la dist/
 
       - name: Publish to PyPI
-        uses: pypa/gh-action-pypi-publish@release/v1
+        uses: pypa/gh-action-pypi-publish@ed0c53931b1dc9bd32cbe73a98c7f6766f8a527e # release/v1
+
+  publish-test-pypi:
+    name: Publish to TestPyPI
+    needs: build-wheels
+    # TestPyPI only receives devX versions. Tag refs are excluded so that
+    # workflow_dispatch against a tag cannot publish a clean release version here.
+    if: github.ref == 'refs/heads/main' || (github.event_name == 'workflow_dispatch' && !startsWith(github.ref, 'refs/tags/') && inputs.publish-test-pypi)
+    runs-on: ubuntu-latest
+    environment:
+      name: testpypi
+      url: https://test.pypi.org/p/eval-hub-server
+    permissions:
+      id-token: write
+
+    steps:
+      - name: Download all wheels
+        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
+        with:
+          pattern: wheel-*
+          path: dist/
+          merge-multiple: true
+
+      - name: List wheels
+        run: ls -la dist/
+
+      - name: Publish to TestPyPI
+        uses: pypa/gh-action-pypi-publish@ed0c53931b1dc9bd32cbe73a98c7f6766f8a527e # release/v1
+        with:
+          repository-url: https://test.pypi.org/legacy/
+          skip-existing: true
