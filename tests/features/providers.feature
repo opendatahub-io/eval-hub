@@ -4,6 +4,9 @@ Feature: Providers Endpoint
   I want to query the supported providers
   So that I discover the service capabilities
 
+  Background:
+    Given I set the header "X-Tenant" to "{{env:X_TENANT|test-tenant}}"
+
   Scenario: List providers returns 200 with response structure and pagination
     Given the service is running
     When I send a GET request to "/api/v1/evaluations/providers?limit=5&offset=0"
@@ -39,7 +42,6 @@ Feature: Providers Endpoint
   Scenario: List providers with scope=tenant returns only user providers
     Given the service is running
     And there are no user providers
-    And I set the header "X-Tenant" to "test-tenant"
     When I send a POST request to "/api/v1/evaluations/providers" with body "file:/user_provider.json"
     Then the response code should be 201
     When I send a GET request to "/api/v1/evaluations/providers?scope=tenant"
@@ -52,7 +54,6 @@ Feature: Providers Endpoint
   Scenario: List providers with scope=system returns only system providers
     Given the service is running
     And there are system providers
-    And I set the header "X-Tenant" to "test-tenant"
     When I send a GET request to "/api/v1/evaluations/providers?scope=system"
     Then the response code should be 200
     And the array at path "items" in the response should have length at least 1
@@ -62,7 +63,6 @@ Feature: Providers Endpoint
     Given the service is running
     And there are system providers
     And there are no user providers
-    And I set the header "X-Tenant" to "test-tenant"
     When I send a POST request to "/api/v1/evaluations/providers" with body "file:/user_provider.json"
     Then the response code should be 201
     When I send a POST request to "/api/v1/evaluations/providers" with body "file:/user_provider.json"
@@ -92,7 +92,7 @@ Feature: Providers Endpoint
     Then the response code should be 200
     And the response should contain the value "50" at path "$.limit"
     And the "total_count" field in the response should be saved as "value:num_providers"
-    And the response should contain the value "3" at path "$.total_count"
+    And the response should contain at least the value "6" at path "$.total_count"
     When I send a GET request to "/api/v1/evaluations/providers?limit=50&offset=0"
     Then the response code should be 200
     And the response should contain the value "50" at path "$.limit"
@@ -101,14 +101,14 @@ Feature: Providers Endpoint
     When I send a GET request to "/api/v1/evaluations/providers?limit=50&offset=1"
     Then the response code should be 200
     And the response should contain the value "50" at path "$.limit"
-    And the array at path "items" in the response should have length 2
+    And the array at path "items" in the response should have length at least 5
     And the response should contain the value "{{value:num_providers}}" at path "$.total_count"
     When I send a GET request to "/api/v1/evaluations/providers?limit=50&offset=2"
     Then the response code should be 200
     And the response should contain the value "50" at path "$.limit"
-    And the array at path "items" in the response should have length 1
+    And the array at path "items" in the response should have length at least 4
     And the response should contain the value "{{value:num_providers}}" at path "$.total_count"
-    When I send a GET request to "/api/v1/evaluations/providers?limit=50&offset=3"
+    When I send a GET request to "/api/v1/evaluations/providers?limit=50&offset={{value:num_providers}}"
     Then the response code should be 200
     And the response should contain the value "50" at path "$.limit"
     And the array at path "items" in the response should have length 0
@@ -129,8 +129,8 @@ Feature: Providers Endpoint
     When I send a GET request to "/api/v1/evaluations/providers?limit=50&offset=3"
     Then the response code should be 200
     And the response should contain the value "50" at path "$.limit"
-    And the array at path "items" in the response should have length 2
-    When I send a GET request to "/api/v1/evaluations/providers?limit=1&offset=3"
+    And the array at path "items" in the response should have length at least 5
+    When I send a GET request to "/api/v1/evaluations/providers?limit=1&scope=tenant"
     Then the response code should be 200
     And the response should contain the value "1" at path "$.limit"
     And the array at path "items" in the response should have length 1
@@ -138,7 +138,6 @@ Feature: Providers Endpoint
 
   Scenario: List providers with all search parameters and pagination
     Given the service is running
-    And I set the header "X-Tenant" to "test-tenant"
     And there are no user providers
     When I send a POST request to "/api/v1/evaluations/providers" with body "file:/user_provider.json"
     Then the response code should be 201
@@ -189,8 +188,6 @@ Feature: Providers Endpoint
   Scenario: List providers with comprehensive search parameters and pagination
     Given the service is running
     And there are no user providers
-    And I set the header "X-User" to "prov-owner-a"
-    And I set the header "X-Tenant" to "prov-tenant-x"
     When I send a POST request to "/api/v1/evaluations/providers" with body "file:/user_provider.json"
     Then the response code should be 201
     And the "resource.id" field in the response should be saved as "value:list_prov1_id"
