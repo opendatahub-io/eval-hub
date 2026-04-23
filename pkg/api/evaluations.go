@@ -84,7 +84,8 @@ type PrimaryScore struct {
 }
 
 type PassCriteria struct {
-	Threshold float32 `mapstructure:"threshold" json:"threshold,omitempty" validate:"omitempty,number"`
+	// The *float32 is a hack to avoid validation failure when threshold=0
+	Threshold *float32 `mapstructure:"threshold" json:"threshold" validate:"required"`
 }
 
 // S3TestDataRef represents S3 source for test data.
@@ -118,7 +119,7 @@ type ExperimentTag struct {
 
 // ExperimentConfig represents configuration for MLFlow experiment tracking
 type ExperimentConfig struct {
-	Name             string          `json:"name,omitempty"`
+	Name             string          `json:"name,omitempty" validate:"notblank"`
 	Tags             []ExperimentTag `json:"tags,omitempty" validate:"omitempty,max=20,dive"`
 	ArtifactLocation string          `json:"artifact_location,omitempty"`
 }
@@ -275,7 +276,8 @@ type EvaluationTest struct {
 }
 
 type BenchmarkTest struct {
-	PrimaryScore float32 `json:"primary_score"`
-	Threshold    float32 `json:"threshold"`
-	Pass         bool    `json:"pass"`
+	PrimaryScore       float32 `json:"primary_score"`
+	PrimaryScoreMetric string  `json:"primary_score_metric"`
+	Threshold          float32 `json:"threshold"`
+	Pass               bool    `json:"pass"`
 }

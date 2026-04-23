@@ -15,6 +15,7 @@ Feature: Providers Endpoint
     And the response should contain "limit"
     And the response should contain "total_count"
 
+  @negative
   Scenario: List providers with invalid offset returns 400
     Given the service is running
     When I send a GET request to "/api/v1/evaluations/providers?offset=not-a-number"
@@ -72,12 +73,14 @@ Feature: Providers Endpoint
     And the response should contain at least the value "3" at path "total_count"
     And the array at path "items" in the response should have length at least 3
 
+  @negative
   Scenario: List providers with invalid limit returns 400
     Given the service is running
     When I send a GET request to "/api/v1/evaluations/providers?limit=-1"
     Then the response code should be 400
     And the response should contain the value "query_parameter_invalid" at path "message_code"
 
+  @negative
   Scenario: List providers with invalid scope returns 400
     Given the service is running
     When I send a GET request to "/api/v1/evaluations/providers?scope=invalid"
@@ -92,27 +95,32 @@ Feature: Providers Endpoint
     Then the response code should be 200
     And the response should contain the value "50" at path "$.limit"
     And the "total_count" field in the response should be saved as "value:num_providers"
-    And the response should contain at least the value "6" at path "$.total_count"
-    When I send a GET request to "/api/v1/evaluations/providers?limit=50&offset=0"
+    When I send a GET request to "/api/v1/evaluations/providers?limit=50&offset=0&scope=system"
     Then the response code should be 200
     And the response should contain the value "50" at path "$.limit"
-    And the array at path "items" in the response should have length "value:num_providers"
+    And the array at path "items" in the response should have length "{{value:num_providers}}"
     And the response should contain the value "{{value:num_providers}}" at path "$.total_count"
-    When I send a GET request to "/api/v1/evaluations/providers?limit=50&offset=1"
+    When I send a GET request to "/api/v1/evaluations/providers?limit=50&offset=1&scope=system"
     Then the response code should be 200
     And the response should contain the value "50" at path "$.limit"
-    And the array at path "items" in the response should have length at least 5
+    And the array at path "items" in the response should have length at least "{{value:num_providers}}-1"
     And the response should contain the value "{{value:num_providers}}" at path "$.total_count"
-    When I send a GET request to "/api/v1/evaluations/providers?limit=50&offset=2"
+    When I send a GET request to "/api/v1/evaluations/providers?limit=50&offset=2&scope=system"
     Then the response code should be 200
     And the response should contain the value "50" at path "$.limit"
-    And the array at path "items" in the response should have length at least 4
+    And the array at path "items" in the response should have length at least "{{value:num_providers}}-2"
     And the response should contain the value "{{value:num_providers}}" at path "$.total_count"
-    When I send a GET request to "/api/v1/evaluations/providers?limit=50&offset={{value:num_providers}}"
+    When I send a GET request to "/api/v1/evaluations/providers?limit=50&offset={{value:num_providers}}&scope=system"
     Then the response code should be 200
     And the response should contain the value "50" at path "$.limit"
     And the array at path "items" in the response should have length 0
     And the response should contain the value "{{value:num_providers}}" at path "$.total_count"
+
+  Scenario: List user providers with pagination
+    Given the service is running
+    When I send a GET request to "/api/v1/evaluations/providers?limit=50&offset=0&scope=system"
+    Then the response code should be 200
+    And the "total_count" field in the response should be saved as "value:num_providers"
     When I send a POST request to "/api/v1/evaluations/providers" with body "file:/user_provider.json"
     Then the response code should be 201
     And the "resource.id" field in the response should be saved as "value:provider1_id"
@@ -129,7 +137,7 @@ Feature: Providers Endpoint
     When I send a GET request to "/api/v1/evaluations/providers?limit=50&offset=3"
     Then the response code should be 200
     And the response should contain the value "50" at path "$.limit"
-    And the array at path "items" in the response should have length at least 5
+    And the array at path "items" in the response should have length "{{value:num_providers}} - 1"
     When I send a GET request to "/api/v1/evaluations/providers?limit=1&scope=tenant"
     Then the response code should be 200
     And the response should contain the value "1" at path "$.limit"
@@ -261,6 +269,7 @@ Feature: Providers Endpoint
     When I send a DELETE request to "/api/v1/evaluations/providers/{{value:list_prov3_id}}"
     Then the response code should be 204
 
+  @negative
   Scenario: Get providers for non existent provider_id
     Given the service is running
     When I send a GET request to "/api/v1/evaluations/providers/oops"
@@ -349,12 +358,14 @@ Feature: Providers Endpoint
     When I send a DELETE request to "/api/v1/evaluations/providers/{id}"
     Then the response code should be 204
 
+  @negative
   Scenario: Update system provider returns 400
     Given the service is running
     When I send a PUT request to "/api/v1/evaluations/providers/lm_evaluation_harness" with body "file:/user_provider_update.json"
     Then the response code should be 400
     And the response should contain the value "read_only_provider" at path "message_code"
 
+  @negative
   Scenario: Patch provider with invalid operation returns 400
     Given the service is running
     When I send a POST request to "/api/v1/evaluations/providers" with body "file:/user_provider.json"
@@ -371,32 +382,38 @@ Feature: Providers Endpoint
     And the response should contain the value "add" at path "message"
     And the response should contain the value "remove" at path "message"
 
+  @negative
   Scenario: Patch system provider returns 400
     Given the service is running
     When I send a PATCH request to "/api/v1/evaluations/providers/lm_evaluation_harness" with body "file:/user_provider_patch.json"
     Then the response code should be 400
     And the response should contain the value "read_only_provider" at path "message_code"
 
+  @negative
   Scenario: Update non-existent provider returns 404
     Given the service is running
     When I send a PUT request to "/api/v1/evaluations/providers/00000000-0000-0000-0000-000000000000" with body "file:/user_provider_update.json"
     Then the response code should be 404
 
+  @negative
   Scenario: Patch non-existent provider returns 404
     Given the service is running
     When I send a PATCH request to "/api/v1/evaluations/providers/00000000-0000-0000-0000-000000000000" with body "file:/user_provider_patch.json"
     Then the response code should be 404
 
+  @negative
   Scenario: Update provider with empty path returns 404
     Given the service is running
     When I send a PUT request to "/api/v1/evaluations/providers/" with body "file:/user_provider_update.json"
     Then the response code should be 404
 
+  @negative
   Scenario: Get provider with empty path returns 404
     Given the service is running
     When I send a GET request to "/api/v1/evaluations/providers/"
     Then the response code should be 404
 
+  @negative
   Scenario: Patch provider with invalid patch returns 400
     Given the service is running
     When I send a POST request to "/api/v1/evaluations/providers" with body "file:/user_provider.json"

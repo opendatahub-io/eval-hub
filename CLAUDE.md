@@ -48,6 +48,7 @@ make fmt                # Format code with go fmt
 ```bash
 make install-deps       # Download and tidy dependencies (requires Python 3 for test color output via scripts/grcat)
 make update-deps        # Update all dependencies to latest
+# Note: uv (https://docs.astral.sh/uv/) is required for `make test-fvt` and `make start-service` (manages Python venv and test dependencies)
 ```
 
 ### Database Setup
@@ -67,6 +68,17 @@ make grant-permissions  # Grant permissions to user
 
 ```bash
 make clean              # Remove build artifacts and coverage files
+```
+
+## Git commits
+
+Use [Conventional Commits](https://www.conventionalcommits.org/): `feat:`, `fix:`, `chore:`, `docs:`, `refactor:`, etc., with an optional scope (e.g. `feat(http): …`).
+
+When a change is assisted by Cursor, add these lines to the **end** of the commit message body (after the subject and any description), as Git trailers:
+
+```
+Assisted-by: Cursor
+Made-with: Cursor
 ```
 
 ## Architecture Overview
@@ -172,7 +184,7 @@ Example (matches `setupEvaluationJobsRoutes`):
 s.handleFunc(router, "/api/v1/evaluations/jobs", func(w http.ResponseWriter, r *http.Request) {
     ctx := s.newExecutionContext(r)
     resp := NewRespWrapper(w, ctx)
-    req := NewRequestWrapper(r)
+    req := s.newRequestWrapper(w, r)
     switch r.Method {
     case http.MethodPost:
         h.HandleCreateEvaluation(ctx, req, resp)
@@ -259,7 +271,10 @@ exists then report the `PR` number and skip the rest.
 Before updating to a new golang version check that this version is supported in the go-toolset that can be found here `registry.access.redhat.com/ubi9/go-toolset`. If the new golang version is not yet supported in `registry.access.redhat.com/ubi9/go-toolset` then move to the latest supported version, if possible, and report that the desired version is not yet supported by go-toolset.
 The PR should also update the major golang version, if needed, in the Containerfile.
 
+The go.mod must not be updated until the same version exists in go-toolset.
+
 If there are other files in the repository that require updating due to new golang version then mention them in the PR.
+Use `go-version-file: "go.mod"` in the github actions where possible.
 
 #### npm devDependencies
 

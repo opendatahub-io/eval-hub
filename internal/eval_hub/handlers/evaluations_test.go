@@ -4,10 +4,10 @@ import (
 	"context"
 	"io"
 	"log/slog"
+	"net/http"
 	"net/http/httptest"
 	"strings"
 	"testing"
-	"time"
 
 	"github.com/eval-hub/eval-hub/internal/eval_hub/abstractions"
 	"github.com/eval-hub/eval-hub/internal/eval_hub/executioncontext"
@@ -291,7 +291,7 @@ func TestHandleCreateEvaluationMarksFailedWhenRuntimeErrors(t *testing.T) {
 	validate := validation.NewValidator()
 
 	h := handlers.New(storage, validate, runtime, nil, nil)
-	ctx := executioncontext.NewExecutionContext(context.Background(), "req-1", logger, time.Second, "test-user", "")
+	ctx := executioncontext.NewExecutionContext(context.Background(), "req-1", logger, "test-user", "")
 
 	req := &bodyRequest{
 		MockRequest: createMockRequest("POST", "/api/v1/evaluations/jobs"),
@@ -335,7 +335,7 @@ func TestHandleCreateEvaluationSucceedsWhenRuntimeOk(t *testing.T) {
 	runtime := &fakeRuntime{}
 	validate := validation.NewValidator()
 	h := handlers.New(storage, validate, runtime, nil, nil)
-	ctx := executioncontext.NewExecutionContext(context.Background(), "req-2", logger, time.Second, "test-user", "test-tenant")
+	ctx := executioncontext.NewExecutionContext(context.Background(), "req-2", logger, "test-user", "test-tenant")
 
 	req := &bodyRequest{
 		MockRequest: createMockRequest("POST", "/api/v1/evaluations/jobs"),
@@ -370,7 +370,7 @@ func TestHandleCancelEvaluationWithSoftDeleteDoesNotCleanupResources(t *testing.
 	runtime := &fakeRuntime{}
 	validate := validation.NewValidator()
 	h := handlers.New(storage, validate, runtime, nil, nil)
-	ctx := executioncontext.NewExecutionContext(context.Background(), "req-3", logger, time.Second, "test-user", "test-tenant")
+	ctx := executioncontext.NewExecutionContext(context.Background(), "req-3", logger, "test-user", "test-tenant")
 
 	req := &deleteRequest{
 		MockRequest: createMockRequest("DELETE", "/api/v1/evaluations/jobs/"+jobID),
@@ -412,7 +412,7 @@ func TestHandleDeleteEvaluationCleansUpResources(t *testing.T) {
 	runtime := &fakeRuntime{}
 	validate := validation.NewValidator()
 	h := handlers.New(storage, validate, runtime, nil, nil)
-	ctx := executioncontext.NewExecutionContext(context.Background(), "req-4", logger, time.Second, "test-user", "test-tenant")
+	ctx := executioncontext.NewExecutionContext(context.Background(), "req-4", logger, "test-user", "test-tenant")
 
 	req := &deleteRequest{
 		MockRequest: createMockRequest("DELETE", "/api/v1/evaluations/jobs/"+jobID),
@@ -446,7 +446,7 @@ func TestHandleCreateEvaluationRejectsMissingBenchmarkID(t *testing.T) {
 		MockRequest: createMockRequest("POST", "/api/v1/evaluations/jobs"),
 		body:        []byte(`{"name": "test-evaluation-job", "model":{"url":"http://test.com","name":"test"},"benchmarks":[{"provider_id":"garak"}]}`),
 	}
-	ctx := executioncontext.NewExecutionContext(context.Background(), "req-3", logger, time.Second, "test-user", "test-tenant")
+	ctx := executioncontext.NewExecutionContext(context.Background(), "req-3", logger, "test-user", "test-tenant")
 	recorder := httptest.NewRecorder()
 	resp := MockResponseWrapper{recorder: recorder}
 
@@ -479,7 +479,7 @@ func TestHandleCreateEvaluationRejectsMissingBenchmarks(t *testing.T) {
 			body:        []byte(body),
 		}
 
-		ctx := executioncontext.NewExecutionContext(context.Background(), fmt.Sprintf("invalid-request-body-%d", index), logger, time.Second, "test-user", "test-tenant")
+		ctx := executioncontext.NewExecutionContext(context.Background(), fmt.Sprintf("invalid-request-body-%d", index), logger, "test-user", "test-tenant")
 		index++
 		recorder := httptest.NewRecorder()
 		resp := MockResponseWrapper{recorder: recorder}
@@ -506,7 +506,7 @@ func TestHandleCreateEvaluationRejectsMissingProviderID(t *testing.T) {
 		MockRequest: createMockRequest("POST", "/api/v1/evaluations/jobs"),
 		body:        []byte(`{"name": "test-evaluation-job", "model":{"url":"http://test.com","name":"test"},"benchmarks":[{"id":"bench-1"}]}`),
 	}
-	ctx := executioncontext.NewExecutionContext(context.Background(), "req-4", logger, time.Second, "test-user", "test-tenant")
+	ctx := executioncontext.NewExecutionContext(context.Background(), "req-4", logger, "test-user", "test-tenant")
 	recorder := httptest.NewRecorder()
 	resp := MockResponseWrapper{recorder: recorder}
 
@@ -536,7 +536,7 @@ func TestHandleCreateEvaluationRejectsInvalidProviderID(t *testing.T) {
 	runtime := &fakeRuntime{}
 	validate := validation.NewValidator()
 	h := handlers.New(storage, validate, runtime, nil, nil)
-	ctx := executioncontext.NewExecutionContext(context.Background(), "req-invalid-provider", logger, time.Second, "test-user", "test-tenant")
+	ctx := executioncontext.NewExecutionContext(context.Background(), "req-invalid-provider", logger, "test-user", "test-tenant")
 
 	req := &bodyRequest{
 		MockRequest: createMockRequest("POST", "/api/v1/evaluations/jobs"),
@@ -568,7 +568,7 @@ func TestHandleCreateEvaluationRejectsInvalidBenchmarkID(t *testing.T) {
 	runtime := &fakeRuntime{}
 	validate := validation.NewValidator()
 	h := handlers.New(storage, validate, runtime, nil, nil)
-	ctx := executioncontext.NewExecutionContext(context.Background(), "req-invalid-benchmark", logger, time.Second, "test-user", "test-tenant")
+	ctx := executioncontext.NewExecutionContext(context.Background(), "req-invalid-benchmark", logger, "test-user", "test-tenant")
 
 	req := &bodyRequest{
 		MockRequest: createMockRequest("POST", "/api/v1/evaluations/jobs"),
@@ -606,7 +606,7 @@ func TestHandleListEvaluations(t *testing.T) {
 	}
 	recorder := httptest.NewRecorder()
 	resp := MockResponseWrapper{recorder: recorder}
-	ctx := executioncontext.NewExecutionContext(context.Background(), "req-1", logger, time.Second, "test-user", "test-tenant")
+	ctx := executioncontext.NewExecutionContext(context.Background(), "req-1", logger, "test-user", "test-tenant")
 
 	h.HandleListEvaluations(ctx, req, resp)
 
@@ -646,7 +646,7 @@ func TestHandleGetEvaluation(t *testing.T) {
 	}
 	recorder := httptest.NewRecorder()
 	resp := MockResponseWrapper{recorder: recorder}
-	ctx := executioncontext.NewExecutionContext(context.Background(), "req-1", logger, time.Second, "test-user", "test-tenant")
+	ctx := executioncontext.NewExecutionContext(context.Background(), "req-1", logger, "test-user", "test-tenant")
 
 	h.HandleGetEvaluation(ctx, req, resp)
 
@@ -674,7 +674,7 @@ func TestHandleGetEvaluation_MissingPathParam(t *testing.T) {
 	}
 	recorder := httptest.NewRecorder()
 	resp := MockResponseWrapper{recorder: recorder}
-	ctx := executioncontext.NewExecutionContext(context.Background(), "req-1", logger, time.Second, "test-user", "test-tenant")
+	ctx := executioncontext.NewExecutionContext(context.Background(), "req-1", logger, "test-user", "test-tenant")
 
 	h.HandleGetEvaluation(ctx, req, resp)
 
@@ -717,7 +717,7 @@ func TestHandleUpdateEvaluation(t *testing.T) {
 	}
 	recorder := httptest.NewRecorder()
 	resp := MockResponseWrapper{recorder: recorder}
-	ctx := executioncontext.NewExecutionContext(context.Background(), "req-1", logger, time.Second, "test-user", "test-tenant")
+	ctx := executioncontext.NewExecutionContext(context.Background(), "req-1", logger, "test-user", "test-tenant")
 
 	h.HandleUpdateEvaluation(ctx, reqWithPath, resp)
 
@@ -743,7 +743,7 @@ func TestHandleCreateEvaluationRejectsExperimentWhenMLflowDisabled(t *testing.T)
 	runtime := &fakeRuntime{}
 	validate := validation.NewValidator()
 	h := handlers.New(storage, validate, runtime, nil, nil)
-	ctx := executioncontext.NewExecutionContext(context.Background(), "req-mlflow-exp", logger, time.Second, "test-user", "test-tenant")
+	ctx := executioncontext.NewExecutionContext(context.Background(), "req-mlflow-exp", logger, "test-user", "test-tenant")
 
 	req := &bodyRequest{
 		MockRequest: createMockRequest("POST", "/api/v1/evaluations/jobs"),
@@ -763,5 +763,44 @@ func TestHandleCreateEvaluationRejectsExperimentWhenMLflowDisabled(t *testing.T)
 	body := recorder.Body.String()
 	if !strings.Contains(body, "mlflow_required_for_experiment") {
 		t.Fatalf("expected mlflow_required_for_experiment in body, got %q", body)
+	}
+}
+
+func TestHandleCreateEvaluationRejectsEmptyExperimentName(t *testing.T) {
+	logger := slog.New(slog.NewTextHandler(io.Discard, nil))
+	providerConfigs := map[string]api.ProviderResource{
+		"garak": {
+			Resource: api.Resource{ID: "garak"},
+			ProviderConfig: api.ProviderConfig{
+				Benchmarks: []api.BenchmarkResource{
+					{ID: "bench-1"},
+				},
+			},
+		},
+	}
+	storage := &fakeStorage{providerConfigs: providerConfigs}
+	runtime := &fakeRuntime{}
+	validate := validation.NewValidator()
+	h := handlers.New(storage, validate, runtime, nil, nil)
+	ctx := executioncontext.NewExecutionContext(context.Background(), "req-empty-exp", logger, "test-user", "test-tenant")
+
+	req := &bodyRequest{
+		MockRequest: createMockRequest("POST", "/api/v1/evaluations/jobs"),
+		body:        []byte(`{"name": "test-evaluation-job", "model":{"url":"http://test.com","name":"test"},"benchmarks":[{"id":"bench-1","provider_id":"garak"}],"experiment":{"name":""}}`),
+	}
+	recorder := httptest.NewRecorder()
+	resp := MockResponseWrapper{recorder: recorder}
+
+	h.HandleCreateEvaluation(ctx, req, resp)
+
+	if runtime.called {
+		t.Fatalf("did not expect runtime when experiment name is empty")
+	}
+	if recorder.Code != http.StatusBadRequest {
+		t.Fatalf("expected 400 Bad Request for empty experiment name, got %d", recorder.Code)
+	}
+	body := recorder.Body.String()
+	if !strings.Contains(body, "request_validation_failed") {
+		t.Fatalf("expected request_validation_failed in body, got %q", body)
 	}
 }

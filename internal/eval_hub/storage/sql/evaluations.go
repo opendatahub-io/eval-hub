@@ -501,17 +501,26 @@ func (s *sqlStorage) computeJobTestResult(job *api.EvaluationJobResource, collec
 	}
 	weightedAvgJobScore := sumOfWeightedScores / sumOfWeights
 	s.logger.Info("Weighted average job score", "weighted_avg_job_score", weightedAvgJobScore, "sum_of_weighted_scores", sumOfWeightedScores, "sum_of_weights", sumOfWeights)
-	var jobTest *api.EvaluationTest = nil
-	// We set 'test' on the evaluation job only if the pass criteria is defined
-	if job.EvaluationJobConfig.PassCriteria != nil {
-		jobTest = &api.EvaluationTest{
-			Score:     weightedAvgJobScore,
-			Threshold: job.EvaluationJobConfig.PassCriteria.Threshold,
-			Pass:      weightedAvgJobScore >= job.EvaluationJobConfig.PassCriteria.Threshold,
-		}
+
+	threshold := getPassCriteriaThreshold(job, collection)
+	jobTest := &api.EvaluationTest{
+		Score:     weightedAvgJobScore,
+		Threshold: threshold,
+		Pass:      weightedAvgJobScore >= threshold,
 	}
 
 	job.Results.Test = jobTest
+}
+
+func getPassCriteriaThreshold(job *api.EvaluationJobResource, collection *api.CollectionResource) float32 {
+	if job.EvaluationJobConfig.PassCriteria != nil && job.EvaluationJobConfig.PassCriteria.Threshold != nil {
+		return *job.EvaluationJobConfig.PassCriteria.Threshold
+	}
+	if collection != nil && collection.PassCriteria != nil && collection.PassCriteria.Threshold != nil {
+		return *collection.PassCriteria.Threshold
+	}
+	// this is the hard-coded default pass criteria threshold
+	return 0.5
 }
 
 func (s *sqlStorage) computeBenchmarkTestResult(job *api.EvaluationJobResource, benchmarkStatusEvent *api.BenchmarkStatusEvent, collection *api.CollectionResource) *api.BenchmarkTest {
@@ -554,10 +563,10 @@ func (s *sqlStorage) computeBenchmarkTestResult(job *api.EvaluationJobResource, 
 					return nil
 				}
 				var threshold float32
-				if benchmark.PassCriteria != nil {
-					threshold = benchmark.PassCriteria.Threshold
-				} else if providerBench != nil && providerBench.PassCriteria != nil {
-					threshold = providerBench.PassCriteria.Threshold
+				if benchmark.PassCriteria != nil && benchmark.PassCriteria.Threshold != nil {
+					threshold = *benchmark.PassCriteria.Threshold
+				} else if providerBench != nil && providerBench.PassCriteria != nil && providerBench.PassCriteria.Threshold != nil {
+					threshold = *providerBench.PassCriteria.Threshold
 				} else {
 					return nil
 				}
@@ -566,9 +575,10 @@ func (s *sqlStorage) computeBenchmarkTestResult(job *api.EvaluationJobResource, 
 					pass = primaryMetricValueFloat <= threshold
 				}
 				return &api.BenchmarkTest{
-					PrimaryScore: primaryMetricValueFloat,
-					Threshold:    threshold,
-					Pass:         pass,
+					PrimaryScore:       primaryMetricValueFloat,
+					PrimaryScoreMetric: primaryMetric,
+					Threshold:          threshold,
+					Pass:               pass,
 				}
 			}
 		}

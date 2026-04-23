@@ -3,7 +3,7 @@
   "info": {
     "title": "Eval Hub",
     "description": "API REST server for evaluation backend orchestration",
-    "version": "0.3.0",
+    "version": "0.4.0",
     "contact": {
       "name": "API Support"
     },
@@ -1437,15 +1437,17 @@
       },
       "PassCriteria": {
         "type": "object",
-        "description": "Pass/fail threshold criteria",
+        "description": "Pass/fail threshold criteria.",
         "properties": {
           "threshold": {
             "type": "number",
             "format": "float",
-            "default": 0,
-            "description": "Threshold value"
+            "description": "Threshold value."
           }
-        }
+        },
+        "required": [
+          "threshold"
+        ]
       },
       "TestDataRefS3": {
         "type": "object",
@@ -1528,6 +1530,18 @@
             }
           }
         ]
+      },
+      "PassCriteriaWithDefault": {
+        "type": "object",
+        "description": "Pass/fail threshold criteria.",
+        "properties": {
+          "threshold": {
+            "type": "number",
+            "format": "float",
+            "description": "Threshold value.",
+            "default": 0.5
+          }
+        }
       },
       "ExperimentTag": {
         "type": "object",
@@ -1685,10 +1699,6 @@
         "title": "EvaluationJobConfigCommon2",
         "description": "The evaluation job request configuration.\n",
         "properties": {
-          "pass_criteria": {
-            "$ref": "#/components/schemas/PassCriteria",
-            "description": "The overall pass criteria for the evaluation job.\n"
-          },
           "experiment": {
             "$ref": "#/components/schemas/ExperimentConfig",
             "description": "The MLFlow experiment configuration. When provided, the evaluation job will be tracked in MLFlow.\n"
@@ -1725,6 +1735,10 @@
                   "$ref": "#/components/schemas/EvaluationBenchmarkConfig"
                 },
                 "description": "The evaluation benchmarks to run.\n"
+              },
+              "pass_criteria": {
+                "$ref": "#/components/schemas/PassCriteriaWithDefault",
+                "description": "The overall pass criteria for the evaluation job.\n"
               }
             }
           },
@@ -1767,6 +1781,10 @@
             "properties": {
               "collection": {
                 "$ref": "#/components/schemas/CollectionRef"
+              },
+              "pass_criteria": {
+                "$ref": "#/components/schemas/PassCriteria",
+                "description": "The overall pass criteria for the evaluation job.\nIf this is not set then the collection pass criteria will be used.\n"
               }
             }
           },

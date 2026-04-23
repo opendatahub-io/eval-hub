@@ -1,5 +1,8 @@
 .PHONY: help autoupdate-precommit pre-commit clean build build-coverage build-service build-init build-sidecar build-all-platforms start-service stop-service start-sidecar stop-sidecar lint test test-fvt-server test-all test-coverage test-fvt-coverage test-fvt-server-coverage test-all-coverage install-deps update-deps get-deps fmt vet update-deps generate-public-docs verify-api-docs generate-ignore-file documentation check-unused-components fvt-report
 
+GOPATH := $(shell go env GOPATH)
+GOBIN := $(shell go env GOPATH)/bin
+
 # Variables
 BINARY_NAME = eval-hub
 CMD_PATH = ./cmd/eval_hub
@@ -41,6 +44,7 @@ clean: ## Remove build artifacts
 	@rm -rf $(BIN_DIR)
 	@rm -f $(BINARY_NAME)
 	@go clean ${CLEAN_OPTS}
+	@rm -f ${GOBIN}/go-cover-treemap && true
 	@echo "Clean complete"
 
 $(BIN_DIR):
@@ -81,13 +85,13 @@ ${SERVER_PID_FILE}:
 
 SERVICE_LOG ?= $(BIN_DIR)/service.log
 
-start-service: ${SERVER_PID_FILE} build-service ## Run the application in background
+start-service: test-setup ${SERVER_PID_FILE} build-service ## Run the application in background
 	@echo "Running $(BINARY_NAME) on port $(PORT)..."
-	@./scripts/start_server.sh "${SERVER_PID_FILE}" "${BIN_DIR}/$(BINARY_NAME)" "${SERVICE_LOG}" ${PORT} ""
+	@. $(VENV_DIR)/bin/activate && ./scripts/start_server.sh "${SERVER_PID_FILE}" "${BIN_DIR}/$(BINARY_NAME)" "${SERVICE_LOG}" ${PORT} ""
 
-start-service-coverage: ${SERVER_PID_FILE} build-coverage ## Run the application in background
+start-service-coverage: test-setup ${SERVER_PID_FILE} build-coverage ## Run the application in background
 	@echo "Running $(BINARY_NAME)-cov on port $(PORT)..."
-	@./scripts/start_server.sh "${SERVER_PID_FILE}" "${BIN_DIR}/$(BINARY_NAME)-cov" "${SERVICE_LOG}" ${PORT} "${BIN_DIR}"
+	@. $(VENV_DIR)/bin/activate && ./scripts/start_server.sh "${SERVER_PID_FILE}" "${BIN_DIR}/$(BINARY_NAME)-cov" "${SERVICE_LOG}" ${PORT} "${BIN_DIR}"
 
 stop-service:
 	-./scripts/stop_server.sh "${SERVER_PID_FILE}"
@@ -153,17 +157,22 @@ SERVER_URL ?= http://localhost:8080
 
 FVT_TESTS ?= ./tests/features/...
 FVT_OUTPUT ?= --godog.format=junit:${PWD}/$(BIN_DIR)/junit-fvt-report.xml,pretty
+FVT_TAGS ?= "--godog.tags=~@ignore && ~@mlflow && ~@cluster"
 
-test-fvt: $(BIN_DIR) ## Run FVT (Functional Verification Tests) using godog
+.PHONY: test-setup
+test-setup: venv ## Set up Python test environment (venv + eval-hub-sdk adapter)
+	@uv pip install "eval-hub-sdk[adapter]>=0.1.5"
+
+test-fvt: $(BIN_DIR) test-setup ## Run FVT (Functional Verification Tests) using godog
 	@echo "Running FVT tests..."
-	@bash -c 'set -o pipefail; go test ${FVT_TESTS} ${FVT_OUTPUT} -v -race | ${PWD}/scripts/grcat ${PWD}/.conf.go-integration-test'
+	@. $(VENV_DIR)/bin/activate && bash -c 'set -o pipefail; go test ${FVT_TESTS} ${FVT_OUTPUT} ${FVT_TAGS} -v -race | ${PWD}/scripts/grcat ${PWD}/.conf.go-integration-test'
 
 test-fvt-server: start-service ## Run FVT tests using godog against a running server
 	@SERVER_URL="${SERVER_URL}" make test-fvt; status=$$?; make stop-service; exit $$status
 
 test-fvt-coverage: $(BIN_DIR)## Run integration (FVT) tests with coverage
 	@echo "Running integration (FVT) tests with coverage..."
-	@go test ${FVT_TESTS} ${FVT_OUTPUT} -v -race -coverprofile=$(BIN_DIR)/coverage-fvt.out -covermode=atomic
+	@go test ${FVT_TESTS} ${FVT_OUTPUT} ${FVT_TAGS} -v -race -coverprofile=$(BIN_DIR)/coverage-fvt.out -covermode=atomic
 	@go tool cover -html=$(BIN_DIR)/coverage-fvt.out -o $(BIN_DIR)/coverage-fvt.html
 	@echo "Coverage report generated: $(BIN_DIR)/coverage-fvt.html"
 
@@ -185,6 +194,22 @@ fvt-report: ## Generate HTML report for FVT tests
 	if [ $$report_status -ne 0 ]; then echo "Report generation failed (see output above)."; fi; \
 	if [ -f cucumber-report.html ]; then echo "Report generated: cucumber-report.html"; else echo "Report not generated: cucumber-report.html"; fi; \
 	exit $$status
+
+${GOBIN}/go-cover-treemap:
+	go install github.com/nikolaydubina/go-cover-treemap@latest
+
+BIN_DIR_COVERAGE ?= $(BIN_DIR)/coverage
+
+TREEMAP_OPTIONS ?= -w 1080 -h 360 -percent
+
+coverage-treemap: ${GOBIN}/go-cover-treemap
+	@echo "Generating coverage treemap for $(BIN_DIR)/coverage.out and $(BIN_DIR)/coverage-fvt.out"
+	@rm -fr ${BIN_DIR_COVERAGE} && true
+	@mkdir -p ${BIN_DIR_COVERAGE}
+	go tool covdata merge -i=${BIN_DIR} -o=${BIN_DIR_COVERAGE}
+	go tool covdata textfmt -i ${BIN_DIR_COVERAGE} -o ${BIN_DIR_COVERAGE}/coverage.out
+	${GOBIN}/go-cover-treemap ${TREEMAP_OPTIONS} -coverprofile $(BIN_DIR_COVERAGE)/coverage.out > $(BIN_DIR_COVERAGE)/coverage.svg
+	@echo "Coverage treemap generated: $(BIN_DIR_COVERAGE)/coverage.svg"
 
 ## ------------------------------------------------------------------------------------------------
 ## Dependencies
@@ -240,7 +265,7 @@ VENV_PYTHON = $(VENV_DIR)/bin/python
 venv: ## Create Python virtual environment using uv
 	@if [ ! -d "$(VENV_DIR)" ]; then \
 		echo "Creating uv virtual environment..."; \
-		uv venv $(VENV_DIR); \
+		uv venv $(VENV_DIR) --python 3.12; \
 		echo "Virtual environment created at $(VENV_DIR)"; \
 	else \
 		echo "Virtual environment already exists at $(VENV_DIR)"; \
@@ -345,7 +370,7 @@ generate-public-docs: ${REDOCLY_CLI}
 
 verify-api-docs: ${REDOCLY_CLI}
 	${REDOCLY_CLI} lint
-	@echo "Tip: open docs/openapi.yaml in Swagger Editor (such as https://editor.swagger.io/) to automatically inspect the rendered spec."
+	@echo "Tip: open docs/openapi.yaml in Swagger Editor (such as https://editor.swagger.io/) to automatically inspect the rendered spec or open the file docs/index.html."
 
 generate-ignore-file: ${REDOCLY_CLI}
 	${REDOCLY_CLI} lint --generate-ignore-file ./docs/src/openapi.yaml

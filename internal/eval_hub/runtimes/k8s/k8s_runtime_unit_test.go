@@ -167,7 +167,6 @@ func TestK8sRuntimeName(t *testing.T) {
 }
 
 func TestCreateBenchmarkResourcesSetsConfigMapOwner(t *testing.T) {
-	t.Setenv("SERVICE_URL", "http://service.example")
 	providerID := "provider-1"
 	evaluation := sampleEvaluation(providerID)
 
@@ -213,7 +212,6 @@ func TestCreateBenchmarkResourcesSetsConfigMapOwner(t *testing.T) {
 }
 
 func TestCreateBenchmarkResourcesSetsAnnotations(t *testing.T) {
-	t.Setenv("SERVICE_URL", "http://service.example")
 	providerID := "provider-1"
 	evaluation := sampleEvaluation(providerID)
 
@@ -275,7 +273,6 @@ func TestCreateBenchmarkResourcesSetsAnnotations(t *testing.T) {
 }
 
 func TestCreateBenchmarkResourcesAddsModelAuthVolumeAndEnv(t *testing.T) {
-	t.Setenv("SERVICE_URL", "http://service.example")
 	providerID := "provider-1"
 	evaluation := sampleEvaluation(providerID)
 	evaluation.Model.Auth = &api.ModelAuth{SecretRef: "model-auth-secret"}
@@ -346,8 +343,6 @@ func TestCreateBenchmarkResourcesAddsModelAuthVolumeAndEnv(t *testing.T) {
 }
 
 func TestCreateBenchmarkResourcesAddsInitContainerForS3TestData(t *testing.T) {
-
-	t.Setenv("SERVICE_URL", "http://service.example")
 	providerID := "provider-1"
 	evaluation := sampleEvaluation(providerID)
 	evaluation.Benchmarks[0].TestDataRef = &api.TestDataRef{
@@ -380,13 +375,9 @@ func TestCreateBenchmarkResourcesAddsInitContainerForS3TestData(t *testing.T) {
 		t.Fatalf("expected 1 job, got %d", len(jobs))
 	}
 	job := jobs[0]
-	if len(job.Spec.Template.Spec.InitContainers) != 1 {
-		t.Fatalf("expected 1 init container, got %d", len(job.Spec.Template.Spec.InitContainers))
-	}
-
-	initContainer := job.Spec.Template.Spec.InitContainers[0]
-	if initContainer.Name != initContainerName {
-		t.Fatalf("expected init container name %q, got %q", initContainerName, initContainer.Name)
+	initContainer := findContainer(job.Spec.Template.Spec.InitContainers, initContainerName)
+	if initContainer == nil {
+		t.Fatal("expected test-data init container")
 	}
 	if len(initContainer.Command) != 1 || initContainer.Command[0] != defaultTestDataInitCmd {
 		t.Fatalf("expected init container command %q, got %v", defaultTestDataInitCmd, initContainer.Command)
@@ -449,7 +440,6 @@ func TestCreateBenchmarkResourcesAddsInitContainerForS3TestData(t *testing.T) {
 }
 
 func TestCreateBenchmarkResourcesDeletesConfigMapOnJobFailure(t *testing.T) {
-	t.Setenv("SERVICE_URL", "http://service.example")
 	providerID := "provider-1"
 	evaluation := sampleEvaluation(providerID)
 
@@ -481,7 +471,6 @@ func TestCreateBenchmarkResourcesDeletesConfigMapOnJobFailure(t *testing.T) {
 }
 
 func TestRunEvaluationJobMarksBenchmarkFailedOnCreateError(t *testing.T) {
-	t.Setenv("SERVICE_URL", "http://service.example")
 	providerID := "provider-1"
 	evaluation := sampleEvaluation(providerID)
 
@@ -535,7 +524,6 @@ func TestRunEvaluationJobMarksBenchmarkFailedOnCreateError(t *testing.T) {
 }
 
 func TestRunEvaluationJobHandlesUpdateFailure(t *testing.T) {
-	t.Setenv("SERVICE_URL", "http://service.example")
 	providerID := "provider-1"
 	evaluation := sampleEvaluation(providerID)
 

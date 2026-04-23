@@ -1,8 +1,8 @@
-@evaluations @cluster 
-
+@cluster
+@evaluations
 Feature: Evaluation Jobs
   As a data scientist
-  I want to create evaluation jobs
+  I want to create evaluation jobs against a running cluster
   So that I evaluate models
 
   Background:
@@ -10,14 +10,13 @@ Feature: Evaluation Jobs
 
   Scenario: Verifying results returned for Evaluation job
     Given the service is running
-    When the mode is local or CI then skip this scenario
     When I send a POST request to "/api/v1/evaluations/jobs" with body "file:/evaluation_job.json"
     Then the response code should be 202
     And the response should contain the value "pending" at path "$.status.state"
     And the response should contain the value "evaluation_job_created" at path "$.status.message.message_code"
     And I wait for the evaluation job status to be "completed"
-    When I send a GET request to "/api/v1/evaluations/jobs/{id}"                                                                                                                                                                                                              
-    Then the response code should be 200  
+    When I send a GET request to "/api/v1/evaluations/jobs/{id}"
+    Then the response code should be 200
     And the response should contain the value "completed" at path "$.status.state"
     And the response should contain the value "completed" at path "$.status.benchmarks[0].status"
     And the response should contain the value "arc_easy" at path "$.status.benchmarks[0].id"
@@ -39,7 +38,6 @@ Feature: Evaluation Jobs
 
   Scenario: Evaluation job with multiple benchmarks from same provider
     Given the service is running
-    When the mode is local or CI then skip this scenario
     When I send a POST request to "/api/v1/evaluations/jobs" with body "file:/evaluation_job_multiple_benchmark.json"
     Then the response code should be 202
     And the response should contain the value "pending" at path "$.status.state"
@@ -63,9 +61,8 @@ Feature: Evaluation Jobs
     When I send a DELETE request to "/api/v1/evaluations/jobs/{id}?hard_delete=true"
     Then the response code should be 204
 
-  Scenario: Multiple jobs can be submitted 
+  Scenario: Multiple jobs can be submitted
     Given the service is running
-    When the mode is local or CI then skip this scenario
     And I set the header "X-User" to "test-user-1"
     When I send a POST request to "/api/v1/evaluations/jobs" with body "file:/evaluation_job.json"
     Then the response code should be 202
@@ -91,9 +88,9 @@ Feature: Evaluation Jobs
     When I send a DELETE request to "/api/v1/evaluations/jobs/{{value:job3_id}}?hard_delete=true"
     Then the response code should be 204
 
+  @mlflow
   Scenario: Multiple jobs share same MLflow experiment
     Given the service is running
-    When the mode is local or CI then skip this scenario
     When I send a POST request to "/api/v1/evaluations/jobs" with body:
       """
       {
@@ -153,7 +150,6 @@ Feature: Evaluation Jobs
 
   Scenario: Collection job completes successfully
     Given the service is running
-    When the mode is local or CI then skip this scenario
     When I send a POST request to "/api/v1/evaluations/collections" with body "file:/collection.json"
     Then the response code should be 201
     And the "resource.id" field in the response should be saved as "value:collection_id"
@@ -171,10 +167,9 @@ Feature: Evaluation Jobs
     Then the response code should be 204
     When I send a DELETE request to "/api/v1/evaluations/collections/{{value:collection_id}}?hard_delete=true"
     Then the response code should be 204
-  
+
   Scenario: Evaluation job completes with multi-benchmark collection
     Given the service is running
-    When the mode is local or CI then skip this scenario
     When I send a POST request to "/api/v1/evaluations/collections" with body:
       """
       {
@@ -228,7 +223,6 @@ Feature: Evaluation Jobs
 
   Scenario: Multiple jobs sharing same collection can be submitted
     Given the service is running
-    When the mode is local or CI then skip this scenario
     When I send a POST request to "/api/v1/evaluations/collections" with body "file:/collection.json"
     Then the response code should be 201
     And the "resource.id" field in the response should be saved as "value:collection_id"
@@ -253,9 +247,9 @@ Feature: Evaluation Jobs
     When I send a DELETE request to "/api/v1/evaluations/collections/{{value:collection_id}}?hard_delete=true"
     Then the response code should be 204
 
+  @mlflow
   Scenario: Collection jobs share same MLflow experiments
     Given the service is running
-    When the mode is local or CI then skip this scenario
     When I send a POST request to "/api/v1/evaluations/collections" with body "file:/collection.json"
     Then the response code should be 201
     And the "resource.id" field in the response should be saved as "value:collection_id"
@@ -314,7 +308,6 @@ Feature: Evaluation Jobs
 
   Scenario: Collection job with parameters
     Given the service is running
-    When the mode is local or CI then skip this scenario
     When I send a POST request to "/api/v1/evaluations/collections" with body:
       """
       {
@@ -353,3 +346,117 @@ Feature: Evaluation Jobs
     Then the response code should be 204
     When I send a DELETE request to "/api/v1/evaluations/collections/{{value:collection_id}}?hard_delete=true"
     Then the response code should be 204
+
+  Scenario: Create threshold-zero collection then submit job and verify completion
+    Given the service is running
+    When I send a POST request to "/api/v1/evaluations/collections" with body:
+    """
+    {
+        "name": "test-benchmarks-collection-threshold-zero",
+        "category": "test",
+        "description": "Collection of benchmarks for FVT",
+        "pass_criteria": {
+            "threshold": 0
+        },
+        "benchmarks": [
+            {
+                "id": "arc_easy",
+                "provider_id": "lm_evaluation_harness",
+                "primary_score": {
+                    "metric": "acc_norm",
+                    "lower_is_better": false
+                },
+                "pass_criteria": {
+                    "threshold": 0.5
+                },
+                "parameters": {
+                    "limit": 10,
+                    "num_fewshot": 0,
+                    "tokenizer": "google/flan-t5-small"
+                }
+            },
+            {
+                "id": "arc_easy",
+                "provider_id": "lm_evaluation_harness",
+                "primary_score": {
+                    "metric": "acc_norm",
+                    "lower_is_better": false
+                },
+                "pass_criteria": {
+                    "threshold": 0.5
+                },
+                "parameters": {
+                    "limit": 10,
+                    "num_fewshot": 0,
+                    "tokenizer": "google/flan-t5-small"
+                }
+            }
+        ]
+    }
+    """
+    Then the response code should be 201
+    And the "resource.id" field in the response should be saved as "value:collection_id"
+    And the response should contain the value "test-benchmarks-collection-threshold-zero" at path "$.name"
+    And the response should contain the value "test" at path "$.category"
+    And the response should contain the value "Collection of benchmarks for FVT" at path "$.description"
+    And the response should contain the value "0" at path "$.pass_criteria.threshold"
+    And the array at path "$.benchmarks" in the response should have length 2
+    When I send a POST request to "/api/v1/evaluations/jobs" with body "file:/evaluation_job_with_collection.json"
+    Then the response code should be 202
+    And the response should contain the value "evaluation_job_created" at path "$.status.message.message_code"
+    And the response should contain the value "pending" at path "$.status.state"
+    And I wait for the evaluation job status to be "completed"
+    When I send a GET request to "/api/v1/evaluations/jobs/{id}"
+    Then the response code should be 200
+    And the response should contain the value "completed" at path "$.status.state"
+    And the response should contain "results"
+    And the response should contain the value "{{value:collection_id}}" at path "$.collection.id"
+
+  Scenario: Create evaluation job with Collection
+    Given the service is running
+    When I send a POST request to "/api/v1/evaluations/collections" with body "file:/collection.json"
+    Then the response code should be 201
+    And the "resource.id" field in the response should be saved as "value:collection_id"
+    When I send a POST request to "/api/v1/evaluations/jobs" with body "file:/evaluation_job_with_collection.json"
+    Then the response code should be 202
+    And the response should contain the value "evaluation_job_created" at path "$.status.message.message_code"
+    And the response should contain the value "pending" at path "$.status.state"
+    When I send a GET request to "/api/v1/evaluations/jobs/{id}"
+    Then the response code should be 200
+    And the response should contain the value "{{value:collection_id}}" at path "$.collection.id"
+    And I wait for the evaluation job status to be "completed"
+    When I send a DELETE request to "/api/v1/evaluations/jobs/{id}?hard_delete=true"
+    Then the response code should be 204
+    When I send a DELETE request to "/api/v1/evaluations/collections/{{value:collection_id}}"
+    Then the response code should be 204
+
+  Scenario: Create an evaluation job and wait for completion
+    Given the service is running
+    When I send a POST request to "/api/v1/evaluations/jobs" with body "file:/evaluation_job.json"
+    Then the response code should be 202
+    And I wait for the evaluation job status to be "completed"
+    When I send a DELETE request to "/api/v1/evaluations/jobs/{id}?hard_delete=true"
+    Then the response code should be 204
+    When I send a GET request to "/api/v1/evaluations/jobs/{id}"
+    Then the response code should be 404
+    And the response should contain the value "resource_not_found" at path "$.message_code"
+    When I send a DELETE request to "/api/v1/evaluations/jobs/{id}?hard_delete=true"
+    Then the response code should be 404
+
+  Scenario: Verify Evaluation Jobs Can Use OOB Collections
+    Given the service is running
+    When I send a POST request to "/api/v1/evaluations/jobs" with body:
+      """
+      {
+        "name": "test-evaluation-job-oob-collection",
+        "collection": {
+          "id": "toxicity-and-ethical-principles"
+        },
+        "model": {
+          "url": "{{env:MODEL_URL|http://test.com}}",
+          "name": "{{env:MODEL_NAME|test}}"
+        }
+      }
+      """
+    Then the response code should be 202
+    And the response should contain the value "toxicity-and-ethical-principles" at path "$.collection.id"

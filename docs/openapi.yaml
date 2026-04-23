@@ -2,7 +2,7 @@ openapi: 3.1.0
 info:
   title: Eval Hub
   description: API REST server for evaluation backend orchestration
-  version: 0.3.0
+  version: 0.4.0
   contact:
     name: API Support
   license:
@@ -990,13 +990,14 @@ components:
           description: Whether lower values indicate better performance
     PassCriteria:
       type: object
-      description: Pass/fail threshold criteria
+      description: Pass/fail threshold criteria.
       properties:
         threshold:
           type: number
           format: float
-          default: 0
-          description: Threshold value
+          description: Threshold value.
+      required:
+        - threshold
     TestDataRefS3:
       type: object
       description: |
@@ -1093,6 +1094,15 @@ components:
                 Optional external test data (e.g. **S3**). For **Kubernetes Job** runs, may
                 trigger a pre-run init container that downloads files to **`/test_data`** for
                 the adapter. Omit if the benchmark does not need mounted files.
+    PassCriteriaWithDefault:
+      type: object
+      description: Pass/fail threshold criteria.
+      properties:
+        threshold:
+          type: number
+          format: float
+          description: Threshold value.
+          default: 0.5
     ExperimentTag:
       type: object
       description: Tag on an experiment (e.g. MLFlow)
@@ -1219,10 +1229,6 @@ components:
       description: |
         The evaluation job request configuration.
       properties:
-        pass_criteria:
-          $ref: '#/components/schemas/PassCriteria'
-          description: |
-            The overall pass criteria for the evaluation job.
         experiment:
           $ref: '#/components/schemas/ExperimentConfig'
           description: |
@@ -1253,6 +1259,10 @@ components:
                 $ref: '#/components/schemas/EvaluationBenchmarkConfig'
               description: |
                 The evaluation benchmarks to run.
+            pass_criteria:
+              $ref: '#/components/schemas/PassCriteriaWithDefault'
+              description: |
+                The overall pass criteria for the evaluation job.
         - $ref: '#/components/schemas/EvaluationJobConfigCommon2'
       title: EvaluationJobConfigBenchmarks
     CollectionRef:
@@ -1281,6 +1291,11 @@ components:
           properties:
             collection:
               $ref: '#/components/schemas/CollectionRef'
+            pass_criteria:
+              $ref: '#/components/schemas/PassCriteria'
+              description: |
+                The overall pass criteria for the evaluation job.
+                If this is not set then the collection pass criteria will be used.
         - $ref: '#/components/schemas/EvaluationJobConfigCommon2'
       title: EvaluationJobConfigCollection
     EvaluationJobConfig:
