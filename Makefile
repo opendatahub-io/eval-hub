@@ -1,15 +1,20 @@
-.PHONY: help autoupdate-precommit pre-commit clean build build-coverage start-service stop-service lint test test-fvt-server test-all test-coverage test-fvt-coverage test-fvt-server-coverage test-all-coverage install-deps update-deps get-deps fmt vet update-deps generate-public-docs verify-api-docs generate-ignore-file documentation check-unused-components
+.PHONY: help autoupdate-precommit pre-commit clean build build-coverage build-service build-init build-sidecar build-all-platforms start-service stop-service start-sidecar stop-sidecar lint test test-fvt-server test-all test-coverage test-fvt-coverage test-fvt-server-coverage test-all-coverage install-deps update-deps get-deps fmt vet update-deps generate-public-docs verify-api-docs generate-ignore-file documentation check-unused-components fvt-report
+
+GOPATH := $(shell go env GOPATH)
+GOBIN := $(shell go env GOPATH)/bin
 
 # Variables
 BINARY_NAME = eval-hub
 CMD_PATH = ./cmd/eval_hub
+INIT_BINARY_NAME = eval-runtime-init
+INIT_CMD_PATH = ./cmd/eval_runtime_init
+SIDECAR_BINARY_NAME = eval-runtime-sidecar
+SIDECAR_CMD_PATH = ./cmd/eval_runtime_sidecar
 BIN_DIR = bin
 PORT ?= 8080
 
 # Default target
 .DEFAULT_GOAL := help
-
-UNAME := $(shell uname)
 
 # Auto-detect platform for cross-compilation and wheel building
 # Uses Go's native platform detection - override by setting CROSS_GOOS/CROSS_GOARCH env vars if needed.
@@ -39,25 +44,39 @@ clean: ## Remove build artifacts
 	@rm -rf $(BIN_DIR)
 	@rm -f $(BINARY_NAME)
 	@go clean ${CLEAN_OPTS}
+	@rm -f ${GOBIN}/go-cover-treemap && true
 	@echo "Clean complete"
 
 $(BIN_DIR):
 	@mkdir -p $(BIN_DIR)
 
 BUILD_PACKAGE ?= main
-FULL_BUILD_NUMBER ?= 0.0.1
+FULL_BUILD_NUMBER ?= $(shell cat VERSION)
 LDFLAGS_X = -X "${BUILD_PACKAGE}.Build=${FULL_BUILD_NUMBER}" -X "${BUILD_PACKAGE}.BuildDate=$(DATE)"
 LDFLAGS = -buildmode=exe ${LDFLAGS_X}
 
-build: $(BIN_DIR) ## Build the binary
+build-service: $(BIN_DIR) ## Build the service binary
 	@echo "Building $(BINARY_NAME) with ${LDFLAGS}"
 	@go build -race -ldflags "${LDFLAGS}" -o $(BIN_DIR)/$(BINARY_NAME) $(CMD_PATH)
 	@echo "Build complete: $(BIN_DIR)/$(BINARY_NAME)"
 
-build-coverage: $(BIN_DIR) ## Build the binary with coverage
+build-init: $(BIN_DIR) ## Build the eval-runtime-init binary only
+	@echo "Building $(INIT_BINARY_NAME) with ${LDFLAGS}"
+	@go build -race -ldflags "${LDFLAGS}" -o $(BIN_DIR)/$(INIT_BINARY_NAME) $(INIT_CMD_PATH)
+	@echo "Build complete: $(BIN_DIR)/$(INIT_BINARY_NAME)"
+
+build: build-service build-init build-sidecar ## Build the binaries
+
+build-coverage: $(BIN_DIR) ## Build the binaries with coverage
 	@echo "Building $(BINARY_NAME)-cov with -cover -covermode=atomic -ldflags ${LDFLAGS} "
 	@go build -race -cover -covermode=atomic -coverpkg=./... -ldflags "${LDFLAGS}" -o $(BIN_DIR)/$(BINARY_NAME)-cov $(CMD_PATH)
 	@echo "Build complete: $(BIN_DIR)/$(BINARY_NAME)-cov"
+	@echo "Building $(INIT_BINARY_NAME)-cov with -cover -covermode=atomic -ldflags ${LDFLAGS} "
+	@go build -race -cover -covermode=atomic -coverpkg=./... -ldflags "${LDFLAGS}" -o $(BIN_DIR)/$(INIT_BINARY_NAME)-cov $(INIT_CMD_PATH)
+	@echo "Build complete: $(BIN_DIR)/$(INIT_BINARY_NAME)-cov"
+	@echo "Building $(SIDECAR_BINARY_NAME)-cov with -cover -covermode=atomic -ldflags ${LDFLAGS} "
+	@go build -race -cover -covermode=atomic -coverpkg=./... -ldflags "${LDFLAGS}" -o $(BIN_DIR)/$(SIDECAR_BINARY_NAME)-cov $(SIDECAR_CMD_PATH)
+	@echo "Build complete: $(BIN_DIR)/$(SIDECAR_BINARY_NAME)-cov"
 
 SERVER_PID_FILE ?= $(BIN_DIR)/pid
 
@@ -66,17 +85,37 @@ ${SERVER_PID_FILE}:
 
 SERVICE_LOG ?= $(BIN_DIR)/service.log
 
-start-service: ${SERVER_PID_FILE} build ## Run the application in background
+start-service: test-setup ${SERVER_PID_FILE} build-service ## Run the application in background
 	@echo "Running $(BINARY_NAME) on port $(PORT)..."
-	@./scripts/start_server.sh "${SERVER_PID_FILE}" "${BIN_DIR}/$(BINARY_NAME)" "${SERVICE_LOG}" ${PORT} ""
+	@. $(VENV_DIR)/bin/activate && ./scripts/start_server.sh "${SERVER_PID_FILE}" "${BIN_DIR}/$(BINARY_NAME)" "${SERVICE_LOG}" ${PORT} ""
 
-start-service-coverage: ${SERVER_PID_FILE} build-coverage ## Run the application in background
+start-service-coverage: test-setup ${SERVER_PID_FILE} build-coverage ## Run the application in background
 	@echo "Running $(BINARY_NAME)-cov on port $(PORT)..."
-	@./scripts/start_server.sh "${SERVER_PID_FILE}" "${BIN_DIR}/$(BINARY_NAME)-cov" "${SERVICE_LOG}" ${PORT} "${BIN_DIR}"
+	@. $(VENV_DIR)/bin/activate && ./scripts/start_server.sh "${SERVER_PID_FILE}" "${BIN_DIR}/$(BINARY_NAME)-cov" "${SERVICE_LOG}" ${PORT} "${BIN_DIR}"
 
 stop-service:
 	-./scripts/stop_server.sh "${SERVER_PID_FILE}"
 	! grep -i -F panic "${SERVICE_LOG}"
+
+# Sidecar (eval-runtime-sidecar) starter/stopper
+SIDECAR_PID_FILE ?= $(BIN_DIR)/sidecar.pid
+SIDECAR_LOG ?= $(BIN_DIR)/sidecar.log
+SIDECAR_PORT ?= 8081
+# Config dir containing sidecar_runtime_local.json (or minimal JSON is generated from SIDECAR_PORT)
+SIDECAR_CONFIG_DIR ?= config
+
+build-sidecar: $(BIN_DIR) ## Build only the sidecar binary
+	@echo "Building $(SIDECAR_BINARY_NAME) with ${LDFLAGS}"
+	@go build -race -ldflags "${LDFLAGS}" -o $(BIN_DIR)/$(SIDECAR_BINARY_NAME) $(SIDECAR_CMD_PATH)
+	@echo "Build complete: $(BIN_DIR)/$(SIDECAR_BINARY_NAME)"
+
+start-sidecar: build-sidecar ## Run the sidecar in background (port $(SIDECAR_PORT), config from $(SIDECAR_CONFIG_DIR))
+	@rm -f "${SIDECAR_PID_FILE}" && true
+	@echo "Running $(SIDECAR_BINARY_NAME) on port $(SIDECAR_PORT) (config: $(SIDECAR_CONFIG_DIR))..."
+	@SIDECAR_PORT="$(SIDECAR_PORT)" ./scripts/start_sidecar.sh "${SIDECAR_PID_FILE}" "${BIN_DIR}/$(SIDECAR_BINARY_NAME)" "${SIDECAR_LOG}" "$(SIDECAR_PORT)" "$(SIDECAR_CONFIG_DIR)"
+
+stop-sidecar: ## Stop the sidecar
+	-./scripts/stop_server.sh "${SIDECAR_PID_FILE}"
 
 lint: ## Lint the code (runs go vet)
 	@echo "Linting code..."
@@ -95,28 +134,45 @@ vet: ## Run go vet
 
 test: ## Run unit tests
 	@echo "Running unit tests..."
-	@go test -v ./internal/... ./cmd/...
+	@bash -c 'set -o pipefail; go test -v ./auth/... ./internal/... ./cmd/... | ${PWD}/scripts/grcat ${PWD}/.conf.go-test'
+	@echo "Unit tests complete"
 
-test-fvt: $(BIN_DIR) ## Run FVT (Functional Verification Tests) using godog
-	@echo "Running FVT tests..."
-	@go test -v -race ./tests/features/...
+test-coverage: $(BIN_DIR) ## Run unit tests with coverage
+	@echo "Running unit tests with coverage..."
+	@go test -v -race -coverprofile=$(BIN_DIR)/coverage.out -covermode=atomic ./auth/... ./internal/... ./cmd/...
+	@go test -v -race -coverprofile=$(BIN_DIR)/coverage-init.out -covermode=atomic ./cmd/eval_runtime_init
+	@go tool cover -html=$(BIN_DIR)/coverage.out -o $(BIN_DIR)/coverage.html
+	@go tool cover -html=$(BIN_DIR)/coverage-init.out -o $(BIN_DIR)/coverage-init.html
+	@echo "Coverage report generated: $(BIN_DIR)/coverage.html and $(BIN_DIR)/coverage-init.html"
 
-test-all: test test-fvt ## Run all tests (unit + FVT)
+test-all: test test-fvt test-fvt-server ## Run all tests (unit + FVT)
 
 SERVER_URL ?= http://localhost:8080
+
+## ------------------------------------------------------------------------------------------------
+## FVT tests (Functional Verification Tests) using godog
+## ------------------------------------------------------------------------------------------------
+
+SERVER_URL ?= http://localhost:8080
+
+FVT_TESTS ?= ./tests/features/...
+FVT_OUTPUT ?= --godog.format=junit:${PWD}/$(BIN_DIR)/junit-fvt-report.xml,pretty
+FVT_TAGS ?= "--godog.tags=~@ignore && ~@mlflow && ~@cluster"
+
+.PHONY: test-setup
+test-setup: venv ## Set up Python test environment (venv + eval-hub-sdk adapter)
+	@uv pip install "eval-hub-sdk[adapter]>=0.1.5"
+
+test-fvt: $(BIN_DIR) test-setup ## Run FVT (Functional Verification Tests) using godog
+	@echo "Running FVT tests..."
+	@. $(VENV_DIR)/bin/activate && bash -c 'set -o pipefail; go test ${FVT_TESTS} ${FVT_OUTPUT} ${FVT_TAGS} -v -race | ${PWD}/scripts/grcat ${PWD}/.conf.go-integration-test'
 
 test-fvt-server: start-service ## Run FVT tests using godog against a running server
 	@SERVER_URL="${SERVER_URL}" make test-fvt; status=$$?; make stop-service; exit $$status
 
-test-coverage: $(BIN_DIR) ## Run unit tests with coverage
-	@echo "Running unit tests with coverage..."
-	@go test -v -race -coverprofile=$(BIN_DIR)/coverage.out -covermode=atomic ./internal/... ./cmd/...
-	@go tool cover -html=$(BIN_DIR)/coverage.out -o $(BIN_DIR)/coverage.html
-	@echo "Coverage report generated: $(BIN_DIR)/coverage.html"
-
 test-fvt-coverage: $(BIN_DIR)## Run integration (FVT) tests with coverage
 	@echo "Running integration (FVT) tests with coverage..."
-	@go test -v -race -coverprofile=$(BIN_DIR)/coverage-fvt.out -covermode=atomic ./tests/features/...
+	@go test ${FVT_TESTS} ${FVT_OUTPUT} ${FVT_TAGS} -v -race -coverprofile=$(BIN_DIR)/coverage-fvt.out -covermode=atomic
 	@go tool cover -html=$(BIN_DIR)/coverage-fvt.out -o $(BIN_DIR)/coverage-fvt.html
 	@echo "Coverage report generated: $(BIN_DIR)/coverage-fvt.html"
 
@@ -124,10 +180,43 @@ test-fvt-server-coverage: start-service-coverage ## Run FVT tests using godog ag
 	@echo "Running FVT tests with coverage against a running server..."
 	@GOCOVERDIR="${BIN_DIR}" SERVER_URL="${SERVER_URL}" make test-fvt; status=$$?; make stop-service; exit $$status
 	go tool covdata textfmt -i ${BIN_DIR} -o ${BIN_DIR}/coverage-fvt.out
+	@go tool cover -html=$(BIN_DIR)/coverage-fvt.out -o $(BIN_DIR)/coverage-fvt.html
+	@echo "Coverage report generated: $(BIN_DIR)/coverage-fvt.html"
 
 test-all-coverage: test-coverage test-fvt-server-coverage ## Run all tests (unit + FVT) with coverage
 
+fvt-report: ## Generate HTML report for FVT tests
+	@echo "Generating FVT JSON report..."
+	@GODOG_FORMAT=cucumber GODOG_OUTPUT="$${PWD}/cucumber-fvt.json" go test -v -race ./tests/features/...; status=$$?; \
+	echo "Converting JSON report to HTML..."; \
+	node -e "require('cucumber-html-reporter').generate({theme:'bootstrap',jsonFile:'cucumber-fvt.json',output:'cucumber-report.html'})" 2>&1; \
+	report_status=$$?; \
+	if [ $$report_status -ne 0 ]; then echo "Report generation failed (see output above)."; fi; \
+	if [ -f cucumber-report.html ]; then echo "Report generated: cucumber-report.html"; else echo "Report not generated: cucumber-report.html"; fi; \
+	exit $$status
+
+${GOBIN}/go-cover-treemap:
+	go install github.com/nikolaydubina/go-cover-treemap@latest
+
+BIN_DIR_COVERAGE ?= $(BIN_DIR)/coverage
+
+TREEMAP_OPTIONS ?= -w 1080 -h 360 -percent
+
+coverage-treemap: ${GOBIN}/go-cover-treemap
+	@echo "Generating coverage treemap for $(BIN_DIR)/coverage.out and $(BIN_DIR)/coverage-fvt.out"
+	@rm -fr ${BIN_DIR_COVERAGE} && true
+	@mkdir -p ${BIN_DIR_COVERAGE}
+	go tool covdata merge -i=${BIN_DIR} -o=${BIN_DIR_COVERAGE}
+	go tool covdata textfmt -i ${BIN_DIR_COVERAGE} -o ${BIN_DIR_COVERAGE}/coverage.out
+	${GOBIN}/go-cover-treemap ${TREEMAP_OPTIONS} -coverprofile $(BIN_DIR_COVERAGE)/coverage.out > $(BIN_DIR_COVERAGE)/coverage.svg
+	@echo "Coverage treemap generated: $(BIN_DIR_COVERAGE)/coverage.svg"
+
+## ------------------------------------------------------------------------------------------------
+## Dependencies
+## ------------------------------------------------------------------------------------------------
+
 install-deps: ## Install dependencies
+	@command -v python3 >/dev/null 2>&1 || { echo "Error: Python 3 is required for make test (scripts/grcat). Install python3 and retry."; exit 1; }
 	@echo "Installing dependencies..."
 	@go mod download
 	@go mod tidy
@@ -145,44 +234,9 @@ get-deps: ## Get all dependencies
 	@go get -t ./...
 	@echo "Dependencies updated"
 
-POSTGRES_VERSION ?= 18
-
-ifeq (${UNAME}, Darwin)
-install-postgres:
-	brew install postgresql@${POSTGRES_VERSION}
-else ifeq ($(UNAME), Linux)
-install-postgres:
-	sudo apt-get install postgresql
-else
-install-postgres:
-	echo "Unsupported platform: ${UNAME}"
-	exit 1
-endif
-
-ifeq (${UNAME}, Darwin)
-start-postgres:
-	brew services start postgresql@${POSTGRES_VERSION}
-else ifeq ($(UNAME), Linux)
-start-postgres:
-	sudo systemctl start postgresql
-endif
-
-ifeq (${UNAME}, Darwin)
-stop-postgres:
-	brew services stop postgresql@${POSTGRES_VERSION}
-else ifeq ($(UNAME), Linux)
-stop-postgres:
-	sudo systemctl stop postgresql
-endif
-
-create-database:
-	sudo -u postgres createdb eval_hub
-
-create-user:
-	sudo -u postgres createuser -s -d -r eval_hub
-
-grant-permissions:
-	sudo -u postgres psql -c "GRANT ALL PRIVILEGES ON DATABASE eval_hub TO eval_hub;"
+## ------------------------------------------------------------------------------------------------
+## Cross-compilation
+## ------------------------------------------------------------------------------------------------
 
 # Cross-compilation variables
 CROSS_OUTPUT_SUFFIX = $(CROSS_GOOS)-$(CROSS_GOARCH)
@@ -211,7 +265,7 @@ VENV_PYTHON = $(VENV_DIR)/bin/python
 venv: ## Create Python virtual environment using uv
 	@if [ ! -d "$(VENV_DIR)" ]; then \
 		echo "Creating uv virtual environment..."; \
-		uv venv $(VENV_DIR); \
+		uv venv $(VENV_DIR) --python 3.12; \
 		echo "Virtual environment created at $(VENV_DIR)"; \
 	else \
 		echo "Virtual environment already exists at $(VENV_DIR)"; \
@@ -245,6 +299,11 @@ install-wheel-tools: venv ## Install Python wheel build tools using uv
 	@echo "Installing wheel build tools via uv..."
 	@uv pip install build wheel setuptools
 
+.PHONY: test-python-server
+test-python-server: ## Run python-server tests (you probably need `build-wheel` first, we use this target as-is in GHA/ci/cd)
+	@echo "Running python-server tests..."
+	@cd python-server && uv run --extra dev pytest
+
 .PHONY: clean-wheels
 clean-wheels: ## Clean Python wheel build artifacts
 	@echo "Cleaning wheel build artifacts..."
@@ -252,11 +311,13 @@ clean-wheels: ## Clean Python wheel build artifacts
 	@rm -rf python-server/build/
 	@rm -rf python-server/*.egg-info
 	@find python-server/evalhub_server/binaries/ -type f ! -name '.gitkeep' -delete
+	@rm -f python-server/VERSION
 
 .PHONY: build-wheel
 build-wheel: ## Build Python wheel: make build-wheel WHEEL_PLATFORM=manylinux_2_17_x86_64 WHEEL_BINARY=eval-hub-linux-amd64
 	@if [ "$${GITHUB_ACTIONS}" != "true" ]; then \
-		echo "Downloading binary $(WHEEL_PLATFORM) $(WHEEL_BINARY)"; \
+		$(MAKE) cross-compile; \
+		echo "Copying binary $(WHEEL_PLATFORM) $(WHEEL_BINARY)"; \
 		mkdir -p python-server/evalhub_server/binaries/; \
 		find python-server/evalhub_server/binaries/ -type f ! -name '.gitkeep' -delete; \
 		cp bin/$(WHEEL_BINARY)* python-server/evalhub_server/binaries/; \
@@ -266,6 +327,12 @@ build-wheel: ## Build Python wheel: make build-wheel WHEEL_PLATFORM=manylinux_2_
 	@find python-server/evalhub_server/binaries/ -type f ! -name '.gitkeep' -exec chmod +x {} +
 	@echo "Building wheel for $(WHEEL_PLATFORM) with binary $(WHEEL_BINARY)..."
 	@rm -rf python-server/build/
+	@cp VERSION python-server/VERSION
+	@if [ -n "$(DEV_SUFFIX)" ]; then \
+		BASE=$$(tr -d '\n' < python-server/VERSION); \
+		echo "$${BASE}.$(DEV_SUFFIX)" > python-server/VERSION; \
+		echo "Python package version: $${BASE}.$(DEV_SUFFIX)"; \
+	fi
 	WHEEL_PLATFORM=$(WHEEL_PLATFORM) uv build --wheel python-server
 
 .PHONY: build-all-wheels
@@ -303,7 +370,7 @@ generate-public-docs: ${REDOCLY_CLI}
 
 verify-api-docs: ${REDOCLY_CLI}
 	${REDOCLY_CLI} lint
-	@echo "Tip: open docs/openapi.yaml in Swagger Editor (such as https://editor.swagger.io/) to automatically inspect the rendered spec."
+	@echo "Tip: open docs/openapi.yaml in Swagger Editor (such as https://editor.swagger.io/) to automatically inspect the rendered spec or open the file docs/index.html."
 
 generate-ignore-file: ${REDOCLY_CLI}
 	${REDOCLY_CLI} lint --generate-ignore-file ./docs/src/openapi.yaml
@@ -312,3 +379,7 @@ check-unused-components:
 	./docs/scripts/check_unused_components.sh
 
 documentation: check-unused-components generate-public-docs verify-api-docs
+
+update-redocly-cli:
+	rm -f package-lock.json
+	npm install @redocly/cli@latest
