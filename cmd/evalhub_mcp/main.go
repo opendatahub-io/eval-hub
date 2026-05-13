@@ -34,11 +34,13 @@ func run(args []string) int {
 
 	fs := flag.NewFlagSet("evalhub-mcp", flag.ContinueOnError)
 
-	transport := fs.String("transport", "stdio", "Transport mode: stdio or http")
+	transport := fs.String("transport", "stdio", "Transport mode: stdio, http, or http-sse")
 	host := fs.String("host", "localhost", "Host to bind HTTP server to")
 	port := fs.Int("port", 3001, "Port for HTTP server")
 	configPath := fs.String("config", "", "Path to configuration file")
 	insecure := fs.Bool("insecure", false, "Disable TLS certificate verification")
+	tlsCertFile := fs.String("tls-cert", "", "Path to TLS certificate file")
+	tlsKeyFile := fs.String("tls-key", "", "Path to TLS private key file")
 	version := fs.Bool("version", false, "Print version information and exit")
 
 	if err := fs.Parse(args); err != nil {
@@ -65,6 +67,12 @@ func run(args []string) int {
 	}
 	if fs.Changed("insecure") {
 		flags.Insecure = insecure
+	}
+	if fs.Changed("tls-cert") {
+		flags.TLSCertFile = tlsCertFile
+	}
+	if fs.Changed("tls-key") {
+		flags.TLSKeyFile = tlsKeyFile
 	}
 
 	cfg, err := config.Load(flags, logger)
