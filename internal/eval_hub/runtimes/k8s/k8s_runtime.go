@@ -12,6 +12,7 @@ import (
 	"github.com/eval-hub/eval-hub/internal/eval_hub/config"
 	"github.com/eval-hub/eval-hub/internal/eval_hub/constants"
 	"github.com/eval-hub/eval-hub/internal/eval_hub/messages"
+	"github.com/eval-hub/eval-hub/internal/eval_hub/metrics"
 	"github.com/eval-hub/eval-hub/internal/eval_hub/serviceerrors"
 	"github.com/eval-hub/eval-hub/pkg/api"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
@@ -65,6 +66,7 @@ func (r *K8sRuntime) RunEvaluationJob(
 		for idx, bench := range benchmarks {
 			benchCtx := context.Background()
 			if err := r.createBenchmarkResources(benchCtx, r.logger, evaluation, &bench, idx, storage); err != nil {
+				metrics.RecordBenchmarkRuntimeError(benchCtx, r.Name())
 				r.logger.Error(
 					"kubernetes job creation failed",
 					"error", err,
@@ -89,10 +91,16 @@ func (r *K8sRuntime) RunEvaluationJob(
 	return nil
 }
 
+// jobForegroundDeleteOptions deletes Job-owned Pods before removing the Job so stuck Init
+// pods cannot outlive a background Job delete during hard_delete or orphan cleanup.
+func jobForegroundDeleteOptions() metav1.DeleteOptions {
+	propagationPolicy := metav1.DeletePropagationForeground
+	return metav1.DeleteOptions{PropagationPolicy: &propagationPolicy}
+}
+
 func (r *K8sRuntime) DeleteEvaluationJobResources(evaluation *api.EvaluationJobResource) error {
 	namespace := resolveNamespace(string(evaluation.Resource.Tenant))
-	propagationPolicy := metav1.DeletePropagationBackground
-	deleteOptions := metav1.DeleteOptions{PropagationPolicy: &propagationPolicy}
+	deleteOptions := jobForegroundDeleteOptions()
 
 	r.logger.Info(
 		"deleting evaluation runtime resources",
@@ -204,10 +212,16 @@ func (r *K8sRuntime) createBenchmarkResources(ctx context.Context,
 		"service_ca_configmap", jobConfig.serviceCAConfigMap,
 		"eval_hub_url", jobConfig.evalHubURL,
 	)
-	// Inspect the model credential secret once to decide the auth path. Proxy-injectable keys
-	// (api-key, *_api-key, *_url) activate credential injection — the adapter receives the
-	// ephemeral internalModelRef secret and the sidecar proxies model calls. Passthrough-only
-	// secrets (hf-token/ca_cert) mount directly in the adapter without a ref secret or model proxy.
+	// The sidecar model proxy is always active for all jobs. When model.auth is set,
+	// the secret is inspected to determine if credential injection (ref-token resolution)
+	// is needed. Proxy-injectable keys (api-key, *_api-key, *_url) cause an ephemeral
+	// internalModelRef secret to be created; the adapter sends ref tokens that the sidecar
+	// resolves to real credentials.
+	// Always redirect the adapter through the sidecar model proxy so all model traffic
+	// (open and authenticated) flows through the sidecar. This gives a single forwarding
+	// path and allows SA token injection for models that need it.
+	jobConfig.jobSpec.Model.URL = jobConfig.sidecarBaseURL
+
 	var secretInfo modelSecretInfo
 	if jobConfig.modelAuthSecretRef != "" {
 		secretInfo, err = inspectModelSecret(ctx, jobConfig.namespace, jobConfig.modelAuthSecretRef, r.helper)
@@ -217,14 +231,11 @@ func (r *K8sRuntime) createBenchmarkResources(ctx context.Context,
 		}
 		if secretInfo.hasCredentialKeys {
 			jobConfig.modelInternalRefSecretName = buildK8sName(jobConfig.jobID, jobConfig.resourceGUID, "-model-ref")
-			jobConfig.jobSpec.Model.URL = jobConfig.sidecarBaseURL
 		} else {
-			// passthrough-only (e.g. ca_cert only): clear modelTargetURL so sidecar gets no model proxy config
-			jobConfig.modelTargetURL = ""
-			logger.Info("model credential secret has no proxy-injectable keys; disabling credential injection")
+			logger.Info("model credential secret has no proxy-injectable keys; sidecar proxy active for SA token")
 		}
 	}
-	// Build sidecar config after inspectModelSecret so modelTargetURL reflects the final state.
+	// Build sidecar config after inspecting the model secret so modelInternalRefSecretName is set.
 	sidecarJSON, err := sidecarForJobPod(r.serviceConfig, jobConfig)
 	if err != nil {
 		return fmt.Errorf("job %s benchmark %s: sidecar config json: %w", evaluation.Resource.ID, benchmarkID, err)
@@ -324,7 +335,7 @@ func (r *K8sRuntime) createBenchmarkResources(ctx context.Context,
 			// missing ConfigMap — delete it now to prevent an orphaned, permanently-stuck job.
 			logger.Warn("configmap deleted mid-creation (race with hard_delete) — cleaning up orphaned job",
 				"namespace", createdJob.Namespace, "job", createdJob.Name, "configmap", configMap.Name)
-			if delErr := r.helper.DeleteJob(ctx, createdJob.Namespace, createdJob.Name, metav1.DeleteOptions{}); delErr != nil && !apierrors.IsNotFound(delErr) {
+			if delErr := r.helper.DeleteJob(ctx, createdJob.Namespace, createdJob.Name, jobForegroundDeleteOptions()); delErr != nil && !apierrors.IsNotFound(delErr) {
 				logger.Error("failed to delete orphaned job", "namespace", createdJob.Namespace, "name", createdJob.Name, "error", delErr)
 				return delErr
 			}
