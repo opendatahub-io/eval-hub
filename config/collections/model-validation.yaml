@@ -1,5 +1,5 @@
-id: model-validation-collection
-name: Model Validation Collection
+id: model-validation
+name: Model Validation
 category: safety
 description: >
   Evaluates model safety using context-aware vulnerability scanning with custom
