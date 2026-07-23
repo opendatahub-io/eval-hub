@@ -58,22 +58,32 @@ func (s *sqlStorage) GetEvaluationJob(id string) (*api.EvaluationJobResource, er
 }
 
 func (s *sqlStorage) getEvaluationJobTransactional(txn *sql.Tx, id string) (*api.EvaluationJobResource, error) {
-	// Build the SELECT query
-	query := shared.EntityQuery{Resource: api.Resource{ID: id, Tenant: s.tenant}}
-	selectQuery, selectArgs, queryArgs := s.statementsFactory.CreateEvaluationGetEntityStatement(&query)
+	return s.scanEvaluationJobTransactional(txn, id, false)
+}
 
-	// Query the database
+func (s *sqlStorage) getEvaluationJobTransactionalForUpdate(txn *sql.Tx, id string) (*api.EvaluationJobResource, error) {
+	return s.scanEvaluationJobTransactional(txn, id, true)
+}
+
+func (s *sqlStorage) scanEvaluationJobTransactional(txn *sql.Tx, id string, forUpdate bool) (*api.EvaluationJobResource, error) {
+	query := shared.EntityQuery{Resource: api.Resource{ID: id, Tenant: s.tenant}}
+	var selectQuery string
+	var selectArgs, queryArgs []any
+	if forUpdate {
+		selectQuery, selectArgs, queryArgs = s.statementsFactory.CreateEvaluationGetEntityForUpdateStatement(&query)
+	} else {
+		selectQuery, selectArgs, queryArgs = s.statementsFactory.CreateEvaluationGetEntityStatement(&query)
+	}
+
 	err := s.queryRow(txn, selectQuery, selectArgs...).Scan(queryArgs...)
 	if err != nil {
 		if err == sql.ErrNoRows {
 			return nil, se.NewServiceError(messages.ResourceNotFound, "Type", "evaluation job", "ResourceId", id)
 		}
-		// For now we differentiate between no rows found and other errors but this might be confusing
 		s.logger.Error("Failed to get evaluation job", "error", err, "id", id)
 		return nil, se.WithRollback(se.NewServiceError(messages.DatabaseOperationFailed, "Type", "evaluation job", "ResourceId", id, "Error", err.Error()))
 	}
 
-	// Unmarshal the entity JSON into EvaluationJobConfig
 	var evaluationJobEntity EvaluationJobEntity
 	err = json.Unmarshal([]byte(query.EntityJSON), &evaluationJobEntity)
 	if err != nil {
@@ -143,15 +153,16 @@ func messageInfosEquivalent(a, b *api.MessageInfo) bool {
 	if a == nil || b == nil {
 		return false
 	}
-	return a.Message == b.Message && a.MessageCode == b.MessageCode
+	return a.Message == b.Message && a.MessageCode == b.MessageCode && a.MessageOrigin == b.MessageOrigin
 }
 
 func (s *sqlStorage) UpdateEvaluationJobStatus(id string, state api.OverallState, message *api.MessageInfo) error {
+	api.WithMessageOrigin(message, api.MessageOriginServer)
 	// we have to get the evaluation job and update the status so we need a transaction
 	s.logger.Debug("Updating evaluation job status", "id", id, "state", state, "message", message)
 	err := s.withTransaction("update evaluation job status", id, func(txn *sql.Tx) error {
 		// get the evaluation job
-		evaluationJob, err := s.getEvaluationJobTransactional(txn, id)
+		evaluationJob, err := s.getEvaluationJobTransactionalForUpdate(txn, id)
 		if err != nil {
 			return err
 		}
@@ -277,19 +288,19 @@ func (s *sqlStorage) getOverallJobStatus(txn *sql.Tx, job *api.EvaluationJobReso
 	if job.Collection != nil && job.Collection.ID != "" {
 		collection, err = s.getCollectionTransactional(txn, job.Collection.ID)
 		if err != nil {
-			return api.OverallStatePending, &api.MessageInfo{
+			return api.OverallStatePending, api.WithMessageOrigin(&api.MessageInfo{
 				Message:     "Evaluation job is pending",
 				MessageCode: constants.MESSAGE_CODE_EVALUATION_JOB_UPDATED,
-			}, err
+			}, api.MessageOriginServer), err
 		}
 	}
 	benchmarks, err := handlers.GetJobBenchmarks(job, collection)
 	total := 0
 	if err != nil || len(benchmarks) == 0 {
-		return api.OverallStatePending, &api.MessageInfo{
+		return api.OverallStatePending, api.WithMessageOrigin(&api.MessageInfo{
 			Message:     "Evaluation job is pending",
 			MessageCode: constants.MESSAGE_CODE_EVALUATION_JOB_UPDATED,
-		}, err
+		}, api.MessageOriginServer), err
 	}
 	total = len(benchmarks)
 	completed, failed, running, cancelled := benchmarkStates[api.StateCompleted], benchmarkStates[api.StateFailed], benchmarkStates[api.StateRunning], benchmarkStates[api.StateCancelled]
@@ -315,10 +326,10 @@ func (s *sqlStorage) getOverallJobStatus(txn *sql.Tx, job *api.EvaluationJobReso
 
 	s.logger.Debug("Overall job state", "state", overallState, "completed", completed, "failed", failed, "running", running, "cancelled", cancelled, "total", total)
 
-	return overallState, &api.MessageInfo{
+	return overallState, api.WithMessageOrigin(&api.MessageInfo{
 		Message:     stateMessage,
 		MessageCode: constants.MESSAGE_CODE_EVALUATION_JOB_UPDATED,
-	}, nil
+	}, api.MessageOriginServer), nil
 }
 
 func (s *sqlStorage) updateBenchmarkStatus(job *api.EvaluationJobResource, runStatus *api.StatusEvent, benchmarkStatus *api.BenchmarkStatus) {
@@ -336,6 +347,9 @@ func (s *sqlStorage) updateBenchmarkStatus(job *api.EvaluationJobResource, runSt
 		if benchmark.ID == runStatus.BenchmarkStatusEvent.ID &&
 			benchmark.ProviderID == runStatus.BenchmarkStatusEvent.ProviderID &&
 			benchmark.BenchmarkIndex == runStatus.BenchmarkStatusEvent.BenchmarkIndex {
+			if api.IsBenchmarkTerminalState(benchmark.Status) && !api.IsBenchmarkTerminalState(benchmarkStatus.Status) {
+				return
+			}
 			job.Status.Benchmarks[index] = *benchmarkStatus
 			return
 		}
@@ -370,13 +384,15 @@ func (s *sqlStorage) updateBenchmarkResults(job *api.EvaluationJobResource, runS
 
 // UpdateEvaluationJobWithRunStatus runs in a transaction: fetches the job, merges RunStatusInternal into the entity, and persists.
 func (s *sqlStorage) UpdateEvaluationJob(id string, runStatus *api.StatusEvent) error {
-	err := s.withTransaction("update evaluation job", id, func(txn *sql.Tx) error {
+	return s.withTransaction("update evaluation job", id, func(txn *sql.Tx) error {
 		s.logger.Info("Updating evaluation job", "id", id, "status", runStatus.BenchmarkStatusEvent.Status, "runStatus", runStatus)
 
-		job, err := s.getEvaluationJobTransactional(txn, id)
+		job, err := s.getEvaluationJobTransactionalForUpdate(txn, id)
 		if err != nil {
 			return err
 		}
+		// Test hook: no-op unless a test installs a callback (see test_hooks.go).
+		invokeEvaluationJobUpdateAfterLockedReadHook(id, runStatus.BenchmarkStatusEvent.ID)
 
 		// Guard: reject benchmark updates if job is already in a terminal state.
 		// We pass OverallStateRunning as the target to leverage checkEvaluationJobState's terminal-state check.
@@ -452,10 +468,12 @@ func (s *sqlStorage) UpdateEvaluationJob(id string, runStatus *api.StatusEvent) 
 			Results: job.Results,
 		}
 
-		return s.updateEvaluationJobTxn(txn, id, overallState, &entity)
-	})
+		if err := s.updateEvaluationJobTxn(txn, id, overallState, &entity); err != nil {
+			return err
+		}
 
-	return err
+		return nil
+	})
 }
 
 func (s *sqlStorage) computeJobTestResult(job *api.EvaluationJobResource, collection *api.CollectionResource) {
@@ -516,8 +534,8 @@ func (s *sqlStorage) computeJobTestResult(job *api.EvaluationJobResource, collec
 }
 
 func getPassCriteriaThreshold(job *api.EvaluationJobResource, collection *api.CollectionResource) float32 {
-	if job.EvaluationJobConfig.PassCriteria != nil && job.EvaluationJobConfig.PassCriteria.Threshold != nil {
-		return *job.EvaluationJobConfig.PassCriteria.Threshold
+	if job.PassCriteria != nil && job.PassCriteria.Threshold != nil {
+		return *job.PassCriteria.Threshold
 	}
 	if collection != nil && collection.PassCriteria != nil && collection.PassCriteria.Threshold != nil {
 		return *collection.PassCriteria.Threshold

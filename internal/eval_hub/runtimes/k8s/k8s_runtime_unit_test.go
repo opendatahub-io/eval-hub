@@ -281,12 +281,15 @@ func TestCreateBenchmarkResourcesSetsAnnotations(t *testing.T) {
 
 func TestBuildInternalModelRefSecretMultiModel(t *testing.T) {
 	// Multi-model credential secret: *_api-key keys become refs, *_url keys become the sidecar
-	// proxy URL, ca_cert is excluded (projected directly from the real secret into the adapter).
+	// proxy URL with the original path preserved, ca_cert is excluded (projected directly
+	// from the real secret into the adapter).
 	data := map[string][]byte{
 		"model-1_api-key": []byte("sk-model1"),
 		"model-1_url":     []byte("https://api.openai.com/v1"),
 		"model-2_api-key": []byte("sk-model2"),
 		"model-2_url":     []byte("https://azure.example.com/v1"),
+		"judge_url":       []byte("https://my-vllm.example.com/v1"),
+		"attacker_url":    []byte("https://attacker.example.com"),
 		"ca_cert":         []byte("-----BEGIN CERTIFICATE-----"),
 	}
 	clientset := fake.NewClientset()
@@ -301,8 +304,10 @@ func TestBuildInternalModelRefSecretMultiModel(t *testing.T) {
 	cases := map[string]string{
 		"model-1_api-key": "model-1_api-key:ref",
 		"model-2_api-key": "model-2_api-key:ref",
-		"model-1_url":     sidecarURL,
-		"model-2_url":     sidecarURL,
+		"model-1_url":     "http://localhost:8080/v1",
+		"model-2_url":     "http://localhost:8080/v1",
+		"judge_url":       "http://localhost:8080/v1",
+		"attacker_url":    "http://localhost:8080",
 	}
 	for k, want := range cases {
 		got := string(secret.Data[k])
@@ -312,6 +317,17 @@ func TestBuildInternalModelRefSecretMultiModel(t *testing.T) {
 	}
 	if _, ok := secret.Data["ca_cert"]; ok {
 		t.Error("ca_cert must not appear in the internalModelRef secret")
+	}
+}
+
+func TestBuildInternalModelRefSecretInvalidURL(t *testing.T) {
+	data := map[string][]byte{
+		"judge_url": []byte("://bad"),
+	}
+	helper := &KubernetesHelper{clientset: fake.NewClientset()}
+	_, err := buildInternalModelRefSecret(context.Background(), "default", "bad-url-ref", data, "http://localhost:8080", nil, helper)
+	if err == nil {
+		t.Fatal("expected error for invalid *_url value")
 	}
 }
 
@@ -458,7 +474,7 @@ func TestCreateBenchmarkResourcesAddsInitContainerForS3TestData(t *testing.T) {
 		}
 		if volume.Name == testDataSecretVolumeName {
 			foundSecretVolume = true
-			if volume.VolumeSource.Secret == nil || volume.VolumeSource.Secret.SecretName != "s3-secret" {
+			if volume.Secret == nil || volume.Secret.SecretName != "s3-secret" {
 				t.Fatalf("expected secret volume %q with secret %q", testDataSecretVolumeName, "s3-secret")
 			}
 		}
@@ -486,6 +502,122 @@ func TestCreateBenchmarkResourcesAddsInitContainerForS3TestData(t *testing.T) {
 	if !foundAdapterMount {
 		t.Fatalf("expected adapter container to mount %s", testDataMountPath)
 	}
+}
+
+func TestCreateBenchmarkResourcesMountsPVCTestData(t *testing.T) {
+	providerID := "provider-1"
+	evaluation := sampleEvaluation(providerID)
+	evaluation.Benchmarks[0].TestDataRef = &api.TestDataRef{
+		PVC: &api.PVCTestDataRef{
+			ClaimName: "eval-datasets-pvc",
+			SubPath:   "benchmark-a/v1",
+		},
+	}
+
+	clientset := fake.NewClientset()
+	runtime := &K8sRuntime{
+		logger: slog.New(slog.NewTextHandler(io.Discard, nil)),
+		helper: &KubernetesHelper{clientset: clientset},
+		serviceConfig: &config.Config{
+			Service: &config.ServiceConfig{},
+		},
+	}
+
+	storage := &fakeStorage{providerConfigs: sampleProviders(providerID)}
+	err := runtime.createBenchmarkResources(context.Background(), runtime.logger, evaluation, &evaluation.Benchmarks[0], 0, storage)
+	if err != nil {
+		t.Fatalf("expected no error, got %v", err)
+	}
+
+	jobs := listJobsByJobID(t, clientset, evaluation.Resource.ID)
+	if len(jobs) != 1 {
+		t.Fatalf("expected 1 job, got %d", len(jobs))
+	}
+	job := jobs[0]
+
+	// No data-fetch init container expected for PVC-backed jobs (sidecar runs as native init container).
+	if findContainer(job.Spec.Template.Spec.InitContainers, initContainerName) != nil {
+		t.Fatal("expected no data-fetch init container for PVC test data")
+	}
+
+	// PVC volume must be present with correct claimName and readOnly.
+	var foundPVCVolume bool
+	for _, volume := range job.Spec.Template.Spec.Volumes {
+		if volume.Name == testDataVolumeName {
+			if volume.PersistentVolumeClaim == nil {
+				t.Fatalf("expected PVC volume source for %q", testDataVolumeName)
+			}
+			if volume.PersistentVolumeClaim.ClaimName != "eval-datasets-pvc" {
+				t.Fatalf("expected claimName %q, got %q", "eval-datasets-pvc", volume.PersistentVolumeClaim.ClaimName)
+			}
+			if !volume.PersistentVolumeClaim.ReadOnly {
+				t.Fatal("expected PVC volume to be read-only")
+			}
+			foundPVCVolume = true
+		}
+	}
+	if !foundPVCVolume {
+		t.Fatalf("expected PVC volume %q in pod spec", testDataVolumeName)
+	}
+
+	// Adapter container must have read-only mount at /test_data with sub_path.
+	var foundAdapterMount bool
+	for _, mount := range job.Spec.Template.Spec.Containers[0].VolumeMounts {
+		if mount.Name == testDataVolumeName && mount.MountPath == testDataMountPath {
+			if !mount.ReadOnly {
+				t.Fatal("expected adapter test-data mount to be read-only")
+			}
+			if mount.SubPath != "benchmark-a/v1" {
+				t.Fatalf("expected SubPath %q, got %q", "benchmark-a/v1", mount.SubPath)
+			}
+			foundAdapterMount = true
+		}
+	}
+	if !foundAdapterMount {
+		t.Fatalf("expected adapter container to mount %s", testDataMountPath)
+	}
+}
+
+func TestCreateBenchmarkResourcesMountsPVCTestDataNoSubPath(t *testing.T) {
+	providerID := "provider-1"
+	evaluation := sampleEvaluation(providerID)
+	evaluation.Benchmarks[0].TestDataRef = &api.TestDataRef{
+		PVC: &api.PVCTestDataRef{
+			ClaimName: "my-pvc",
+		},
+	}
+
+	clientset := fake.NewClientset()
+	runtime := &K8sRuntime{
+		logger: slog.New(slog.NewTextHandler(io.Discard, nil)),
+		helper: &KubernetesHelper{clientset: clientset},
+		serviceConfig: &config.Config{
+			Service: &config.ServiceConfig{},
+		},
+	}
+
+	storage := &fakeStorage{providerConfigs: sampleProviders(providerID)}
+	err := runtime.createBenchmarkResources(context.Background(), runtime.logger, evaluation, &evaluation.Benchmarks[0], 0, storage)
+	if err != nil {
+		t.Fatalf("expected no error, got %v", err)
+	}
+
+	jobs := listJobsByJobID(t, clientset, evaluation.Resource.ID)
+	job := jobs[0]
+
+	if findContainer(job.Spec.Template.Spec.InitContainers, initContainerName) != nil {
+		t.Fatal("expected no data-fetch init container for PVC test data")
+	}
+
+	for _, mount := range job.Spec.Template.Spec.Containers[0].VolumeMounts {
+		if mount.Name == testDataVolumeName {
+			if mount.SubPath != "" {
+				t.Fatalf("expected empty SubPath when not set, got %q", mount.SubPath)
+			}
+			return
+		}
+	}
+	t.Fatalf("expected adapter container to mount %s", testDataMountPath)
 }
 
 func TestCreateBenchmarkResourcesDeletesConfigMapOnJobFailure(t *testing.T) {
@@ -764,6 +896,12 @@ func TestRunEvaluationJobMarksBenchmarkFailedOnCreateError(t *testing.T) {
 		}
 		if runStatus.BenchmarkStatusEvent.ProviderID != evaluation.Benchmarks[0].ProviderID {
 			t.Fatalf("expected provider ID %q, got %q", evaluation.Benchmarks[0].ProviderID, runStatus.BenchmarkStatusEvent.ProviderID)
+		}
+		if runStatus.BenchmarkStatusEvent.ErrorMessage == nil {
+			t.Fatal("expected error message on failed benchmark status")
+		}
+		if runStatus.BenchmarkStatusEvent.ErrorMessage.MessageOrigin != api.MessageOriginServer {
+			t.Fatalf("expected server error origin, got %q", runStatus.BenchmarkStatusEvent.ErrorMessage.MessageOrigin)
 		}
 	case <-time.After(2 * time.Second):
 		t.Fatalf("expected UpdateEvaluationJob to be called")
@@ -1056,8 +1194,8 @@ func sampleProviders(providerID string) map[string]api.ProviderResource {
 func findConfigMapVolumeName(t *testing.T, volumes []corev1.Volume) string {
 	t.Helper()
 	for _, v := range volumes {
-		if v.VolumeSource.ConfigMap != nil {
-			return v.VolumeSource.ConfigMap.Name
+		if v.ConfigMap != nil {
+			return v.ConfigMap.Name
 		}
 	}
 	t.Fatal("expected a ConfigMap-backed volume on the pod")
@@ -1074,7 +1212,7 @@ func findConfigMapVolumeName(t *testing.T, volumes []corev1.Volume) string {
 //   - model-auth-internal volume (adapter) → present iff secret is configured
 //   - projected sources: 2 (ref+real) when api-key present; 1 (real only) when ca_cert-only
 //   - ephemeral internalModelRef secret → created iff api-key (or *_api-key) present
-//   - ref secret keys → api-key→"api-key:ref", *_api-key→"<k>:ref", *_url→sidecarURL
+//   - ref secret keys → api-key→"api-key:ref", *_api-key→"<k>:ref", *_url→sidecarURL+path
 //   - adapter projected passthrough keys → ca_cert / hf-token projected optional when present in real secret
 //
 // TestModelAuthCombinations is a table-driven end-to-end test covering every meaningful
@@ -1266,7 +1404,7 @@ func TestModelAuthCombinations(t *testing.T) {
 			wantInternalRefFirstSrc:   true,
 			wantRealSecretOptional:    true,
 			wantAuthMountInSidecarCfg: true,
-			refKeys:                   []refSecretExpect{{"model-1_url", "http://localhost:8080"}},
+			refKeys:                   []refSecretExpect{{"model-1_url", "http://localhost:8080/v1"}},
 		},
 		{
 			name: "multi-model api-keys + urls",
@@ -1285,9 +1423,9 @@ func TestModelAuthCombinations(t *testing.T) {
 			wantAuthMountInSidecarCfg: true,
 			refKeys: []refSecretExpect{
 				{"model-1_api-key", "model-1_api-key:ref"},
-				{"model-1_url", "http://localhost:8080"},
+				{"model-1_url", "http://localhost:8080/v1"},
 				{"model-2_api-key", "model-2_api-key:ref"},
-				{"model-2_url", "http://localhost:8080"},
+				{"model-2_url", "http://localhost:8080/v1"},
 			},
 		},
 		{
@@ -1306,7 +1444,7 @@ func TestModelAuthCombinations(t *testing.T) {
 			wantAuthMountInSidecarCfg: true,
 			refKeys: []refSecretExpect{
 				{"model-1_api-key", "model-1_api-key:ref"},
-				{"model-1_url", "http://localhost:8080"},
+				{"model-1_url", "http://localhost:8080/v1"},
 			},
 			passthroughItemKeys: []string{"ca_cert"},
 		},

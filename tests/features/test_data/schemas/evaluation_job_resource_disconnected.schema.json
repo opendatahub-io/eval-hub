@@ -114,6 +114,16 @@
             },
             "message_code": {
               "type": "string"
+            },
+            "message_origin": {
+              "type": "string",
+              "enum": [
+                "server",
+                "runtime",
+                "adapter",
+                "sdk"
+              ],
+              "description": "Origin of the status message."
             }
           }
         },
@@ -376,7 +386,6 @@
           "id": "arc_easy",
           "provider_id": "lm_evaluation_harness",
           "parameters": {
-            "limit": 5,
             "num_examples": 10,
             "num_fewshot": 3,
             "tokenizer": "/test_data/tokenizer"

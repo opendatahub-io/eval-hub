@@ -8,11 +8,13 @@ import (
 	"fmt"
 	"io"
 	"log"
+	"log/slog"
 	"math"
 	"net"
 	"net/http"
 	"net/url"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"regexp"
 	"runtime/debug"
@@ -35,9 +37,13 @@ import (
 	"github.com/eval-hub/eval-hub/internal/otel"
 	"github.com/eval-hub/eval-hub/internal/testhelpers"
 	pkgapi "github.com/eval-hub/eval-hub/pkg/api"
+	"github.com/eval-hub/eval-hub/pkg/evalhubclient"
 	"github.com/xeipuuv/gojsonschema"
 
 	"github.com/cucumber/godog"
+	"github.com/modelcontextprotocol/go-sdk/mcp"
+
+	mcpserver "github.com/eval-hub/eval-hub/internal/evalhub_mcp/server"
 )
 
 const (
@@ -76,6 +82,10 @@ type apiFeature struct {
 	httpServer     *http.Server
 	metricsServer  *server.MetricsServer
 	client         *http.Client
+	// MCP-specific fields
+	mcpServer        *mcp.Server
+	mcpClientSession *mcp.ClientSession
+	mcpServerSession *mcp.ServerSession
 }
 
 // this is used for a scenario to ensure that scenarios do not overwrite
@@ -91,6 +101,14 @@ type scenarioConfig struct {
 	lastURL    string
 	lastMethod string
 	lastId     string
+
+	// MCP-specific fields
+	mcpToolResult    *mcp.CallToolResult
+	mcpError         error
+	mcpResourceText  string
+	mcpResourceError error
+	mcpPromptResult  *mcp.GetPromptResult
+	mcpPromptError   error
 
 	// assetsSync sync.Mutex
 	assets map[string][]string
@@ -232,7 +250,18 @@ func createApiFeature() (*apiFeature, error) {
 		if err != nil {
 			return nil, logError(err)
 		}
-		return &apiFeature{client: client, baseURL: uri, metricsBaseURL: metricsBase}, nil
+		apiFeat := &apiFeature{client: client, baseURL: uri, metricsBaseURL: metricsBase}
+
+		// Initialize MCP server even when using remote server
+		logger, _, err := logging.NewLogger()
+		if err != nil {
+			return nil, logError(fmt.Errorf("failed to create logger for MCP: %w", err))
+		}
+		if err := apiFeat.setupMCPServer(logger); err != nil {
+			return nil, logError(fmt.Errorf("failed to setup MCP server for remote testing: %w", err))
+		}
+
+		return apiFeat, nil
 	}
 
 	port := 8080
@@ -261,7 +290,9 @@ func createApiFeature() (*apiFeature, error) {
 		baseURL:        baseURL,
 		metricsBaseURL: metricsBase,
 	}
-	apiFeat.startLocalServer(port)
+	if err := apiFeat.startLocalServer(port); err != nil {
+		return nil, err
+	}
 	return apiFeat, nil
 }
 
@@ -284,10 +315,13 @@ func (a *apiFeature) startLocalServer(port int) error {
 	if err != nil {
 		return err
 	}
-	validate := validation.NewValidator()
+	validate, err := validation.NewValidator()
+	if err != nil {
+		return logError(err)
+	}
 	version, err := testhelpers.RepoVersion()
 	if err != nil {
-		return logError(fmt.Errorf("read VERSION: %w", err))
+		return logError(err)
 	}
 	serviceConfig, err := config.LoadConfig(logger, version, "local", time.Now().Format(time.RFC3339), "")
 	if err != nil {
@@ -372,6 +406,9 @@ func (a *apiFeature) startLocalServer(port int) error {
 
 	// Create a test server
 	handler, err := a.server.SetupRoutes()
+	if err != nil {
+		return err
+	}
 	a.httpServer = &http.Server{
 		Addr:    fmt.Sprintf(":%d", port),
 		Handler: handler,
@@ -384,7 +421,7 @@ func (a *apiFeature) startLocalServer(port int) error {
 	}
 
 	go func() {
-		a.httpServer.Serve(listener)
+		_ = a.httpServer.Serve(listener)
 	}()
 
 	if serviceConfig.IsPrometheusEnabled() {
@@ -396,10 +433,90 @@ func (a *apiFeature) startLocalServer(port int) error {
 		}()
 	}
 
+	// Initialize MCP server with real eval-hub client
+	if err := a.setupMCPServer(logger); err != nil {
+		return logError(fmt.Errorf("failed to setup MCP server: %w", err))
+	}
+
+	return nil
+}
+
+func (a *apiFeature) setupMCPServer(logger *slog.Logger) error {
+	// Create real eval-hub client pointing to local test server
+	tenant := os.Getenv("X_TENANT")
+	token := os.Getenv("AUTH_TOKEN")
+
+	logger.Info("Setting up MCP server", "base_url", a.baseURL.String(), "tenant", tenant, "has_token", token != "")
+
+	evalhubClient := evalhubclient.NewClient(a.baseURL.String())
+	if tenant != "" {
+		evalhubClient = evalhubClient.WithTenant(tenant)
+	}
+	if token != "" {
+		evalhubClient = evalhubClient.WithToken(token)
+	}
+
+	// Create MCP server with real backend
+	version, err := testhelpers.RepoVersion()
+	if err != nil {
+		version = "unknown" // Fallback for test environment
+	}
+
+	// Get git hash from repo (matches Makefile: git rev-parse --short HEAD)
+	gitHash := "unknown"
+	cmd := exec.Command("git", "rev-parse", "--short", "HEAD")
+	if output, err := cmd.Output(); err == nil {
+		gitHash = strings.TrimSpace(string(output))
+	}
+
+	serverInfo := &mcpserver.ServerInfo{
+		Build:     version,
+		BuildDate: time.Now().Format(time.RFC3339),
+		GitHash:   gitHash,
+	}
+
+	a.mcpServer = mcpserver.New(serverInfo, logger, nil)
+	if err := mcpserver.RegisterHandlers(a.mcpServer, evalhubClient, serverInfo, logger, evalhubclient.DefaultListPageLimit); err != nil {
+		return fmt.Errorf("failed to register MCP handlers: %w", err)
+	}
+
+	// Create in-memory transports for testing (like unit tests)
+	serverTransport, clientTransport := mcp.NewInMemoryTransports()
+
+	ctx := context.Background()
+
+	// Connect server
+	serverSession, err := a.mcpServer.Connect(ctx, serverTransport, nil)
+	if err != nil {
+		return fmt.Errorf("failed to connect MCP server: %w", err)
+	}
+	a.mcpServerSession = serverSession
+
+	// Connect client
+	mcpClient := mcp.NewClient(&mcp.Implementation{Name: "fvt-test-client", Version: "1.0.0"}, nil)
+	clientSession, err := mcpClient.Connect(ctx, clientTransport, nil)
+	if err != nil {
+		return fmt.Errorf("failed to connect MCP client: %w", err)
+	}
+	a.mcpClientSession = clientSession
+
+	logger.Info("MCP server initialized successfully for FVT tests")
 	return nil
 }
 
 func (a *apiFeature) cleanup(ctx context.Context, _ *godog.Scenario, _ error) (context.Context, error) {
+	if a.mcpClientSession != nil {
+		if err := a.mcpClientSession.Close(); err != nil {
+			// Log but don't fail - consistent with existing cleanup pattern
+			logDebug("MCP client session close error (non-fatal): %v\n", err)
+		}
+	}
+	if a.mcpServerSession != nil {
+		if err := a.mcpServerSession.Close(); err != nil {
+			// Log but don't fail - consistent with existing cleanup pattern
+			logDebug("MCP server session close error (non-fatal): %v\n", err)
+		}
+	}
 	if a.metricsServer != nil {
 		shutdownCtx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
 		_ = a.metricsServer.Shutdown(shutdownCtx)
@@ -408,8 +525,9 @@ func (a *apiFeature) cleanup(ctx context.Context, _ *godog.Scenario, _ error) (c
 	if a.httpServer != nil {
 		ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
 		defer cancel()
-		a.httpServer.Shutdown(ctx)
+		_ = a.httpServer.Shutdown(ctx)
 	}
+
 	return ctx, nil
 }
 
@@ -425,7 +543,7 @@ func (tc *scenarioConfig) logError(err error, withStack ...bool) error {
 	var sb = strings.Builder{}
 	sb.WriteString("Error")
 	if reqId, exists := tc.reqHeaders[server.TRANSACTION_ID_HEADER]; exists && reqId != "" {
-		sb.WriteString(fmt.Sprintf(" (%s)", reqId))
+		fmt.Fprintf(&sb, " (%s)", reqId)
 	}
 	sb.WriteString(": ")
 	if len(withStack) > 0 && withStack[0] {
@@ -957,14 +1075,14 @@ func (tc *scenarioConfig) iSendARequestImpl(method, path, body, caller string) e
 
 	defer func() {
 		// we do this for now as request ids are supposed to be unique per request
-		tc.iUnsetHeader(server.TRANSACTION_ID_HEADER)
+		_ = tc.iUnsetHeader(server.TRANSACTION_ID_HEADER)
 	}()
 
 	tc.body, err = io.ReadAll(tc.response.Body)
 	if err != nil {
 		return err
 	}
-	defer tc.response.Body.Close()
+	defer func() { _ = tc.response.Body.Close() }()
 
 	if len(tc.body) > 0 && len(tc.body) < 1024*5 {
 		tc.logDebug("Response status %d for %s %s with body %s\n", tc.response.StatusCode, method, endpoint, string(tc.body))
@@ -1400,10 +1518,23 @@ func (tc *scenarioConfig) theArrayAtPathInResponseShouldHaveLengthAtLeast(jsonPa
 }
 
 func getJsonPointer(path string) string {
+	// Strip JSONPath root indicators: $. or $
+	path = strings.TrimPrefix(path, "$.")
+	path = strings.TrimPrefix(path, "$")
+
+	// Ensure it starts with / for JSON Pointer spec
 	if !strings.HasPrefix(path, "/") {
-		return strings.ReplaceAll(fmt.Sprintf("/%s", path), ".", "/")
+		path = "/" + path
 	}
-	return strings.ReplaceAll(path, ".", "/")
+	// Convert dot notation to slash notation
+	path = strings.ReplaceAll(path, ".", "/")
+
+	// Convert array notation [N] to /N/ for JSON Pointer spec
+	// e.g., /benchmarks[0]/id becomes /benchmarks/0/id
+	re := regexp.MustCompile(`\[(\d+)\]`)
+	path = re.ReplaceAllString(path, "/$1")
+
+	return path
 }
 
 func (tc *scenarioConfig) theFieldShouldBeSaved(path string, name string) error {
@@ -1513,7 +1644,7 @@ func (tc *scenarioConfig) assetCleanup(ctx context.Context, sc *godog.Scenario, 
 			}
 			err = tc.theResponseStatusShouldBe(204)
 			if err != nil {
-				err = tc.logError(fmt.Errorf("failed to delete asset %s expected status %d but got %d: %w", tc.lastURL, 204, tc.response.StatusCode, err))
+				_ = tc.logError(fmt.Errorf("failed to delete asset %s expected status %d but got %d: %w", tc.lastURL, 204, tc.response.StatusCode, err))
 				// return ctx, err
 			} else {
 				tc.logDebug("Deleted asset %s with status %d\n", path, tc.response.StatusCode)
@@ -1554,7 +1685,7 @@ func waitForService() {
 
 func tidyUpTests() {
 	if apiFeat != nil {
-		apiFeat.cleanup(context.Background(), nil, nil)
+		_, _ = apiFeat.cleanup(context.Background(), nil, nil)
 	}
 	if s, ok := logger.Writer().(*os.File); ok {
 		err := s.Close()
@@ -1565,6 +1696,8 @@ func tidyUpTests() {
 }
 
 func checkModelEndpoint() {
+	modelEndpointConnectivity = modelEndpointUnchecked
+
 	modelURL := os.Getenv("MODEL_URL")
 	if modelURL == "" {
 		logDebug("MODEL_URL not set, skipping model endpoint pre-flight check\n")
@@ -1583,23 +1716,54 @@ func checkModelEndpoint() {
 		},
 	}
 
-	resp, err := client.Get(modelURL) //nolint:gosec
-	if err != nil {
-		var dnsErr *net.DNSError
-		if errors.As(err, &dnsErr) {
-			logDebug("WARNING: Cannot resolve model endpoint DNS for %s (test runner may be outside the cluster), proceeding with tests\n", modelURL)
+	maxRetries := 3
+	numRetries := 0
+	shouldRetry := func() bool { return numRetries < maxRetries }
+	notReadyStatus := func(statusCode int) bool { return statusCode == 503 }
+	retryDelay := 10 * time.Second
+
+	for shouldRetry() {
+		resp, err := client.Get(modelURL) //nolint:gosec // This is a test, we don't need to be too strict about the HTTP client
+		if err != nil {
+			var dnsErr *net.DNSError
+			if errors.As(err, &dnsErr) {
+				logDebug("WARNING: Cannot resolve model endpoint DNS for %s (test runner may be outside the cluster), proceeding with tests\n", modelURL)
+				return
+			}
+			logDebug("WARNING: Model endpoint %s is not reachable: %v\n", modelURL, err)
+			logDebug("Evaluation job scenarios will be skipped.\n")
+			modelEndpointConnectivity = modelEndpointUnreachable
 			return
 		}
-		logDebug("WARNING: Model endpoint %s is not reachable: %v\n", modelURL, err)
-		logDebug("Evaluation job scenarios will be skipped.\n")
-		modelEndpointConnectivity = modelEndpointUnreachable
-		return
-	}
-	defer resp.Body.Close()
-	_, _ = io.Copy(io.Discard, resp.Body)
+		status := resp.StatusCode
+		_, _ = io.Copy(io.Discard, resp.Body)
+		_ = resp.Body.Close()
+		logDebug("Model endpoint preflight GET %s returned HTTP %d\n", modelURL, status)
 
-	logDebug("Model endpoint %s is reachable (status: %d)\n", modelURL, resp.StatusCode)
-	modelEndpointConnectivity = modelEndpointReachable
+		// 401 on the OpenAI-compatible base URL (/v1) still means the server is up;
+		// unauthenticated GET often cannot list models. Do not treat 404 as reachable
+		// (that can mask a bad MODEL_URL).
+		reachableWithoutAuth := status == http.StatusUnauthorized
+
+		if numRetries < maxRetries-1 && notReadyStatus(status) {
+			logDebug("WARNING: Model endpoint %s is not ready (HTTP %d), waiting %s before retrying\n", modelURL, status, retryDelay)
+			time.Sleep(retryDelay)
+		} else if status >= 200 && status < 300 {
+			logDebug("Model endpoint %s is reachable (HTTP %d)\n", modelURL, status)
+			modelEndpointConnectivity = modelEndpointReachable
+			return
+		} else if reachableWithoutAuth {
+			logDebug("Model endpoint %s is reachable (HTTP %d; auth expected for /v1 base URL)\n", modelURL, status)
+			modelEndpointConnectivity = modelEndpointReachable
+			return
+		} else {
+			logDebug("WARNING: Model endpoint %s returned HTTP %d, treating as unreachable\n", modelURL, status)
+			logDebug("Evaluation job scenarios will be skipped.\n")
+			modelEndpointConnectivity = modelEndpointUnreachable
+			return
+		}
+		numRetries++
+	}
 }
 
 func (tc *scenarioConfig) theModelEndpointIsReachable() error {
@@ -1753,9 +1917,711 @@ func InitializeScenario(ctx *godog.ScenarioContext) {
 	// Other steps
 	ctx.Step(`^fix this step$`, tc.fixThisStep)
 
+	// MCP-specific steps
+	ctx.Step(`^I call MCP tool "([^"]*)" with arguments "([^"]*)"$`, tc.iCallMCPToolWithArguments)
+	ctx.Step(`^I call MCP tool "([^"]*)" with arguments:$`, tc.iCallMCPToolWithInlineArguments)
+	ctx.Step(`^the MCP tool call should succeed$`, tc.theMCPToolCallShouldSucceed)
+	ctx.Step(`^the MCP tool call should fail$`, tc.theMCPToolCallShouldFail)
+	ctx.Step(`^the MCP response should contain "([^"]*)"$`, tc.theMCPResponseShouldContain)
+	ctx.Step(`^the MCP response should contain the value "([^"]*)" at path "([^"]*)"$`, tc.theMCPResponseShouldContainValueAtPath)
+	ctx.Step(`^the MCP error should contain "([^"]*)"$`, tc.theMCPErrorShouldContain)
+	ctx.Step(`^the "([^"]*)" field in the MCP response should be saved as "([^"]*)"$`, tc.theMCPFieldShouldBeSaved)
+	ctx.Step(`^the MCP response array at path "([^"]*)" should have length (\d+)$`, tc.theMCPResponseArrayAtPathShouldHaveLength)
+	ctx.Step(`^the MCP response array at path "([^"]*)" should have length at least (\d+)$`, tc.theMCPResponseArrayAtPathShouldHaveLengthAtLeast)
+
+	// MCP JSONPath validation steps (with filter expression support)
+	ctx.Step(`^the MCP response at JSONPath "(.+?)" should equal "(.+?)"$`, tc.theMCPResponseAtJSONPathShouldEqual)
+	ctx.Step(`^the MCP response at JSONPath "(.+?)" should be an array$`, tc.theMCPResponseAtJSONPathShouldBeArray)
+	ctx.Step(`^the MCP response at JSONPath "(.+?)" should not be empty$`, tc.theMCPResponseAtJSONPathShouldNotBeEmpty)
+	ctx.Step(`^the MCP response at JSONPath "(.+?)" should have at least (\d+) items$`, tc.theMCPResponseAtJSONPathShouldHaveAtLeastNItems)
+
+	// MCP Resource steps
+	ctx.Step(`^I read MCP resource "([^"]*)"$`, tc.iReadMCPResource)
+	ctx.Step(`^the MCP resource read should succeed$`, tc.theMCPResourceReadShouldSucceed)
+	ctx.Step(`^the MCP resource read should fail$`, tc.theMCPResourceReadShouldFail)
+	ctx.Step(`^the MCP resource should contain "([^"]*)"$`, tc.theMCPResourceShouldContain)
+	ctx.Step(`^the MCP resource should contain the value "([^"]*)" at path "([^"]*)"$`, tc.theMCPResourceShouldContainValueAtPath)
+	ctx.Step(`^the MCP resource error should contain "([^"]*)"$`, tc.theMCPResourceErrorShouldContain)
+
+	// MCP Prompt steps
+	ctx.Step(`^I get MCP prompt "([^"]*)" with arguments:$`, tc.iGetMCPPrompt)
+	ctx.Step(`^the MCP prompt should succeed$`, tc.theMCPPromptShouldSucceed)
+	ctx.Step(`^the MCP prompt should fail$`, tc.theMCPPromptShouldFail)
+	ctx.Step(`^the MCP prompt should contain "([^"]*)"$`, tc.theMCPPromptShouldContain)
+	ctx.Step(`^the MCP prompt error should contain "([^"]*)"$`, tc.theMCPPromptErrorShouldContain)
+
 	// GPU-specific steps
 	InitializeGPUSteps(ctx, tc)
 
 	// Hardware profile steps (Kubernetes client-go via KUBECONFIG-first FVT helper)
 	InitializeHardwareProfileSteps(ctx, tc)
+}
+
+// --- MCP Step Definitions ---
+
+// getMCPResultJSON converts MCP tool result to JSON bytes
+func (tc *scenarioConfig) getMCPResultJSON() ([]byte, error) {
+	if tc.mcpToolResult == nil {
+		return nil, fmt.Errorf("no MCP tool result")
+	}
+	// For errors, prefer Content (which contains the error text) over StructuredContent
+	if tc.mcpToolResult.IsError {
+		if len(tc.mcpToolResult.Content) > 0 {
+			return json.Marshal(tc.mcpToolResult.Content)
+		}
+	}
+	// For success responses, prefer StructuredContent
+	if tc.mcpToolResult.StructuredContent != nil {
+		return json.Marshal(tc.mcpToolResult.StructuredContent)
+	}
+	if len(tc.mcpToolResult.Content) > 0 {
+		return json.Marshal(tc.mcpToolResult.Content)
+	}
+	return nil, fmt.Errorf("MCP tool result has no content")
+}
+
+func (tc *scenarioConfig) iCallMCPToolWithArguments(toolName, argsJSON string) error {
+	if tc.apiFeature.mcpClientSession == nil {
+		return tc.logError(fmt.Errorf("MCP client session not initialized"))
+	}
+
+	// Substitute values ({{value:key}}) like HTTP steps do
+	substitutedArgs, err := tc.substituteValues(argsJSON)
+	if err != nil {
+		return tc.logError(fmt.Errorf("failed to substitute values in MCP args: %w", err))
+	}
+
+	ctx := context.Background()
+	result, err := tc.apiFeature.mcpClientSession.CallTool(ctx, &mcp.CallToolParams{
+		Name:      toolName,
+		Arguments: json.RawMessage(substitutedArgs),
+	})
+
+	tc.mcpToolResult = result
+	tc.mcpError = err
+
+	tc.logDebug("MCP tool %s called with args %s\n", toolName, substitutedArgs)
+	if err != nil {
+		tc.logDebug("MCP tool call error: %v\n", err)
+	}
+	if result != nil && result.IsError {
+		tc.logDebug("MCP tool returned error result\n")
+	}
+
+	return nil
+}
+
+func (tc *scenarioConfig) iCallMCPToolWithInlineArguments(toolName string, argsJSON *godog.DocString) error {
+	return tc.iCallMCPToolWithArguments(toolName, argsJSON.Content)
+}
+
+func (tc *scenarioConfig) theMCPToolCallShouldSucceed() error {
+	if tc.mcpError != nil {
+		return tc.logError(fmt.Errorf("expected MCP tool call to succeed but got error: %v", tc.mcpError))
+	}
+	if tc.mcpToolResult == nil {
+		return tc.logError(fmt.Errorf("expected MCP tool result but got nil"))
+	}
+	if tc.mcpToolResult.IsError {
+		// Serialize error content to JSON for better error messages
+		errJSON, _ := json.MarshalIndent(tc.mcpToolResult.Content, "", "  ")
+		return tc.logError(fmt.Errorf("expected MCP tool call to succeed but got error result: %s", string(errJSON)))
+	}
+	return nil
+}
+
+func (tc *scenarioConfig) theMCPToolCallShouldFail() error {
+	if tc.mcpError == nil && (tc.mcpToolResult == nil || !tc.mcpToolResult.IsError) {
+		return tc.logError(fmt.Errorf("expected MCP tool call to fail but it succeeded"))
+	}
+
+	// Log the error details for debugging
+	if tc.mcpToolResult != nil && tc.mcpToolResult.IsError {
+		errJSON, _ := json.MarshalIndent(tc.mcpToolResult.Content, "", "  ")
+		tc.logDebug("MCP error response: %s\n", string(errJSON))
+	}
+
+	return nil
+}
+
+func (tc *scenarioConfig) theMCPResponseShouldContain(expected string) error {
+	resultJSON, err := tc.getMCPResultJSON()
+	if err != nil {
+		return tc.logError(err)
+	}
+
+	resultStr := string(resultJSON)
+	tc.logDebug("MCP response: %s\n", resultStr)
+
+	if !strings.Contains(resultStr, expected) {
+		return tc.logError(fmt.Errorf("expected MCP response to contain %q but got: %s", expected, resultStr))
+	}
+	return nil
+}
+
+func (tc *scenarioConfig) theMCPResponseShouldContainValueAtPath(expected, path string) error {
+	// Substitute any {{value:key}} patterns in expected value
+	expected, _ = tc.substituteValues(expected)
+
+	resultJSON, err := tc.getMCPResultJSON()
+	if err != nil {
+		return tc.logError(err)
+	}
+
+	tc.logDebug("MCP response JSON for path check: %s\n", string(resultJSON))
+	tc.logDebug("Looking for path: %s (converted to: %s)\n", path, getJsonPointer(path))
+
+	// Parse JSON and extract value at path using gabs (same as HTTP version)
+	jsonParsed, err := gabs.ParseJSON(resultJSON)
+	if err != nil {
+		return tc.logError(fmt.Errorf("failed to parse MCP JSON response: %w", err))
+	}
+
+	pathObj, err := jsonParsed.JSONPointer(getJsonPointer(path))
+	if err != nil {
+		return tc.logError(fmt.Errorf("path %v does not exist in MCP response\nJSON: %s", path, string(resultJSON)))
+	}
+
+	// Convert to string for comparison
+	var actualValue string
+	switch v := pathObj.Data().(type) {
+	case string:
+		actualValue = v
+	case float64:
+		actualValue = strconv.FormatFloat(v, 'f', -1, 64)
+	case bool:
+		actualValue = strconv.FormatBool(v)
+	default:
+		// For complex types, marshal to JSON
+		jsonBytes, err := json.Marshal(v)
+		if err != nil {
+			return tc.logError(fmt.Errorf("failed to marshal value at path %s: %w", path, err))
+		}
+		actualValue = string(jsonBytes)
+	}
+
+	if actualValue != expected {
+		return tc.logError(fmt.Errorf("expected MCP response at path %s to be %q but got %q", path, expected, actualValue))
+	}
+
+	return nil
+}
+
+func (tc *scenarioConfig) theMCPErrorShouldContain(expected string) error {
+	// Check if there was a transport-level error
+	if tc.mcpError != nil {
+		errorStr := tc.mcpError.Error()
+		tc.logDebug("MCP transport error: %s\n", errorStr)
+		if !strings.Contains(errorStr, expected) {
+			return tc.logError(fmt.Errorf("expected MCP error to contain %q but got: %s", expected, errorStr))
+		}
+		return nil
+	}
+
+	// Check if there was an MCP tool error result
+	if tc.mcpToolResult == nil || !tc.mcpToolResult.IsError {
+		return tc.logError(fmt.Errorf("expected MCP error result but got success or nil"))
+	}
+
+	resultJSON, err := tc.getMCPResultJSON()
+	if err != nil {
+		return tc.logError(err)
+	}
+
+	resultStr := string(resultJSON)
+	tc.logDebug("MCP error response: %s\n", resultStr)
+
+	if !strings.Contains(resultStr, expected) {
+		return tc.logError(fmt.Errorf("expected MCP error to contain %q but got: %s", expected, resultStr))
+	}
+	return nil
+}
+
+func (tc *scenarioConfig) theMCPFieldShouldBeSaved(path, name string) error {
+	resultJSON, err := tc.getMCPResultJSON()
+	if err != nil {
+		return tc.logError(err)
+	}
+
+	// Parse and extract field using gabs (same as HTTP version)
+	jsonParsed, err := gabs.ParseJSON(resultJSON)
+	if err != nil {
+		return tc.logError(fmt.Errorf("failed to parse MCP JSON response: %w", err))
+	}
+
+	pathObj, err := jsonParsed.JSONPointer(getJsonPointer(path))
+	if err != nil {
+		return tc.logError(fmt.Errorf("path %v does not exist in MCP response", path))
+	}
+
+	finalResult, ok := pathObj.Data().(string)
+	if !ok {
+		if floatResult, ok := pathObj.Data().(float64); ok {
+			finalResult = strconv.FormatFloat(floatResult, 'f', -1, 64)
+		} else {
+			return tc.logError(fmt.Errorf("expected %s to be a string or float64 but got %T", path, pathObj.Data()))
+		}
+	}
+
+	if strings.HasPrefix(name, valuePrefix) {
+		realName := strings.TrimPrefix(name, valuePrefix)
+		tc.saveValue(realName, finalResult)
+
+		// If saving job_id, also set lastId for compatibility with wait functions
+		if path == "job_id" {
+			tc.lastId = finalResult
+			tc.values["id"] = finalResult
+		}
+	} else {
+		return tc.logError(fmt.Errorf("unexpected value %s, should start with '%s'", name, valuePrefix))
+	}
+
+	return nil
+}
+
+func (tc *scenarioConfig) theMCPResponseArrayAtPathShouldHaveLength(jsonPath string, lengthStr string) error {
+	resultJSON, err := tc.getMCPResultJSON()
+	if err != nil {
+		return tc.logError(err)
+	}
+
+	jsonParsed, err := gabs.ParseJSON(resultJSON)
+	if err != nil {
+		return tc.logError(fmt.Errorf("failed to parse MCP JSON response: %w", err))
+	}
+
+	pathObj, err := jsonParsed.JSONPointer(getJsonPointer(jsonPath))
+	if err != nil {
+		return tc.logError(fmt.Errorf("path %v does not exist in MCP response", jsonPath))
+	}
+
+	arr, ok := pathObj.Data().([]interface{})
+	if !ok {
+		return tc.logError(fmt.Errorf("value at path %s is not an array in MCP response, got %T", jsonPath, pathObj.Data()))
+	}
+
+	length, err := strconv.Atoi(lengthStr)
+	if err != nil {
+		return tc.logError(fmt.Errorf("expected integer length, got %q: %w", lengthStr, err))
+	}
+
+	if len(arr) != length {
+		return tc.logError(fmt.Errorf("expected array at path %s to have length %d, got %d", jsonPath, length, len(arr)))
+	}
+	return nil
+}
+
+func (tc *scenarioConfig) theMCPResponseArrayAtPathShouldHaveLengthAtLeast(jsonPath string, minLengthStr string) error {
+	resultJSON, err := tc.getMCPResultJSON()
+	if err != nil {
+		return tc.logError(err)
+	}
+
+	jsonParsed, err := gabs.ParseJSON(resultJSON)
+	if err != nil {
+		return tc.logError(fmt.Errorf("failed to parse MCP JSON response: %w", err))
+	}
+
+	pathObj, err := jsonParsed.JSONPointer(getJsonPointer(jsonPath))
+	if err != nil {
+		return tc.logError(fmt.Errorf("path %v does not exist in MCP response", jsonPath))
+	}
+
+	arr, ok := pathObj.Data().([]interface{})
+	if !ok {
+		return tc.logError(fmt.Errorf("value at path %s is not an array in MCP response, got %T", jsonPath, pathObj.Data()))
+	}
+
+	minLength, err := strconv.Atoi(minLengthStr)
+	if err != nil {
+		return tc.logError(fmt.Errorf("expected integer length, got %q: %w", minLengthStr, err))
+	}
+
+	if len(arr) < minLength {
+		return tc.logError(fmt.Errorf("expected array at path %s to have length at least %d, got %d", jsonPath, minLength, len(arr)))
+	}
+	return nil
+}
+
+// MCP JSONPath validation steps (with filter expression support)
+
+// Helper: Check if JSONPath uses filter or wildcard syntax
+func jsonPathUsesFilterOrWildcard(jsonPath string) bool {
+	return strings.Contains(jsonPath, "[?(") || strings.Contains(jsonPath, "[*]") || strings.Contains(jsonPath, "..")
+}
+
+// Helper: Conditionally unwrap single-element arrays from JSONPath filter results
+func unwrapIfFilterResult(value interface{}, jsonPath string) interface{} {
+	// Only unwrap if the JSONPath uses filter/wildcard syntax
+	if !jsonPathUsesFilterOrWildcard(jsonPath) {
+		return value
+	}
+
+	// Filter expressions return arrays - unwrap single-element results
+	if arr, ok := value.([]interface{}); ok && len(arr) == 1 {
+		return arr[0]
+	}
+
+	return value
+}
+
+// Helper: Extract value at JSONPath from MCP response (with substitution, escaping, and unwrapping)
+func (tc *scenarioConfig) getMCPValueAtJSONPath(jsonPath string) (interface{}, error) {
+	// Substitute any {{value:key}} patterns
+	var err error
+	jsonPath, err = tc.substituteValues(jsonPath)
+	if err != nil {
+		return nil, fmt.Errorf("failed to substitute values in JSONPath: %w", err)
+	}
+
+	// Unescape quotes in JSONPath (from Gherkin escaping)
+	jsonPath = strings.ReplaceAll(jsonPath, `\"`, `"`)
+
+	resultJSON, err := tc.getMCPResultJSON()
+	if err != nil {
+		return nil, err
+	}
+
+	tc.logDebug("MCP response JSON for JSONPath: %s\n", string(resultJSON))
+	tc.logDebug("JSONPath: %s\n", jsonPath)
+
+	// Parse JSON to map
+	var respMap map[string]interface{}
+	if err := json.Unmarshal(resultJSON, &respMap); err != nil {
+		return nil, fmt.Errorf("failed to parse MCP JSON response: %w", err)
+	}
+
+	// Ensure path starts with $
+	path := jsonPath
+	if !strings.HasPrefix(path, "$") {
+		path = "$." + path
+	}
+
+	// Get value at JSONPath
+	foundValue, err := jsonpath.Get(path, respMap)
+	if err != nil {
+		return nil, fmt.Errorf("JSONPath %s does not exist in MCP response: %w\nJSON: %s", jsonPath, err, string(resultJSON))
+	}
+
+	return foundValue, nil
+}
+
+func (tc *scenarioConfig) theMCPResponseAtJSONPathShouldEqual(jsonPath, expected string) error {
+	// Substitute expected value
+	var err error
+	expected, err = tc.substituteValues(expected)
+	if err != nil {
+		return tc.logError(fmt.Errorf("failed to substitute values in expected: %w", err))
+	}
+
+	// Get value at JSONPath using helper
+	foundValue, err := tc.getMCPValueAtJSONPath(jsonPath)
+	if err != nil {
+		return tc.logError(err)
+	}
+
+	// Conditionally unwrap single-element arrays from filter results
+	foundValue = unwrapIfFilterResult(foundValue, jsonPath)
+
+	// Convert to string for comparison
+	var actualValue string
+	switch v := foundValue.(type) {
+	case string:
+		actualValue = v
+	case float64:
+		actualValue = strconv.FormatFloat(v, 'f', -1, 64)
+	case bool:
+		actualValue = strconv.FormatBool(v)
+	case nil:
+		actualValue = ""
+	default:
+		// For complex types, marshal to JSON
+		jsonBytes, err := json.Marshal(v)
+		if err != nil {
+			return tc.logError(fmt.Errorf("failed to marshal value at JSONPath %s: %w", jsonPath, err))
+		}
+		actualValue = string(jsonBytes)
+	}
+
+	if actualValue != expected {
+		return tc.logError(fmt.Errorf("expected MCP response at JSONPath %s to equal %q but got %q", jsonPath, expected, actualValue))
+	}
+
+	return nil
+}
+
+func (tc *scenarioConfig) theMCPResponseAtJSONPathShouldBeArray(jsonPath string) error {
+	foundValue, err := tc.getMCPValueAtJSONPath(jsonPath)
+	if err != nil {
+		return tc.logError(err)
+	}
+
+	// Conditionally unwrap single-element arrays from filter results
+	foundValue = unwrapIfFilterResult(foundValue, jsonPath)
+
+	if _, ok := foundValue.([]interface{}); !ok {
+		return tc.logError(fmt.Errorf("value at JSONPath %s is not an array, got type %T with value: %v", jsonPath, foundValue, foundValue))
+	}
+
+	return nil
+}
+
+func (tc *scenarioConfig) theMCPResponseAtJSONPathShouldNotBeEmpty(jsonPath string) error {
+	foundValue, err := tc.getMCPValueAtJSONPath(jsonPath)
+	if err != nil {
+		return tc.logError(err)
+	}
+
+	// Conditionally unwrap single-element arrays from filter results
+	foundValue = unwrapIfFilterResult(foundValue, jsonPath)
+
+	// Check if value is empty based on type
+	switch v := foundValue.(type) {
+	case string:
+		if v == "" {
+			return tc.logError(fmt.Errorf("value at JSONPath %s is empty string", jsonPath))
+		}
+	case []interface{}:
+		if len(v) == 0 {
+			return tc.logError(fmt.Errorf("array at JSONPath %s is empty", jsonPath))
+		}
+	case map[string]interface{}:
+		if len(v) == 0 {
+			return tc.logError(fmt.Errorf("object at JSONPath %s is empty", jsonPath))
+		}
+	case nil:
+		return tc.logError(fmt.Errorf("value at JSONPath %s is null", jsonPath))
+	}
+
+	return nil
+}
+
+func (tc *scenarioConfig) theMCPResponseAtJSONPathShouldHaveAtLeastNItems(jsonPath string, minCountStr string) error {
+	foundValue, err := tc.getMCPValueAtJSONPath(jsonPath)
+	if err != nil {
+		return tc.logError(err)
+	}
+
+	// Conditionally unwrap single-element arrays from filter results
+	foundValue = unwrapIfFilterResult(foundValue, jsonPath)
+
+	arr, ok := foundValue.([]interface{})
+	if !ok {
+		return tc.logError(fmt.Errorf("value at JSONPath %s is not an array, got type %T", jsonPath, foundValue))
+	}
+
+	minCount, err := strconv.Atoi(minCountStr)
+	if err != nil {
+		return tc.logError(fmt.Errorf("expected integer count, got %q: %w", minCountStr, err))
+	}
+
+	if len(arr) < minCount {
+		return tc.logError(fmt.Errorf("array at JSONPath %s has %d items, expected at least %d", jsonPath, len(arr), minCount))
+	}
+
+	return nil
+}
+
+// MCP Resource steps
+func (tc *scenarioConfig) iReadMCPResource(uri string) error {
+	if tc.apiFeature.mcpClientSession == nil {
+		return tc.logError(fmt.Errorf("MCP client session not initialized"))
+	}
+
+	// Substitute any {{value:key}} or {{env:VAR|default}} patterns in URI
+	uri, _ = tc.substituteValues(uri)
+
+	ctx := context.Background()
+	result, err := tc.apiFeature.mcpClientSession.ReadResource(ctx, &mcp.ReadResourceParams{URI: uri})
+
+	tc.mcpResourceError = err
+	if err == nil && len(result.Contents) > 0 {
+		// Combine all text content from the resource
+		var textParts []string
+		for _, content := range result.Contents {
+			textParts = append(textParts, content.Text)
+		}
+		tc.mcpResourceText = strings.Join(textParts, "\n")
+		tc.logDebug("MCP resource content: %s\n", tc.mcpResourceText)
+	}
+
+	return nil
+}
+
+func (tc *scenarioConfig) theMCPResourceReadShouldSucceed() error {
+	if tc.mcpResourceError != nil {
+		return tc.logError(fmt.Errorf("expected MCP resource read to succeed but got error: %w", tc.mcpResourceError))
+	}
+	if tc.mcpResourceText == "" {
+		return tc.logError(fmt.Errorf("expected MCP resource to have content but got empty text"))
+	}
+	return nil
+}
+
+func (tc *scenarioConfig) theMCPResourceReadShouldFail() error {
+	if tc.mcpResourceError == nil {
+		return tc.logError(fmt.Errorf("expected MCP resource read to fail but it succeeded"))
+	}
+	tc.logDebug("MCP resource error: %s\n", tc.mcpResourceError.Error())
+	return nil
+}
+
+func (tc *scenarioConfig) theMCPResourceShouldContain(expected string) error {
+	// Substitute any {{value:key}} patterns in expected value
+	expected, _ = tc.substituteValues(expected)
+
+	if tc.mcpResourceText == "" {
+		return tc.logError(fmt.Errorf("no MCP resource text to check"))
+	}
+	if !strings.Contains(tc.mcpResourceText, expected) {
+		return tc.logError(fmt.Errorf("expected MCP resource to contain %q but got: %s", expected, tc.mcpResourceText))
+	}
+	return nil
+}
+
+func (tc *scenarioConfig) theMCPResourceShouldContainValueAtPath(expected, path string) error {
+	// Substitute any {{value:key}} patterns in expected value
+	expected, _ = tc.substituteValues(expected)
+
+	if tc.mcpResourceText == "" {
+		return tc.logError(fmt.Errorf("no MCP resource text to check"))
+	}
+
+	tc.logDebug("MCP resource JSON for path check: %s\n", tc.mcpResourceText)
+	tc.logDebug("Looking for path: %s (converted to: %s)\n", path, getJsonPointer(path))
+
+	// Parse JSON and extract value at path using gabs
+	jsonParsed, err := gabs.ParseJSON([]byte(tc.mcpResourceText))
+	if err != nil {
+		return tc.logError(fmt.Errorf("failed to parse MCP resource JSON: %w", err))
+	}
+
+	pathObj, err := jsonParsed.JSONPointer(getJsonPointer(path))
+	if err != nil {
+		return tc.logError(fmt.Errorf("path %v does not exist in MCP resource\nJSON: %s", path, tc.mcpResourceText))
+	}
+
+	// Convert to string for comparison
+	var actualValue string
+	switch v := pathObj.Data().(type) {
+	case string:
+		actualValue = v
+	case float64:
+		actualValue = strconv.FormatFloat(v, 'f', -1, 64)
+	case bool:
+		actualValue = strconv.FormatBool(v)
+	default:
+		// For complex types, marshal to JSON
+		jsonBytes, err := json.Marshal(v)
+		if err != nil {
+			return tc.logError(fmt.Errorf("failed to marshal value at path %s: %w", path, err))
+		}
+		actualValue = string(jsonBytes)
+	}
+
+	if actualValue != expected {
+		return tc.logError(fmt.Errorf("expected MCP resource at path %s to be %q but got %q", path, expected, actualValue))
+	}
+
+	return nil
+}
+
+func (tc *scenarioConfig) theMCPResourceErrorShouldContain(expected string) error {
+	if tc.mcpResourceError == nil {
+		return tc.logError(fmt.Errorf("expected MCP resource error but got success"))
+	}
+	errorStr := tc.mcpResourceError.Error()
+	if !strings.Contains(errorStr, expected) {
+		return tc.logError(fmt.Errorf("expected MCP resource error to contain %q but got: %s", expected, errorStr))
+	}
+	return nil
+}
+
+// MCP Prompt steps
+func (tc *scenarioConfig) iGetMCPPrompt(name, argsJSON string) error {
+	if tc.apiFeature.mcpClientSession == nil {
+		return tc.logError(fmt.Errorf("MCP client session not initialized"))
+	}
+
+	// Parse arguments
+	var args map[string]string
+	if argsJSON != "" {
+		argsJSON, _ = tc.substituteValues(argsJSON)
+		var rawArgs map[string]interface{}
+		if err := json.Unmarshal([]byte(argsJSON), &rawArgs); err != nil {
+			return tc.logError(fmt.Errorf("failed to parse MCP prompt arguments JSON: %w", err))
+		}
+		// Convert to map[string]string as expected by GetPromptParams
+		args = make(map[string]string)
+		for k, v := range rawArgs {
+			args[k] = fmt.Sprintf("%v", v)
+		}
+	}
+
+	ctx := context.Background()
+	result, err := tc.apiFeature.mcpClientSession.GetPrompt(ctx, &mcp.GetPromptParams{
+		Name:      name,
+		Arguments: args,
+	})
+
+	tc.mcpPromptError = err
+	tc.mcpPromptResult = result
+
+	if err != nil {
+		tc.logDebug("MCP prompt error: %s\n", err.Error())
+	} else if result != nil {
+		resultJSON, _ := json.MarshalIndent(result, "", "  ")
+		tc.logDebug("MCP prompt result: %s\n", string(resultJSON))
+	}
+
+	return nil
+}
+
+func (tc *scenarioConfig) theMCPPromptShouldSucceed() error {
+	if tc.mcpPromptError != nil {
+		return tc.logError(fmt.Errorf("expected MCP prompt to succeed but got error: %w", tc.mcpPromptError))
+	}
+	if tc.mcpPromptResult == nil {
+		return tc.logError(fmt.Errorf("expected MCP prompt result but got nil"))
+	}
+	return nil
+}
+
+func (tc *scenarioConfig) theMCPPromptShouldFail() error {
+	if tc.mcpPromptError == nil {
+		return tc.logError(fmt.Errorf("expected MCP prompt to fail but it succeeded"))
+	}
+	tc.logDebug("MCP prompt error: %s\n", tc.mcpPromptError.Error())
+	return nil
+}
+
+func (tc *scenarioConfig) theMCPPromptShouldContain(expected string) error {
+	if tc.mcpPromptResult == nil {
+		return tc.logError(fmt.Errorf("no MCP prompt result to check"))
+	}
+
+	// Combine all message content to search
+	var allText []string
+	for _, msg := range tc.mcpPromptResult.Messages {
+		if textContent, ok := msg.Content.(*mcp.TextContent); ok {
+			allText = append(allText, textContent.Text)
+		}
+	}
+	fullText := strings.Join(allText, "\n")
+
+	if !strings.Contains(fullText, expected) {
+		return tc.logError(fmt.Errorf("expected MCP prompt to contain %q but got: %s", expected, fullText))
+	}
+	return nil
+}
+
+func (tc *scenarioConfig) theMCPPromptErrorShouldContain(expected string) error {
+	if tc.mcpPromptError == nil {
+		return tc.logError(fmt.Errorf("expected MCP prompt error but got success"))
+	}
+	errorStr := tc.mcpPromptError.Error()
+	if !strings.Contains(errorStr, expected) {
+		return tc.logError(fmt.Errorf("expected MCP prompt error to contain %q but got: %s", expected, errorStr))
+	}
+	return nil
 }

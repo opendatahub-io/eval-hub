@@ -81,6 +81,11 @@ func (s *postgresStatementsFactory) CreateEvaluationGetEntityStatement(query *sh
 	return `SELECT id, created_at, updated_at, tenant_id, owner, status, experiment_id, entity FROM evaluations WHERE id = $1 AND tenant_id = $2;`, []any{&query.Resource.ID, query.Resource.Tenant.String()}, []any{&query.Resource.ID, &query.Resource.CreatedAt, &query.Resource.UpdatedAt, &query.Resource.Tenant, &query.Resource.Owner, &query.Status, &query.MLFlowExperimentID, &query.EntityJSON}
 }
 
+func (s *postgresStatementsFactory) CreateEvaluationGetEntityForUpdateStatement(query *shared.EntityQuery) (string, []any, []any) {
+	stmt, args, scanArgs := s.CreateEvaluationGetEntityStatement(query)
+	return strings.TrimSuffix(stmt, ";") + " FOR UPDATE;", args, scanArgs
+}
+
 // allowedFilterColumns returns the set of column/param names allowed in filter for each table.
 func (s *postgresStatementsFactory) GetAllowedFilterColumns(tableName string) []string {
 	allColumns := []string{"owner", "name", "tags"}
@@ -199,7 +204,7 @@ func (s *postgresStatementsFactory) getWhereStatement(tenant api.Tenant, id stri
 	var sb strings.Builder
 	var args []any
 	if id != "" {
-		sb.WriteString(fmt.Sprintf(`id = $%d`, index))
+		fmt.Fprintf(&sb, `id = $%d`, index)
 		index++
 		args = append(args, id)
 	}
@@ -209,7 +214,7 @@ func (s *postgresStatementsFactory) getWhereStatement(tenant api.Tenant, id stri
 		if sb.Len() > 0 {
 			sb.WriteString(" AND ")
 		}
-		sb.WriteString(fmt.Sprintf("(tenant_id = $%d OR owner = '%s')", index, abstractions.OwnerSystem))
+		fmt.Fprintf(&sb, "(tenant_id = $%d OR owner = '%s')", index, abstractions.OwnerSystem)
 		args = append(args, tenant.String())
 	}
 	return sb.String(), args

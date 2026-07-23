@@ -12,11 +12,12 @@ Feature: Health Check Endpoint
     And the response should contain "timestamp"
 
   @negative
+  # 405 comes from the service, 403 comes from the proxy
   Scenario: Health endpoint rejects non-GET methods
     Given the service is running
     When I send a POST request to "/api/v1/health"
-    Then the response code should be 405
+    Then the response code should be 405 or 403
     When I send a PUT request to "/api/v1/health"
-    Then the response code should be 405
+    Then the response code should be 405 or 403
     When I send a DELETE request to "/api/v1/health"
-    Then the response code should be 405
+    Then the response code should be 405 or 403

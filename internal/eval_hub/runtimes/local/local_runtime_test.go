@@ -191,7 +191,7 @@ func localJobDir(jobID string, benchmarkIndex int, providerID, benchmarkID strin
 func cleanupDir(t *testing.T, jobID string) {
 	t.Helper()
 	t.Cleanup(func() {
-		os.RemoveAll(filepath.Join(localJobsBaseDir, jobID))
+		_ = os.RemoveAll(filepath.Join(localJobsBaseDir, jobID))
 	})
 }
 
@@ -439,6 +439,9 @@ func TestRunEvaluationJobProviderNotFound(t *testing.T) {
 		}
 		if !strings.Contains(runStatus.BenchmarkStatusEvent.ErrorMessage.Message, "not found") {
 			t.Fatalf("expected error message to contain %q, got %q", "not found", runStatus.BenchmarkStatusEvent.ErrorMessage.Message)
+		}
+		if runStatus.BenchmarkStatusEvent.ErrorMessage.MessageOrigin != api.MessageOriginServer {
+			t.Fatalf("expected server error origin, got %q", runStatus.BenchmarkStatusEvent.ErrorMessage.MessageOrigin)
 		}
 	case <-time.After(5 * time.Second):
 		t.Fatal("timed out waiting for failed benchmark status update")
@@ -933,7 +936,7 @@ func TestDeleteEvaluationJobResources(t *testing.T) {
 
 	// Verify the benchmark directory was removed
 	if _, err := os.Stat(dirName); !os.IsNotExist(err) {
-		os.RemoveAll(dirName) // Clean up before failing
+		_ = os.RemoveAll(dirName) // Clean up before failing
 		t.Fatalf("expected directory %s to be removed", dirName)
 	}
 }

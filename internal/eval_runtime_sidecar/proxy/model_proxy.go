@@ -31,10 +31,10 @@ const (
 	modelURLSuffix     = "_url"
 )
 
-// xModelCredError is an internal sentinel header set by the Director when ref resolution fails.
+// xModelCredError is an internal sentinel header set by Rewrite when ref resolution fails.
 // The modelRoundTripper checks for it and returns 400 to the eval container instead of
 // forwarding a request with a literal ref token.
-const xModelCredError = "X-Model-Cred-Error"
+const xModelCredError = "X-Model-Cred-Error" // #nosec G101 -- internal HTTP header name, not a credential
 
 const globalTransactionIDHeader = "X-Global-Transaction-Id"
 
@@ -127,7 +127,9 @@ func NewModelReverseProxy(defaultTarget *url.URL, client *http.Client, logger *s
 		pr.Out.URL.Host = target.Host
 		pr.Out.Host = target.Host
 		pr.Out.RequestURI = ""
-		reqLog.Info("Proxying model request", "method", pr.Out.Method, "url", pr.Out.URL.String(), "headers", headersForLog(pr.Out.Header))
+		// Do not log request headers: CodeQL treats http.Header as sensitive even when
+		// Authorization is masked (go/clear-text-logging).
+		reqLog.Info("Proxying model request", "method", pr.Out.Method, "url", pr.Out.URL.String())
 	}
 
 	rp.ModifyResponse = func(resp *http.Response) error {
@@ -211,10 +213,10 @@ func loadSecretCache(mountPath string, logger *slog.Logger) map[string]string {
 	}
 	for _, e := range entries {
 		// Skip directories and Kubernetes secret mount internals (..data, ..2024_... symlinks).
-		if e.IsDir() || strings.HasPrefix(e.Name(), "..") {
+		if e.IsDir() || strings.HasPrefix(e.Name(), "..") || strings.Contains(e.Name(), string(filepath.Separator)) {
 			continue
 		}
-		data, err := os.ReadFile(filepath.Join(mountPath, e.Name()))
+		data, err := os.ReadFile(filepath.Join(mountPath, e.Name())) // #nosec G304 -- entry name validated above
 		if err != nil {
 			logger.Warn("skipping unreadable secret file", "file", e.Name(), "error", err)
 			continue
