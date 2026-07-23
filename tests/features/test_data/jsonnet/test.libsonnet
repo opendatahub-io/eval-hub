@@ -39,6 +39,15 @@ local harness = std.parseJson(std.extVar('harness'));
       },
     },
 
+  // PVC test data reference (mounts claim read-only at /test_data).
+  pvcTestDataRef()::
+    {
+      pvc: {
+        claim_name: $.env('TEST_DATA_PVC_CLAIM_NAME', 'evalhub-offline-test-data'),
+        sub_path: $.env('TEST_DATA_PVC_SUB_PATH', 'staging'),
+      },
+    },
+
   // Evaluation/collection benchmark with disconnected-aware tokenizer and optional test_data_ref.
   benchmark(id, providerId, parameters)::
     local base = {
@@ -50,12 +59,29 @@ local harness = std.parseJson(std.extVar('harness'));
     };
     if harness.disconnected then base + { test_data_ref: $.testDataRef() } else base,
 
+  // Benchmark that always mounts offline data from a PVC (tokenizer under /test_data).
+  pvcBenchmark(id, providerId, parameters)::
+    {
+      id: id,
+      provider_id: providerId,
+      parameters: {
+        tokenizer: '/test_data/tokenizer',
+      } + parameters,
+      test_data_ref: $.pvcTestDataRef(),
+    },
+
   // arc_easy benchmark with common FVT defaults; extra parameters override or extend.
   arcEasyBenchmark(parameters={})::
     $.benchmark('arc_easy', 'lm_evaluation_harness', {
       num_examples: 10,
       num_fewshot: 3,
-      limit: 5,
+    } + parameters),
+
+  // arc_easy with PVC offline test data (claim_name + staging sub_path by default).
+  pvcArcEasyBenchmark(parameters={})::
+    $.pvcBenchmark('arc_easy', 'lm_evaluation_harness', {
+      num_examples: 10,
+      num_fewshot: 3,
     } + parameters),
 
   // Default benchmark for evaluation_job.jsonnet (disconnected vs connected FVT).
@@ -95,7 +121,7 @@ local harness = std.parseJson(std.extVar('harness'));
       },
     },
 
-  // num_examples caps runtime for OOB collection FVT without conflicting with collection limit.
+  // num_examples caps runtime for OOB collection FVT.
   oobCollectionParameterOverrides(numExamples)::
     {
       num_examples: numExamples,

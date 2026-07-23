@@ -30,7 +30,19 @@ func TestClusterModeRequiresIdentityHeaders(t *testing.T) {
 		w := httptest.NewRecorder()
 		handler.ServeHTTP(w, req)
 		if w.Code != http.StatusOK {
-			t.Fatalf("health: got status %d body %s", w.Code, w.Body.String())
+			t.Fatalf("health without headers: got status %d body %s", w.Code, w.Body.String())
+		}
+		var body map[string]any
+		if err := json.Unmarshal(w.Body.Bytes(), &body); err != nil {
+			t.Fatalf("decode health body: %v", err)
+		}
+		if body["status"] != "healthy" {
+			t.Fatalf("health status: got %v want healthy", body["status"])
+		}
+		for _, field := range []string{"build", "build_date", "git_hash", "version"} {
+			if _, ok := body[field]; ok {
+				t.Fatalf("health must not expose %q", field)
+			}
 		}
 	})
 

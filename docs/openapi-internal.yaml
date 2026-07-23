@@ -2,7 +2,7 @@ openapi: 3.1.0
 info:
   title: Eval Hub
   description: API REST server for evaluation backend orchestration
-  version: 0.4.4
+  version: 0.4.5
   contact:
     name: API Support
   license:
@@ -31,7 +31,8 @@ paths:
   /api/v1/health:
     get:
       summary: Health Check
-      description: Health check endpoint.
+      description: |
+        Health check endpoint suitable for liveness and readiness probes.
       operationId: get_health
       tags:
         - Health
@@ -47,24 +48,7 @@ paths:
                   summary: Healthy service response
                   value:
                     status: healthy
-                    version: N.N.N
                     timestamp: '2026-05-27T18:42:11Z'
-                    git_hash: abc1234
-                    uptime: 86400000000000
-                degraded:
-                  summary: Degraded service response
-                  value:
-                    status: degraded
-                    version: N.N.N
-                    timestamp: '2026-05-27T18:42:11Z'
-                    git_hash: abc1234
-                    uptime: 172800000000000
-        '400':
-          $ref: '#/components/responses/BadRequest'
-        '401':
-          $ref: '#/components/responses/Unauthorized'
-        '403':
-          $ref: '#/components/responses/Forbidden'
         '404':
           $ref: '#/components/responses/NotFound'
   /metrics:
@@ -1103,7 +1087,7 @@ paths:
                         image: quay.io/trustyai/trustyai-garak-lls-provider-dsp:latest
                         entrypoint:
                           - python
-                          - '-m'
+                          - -m
                           - llama_stack_provider_trustyai_garak.evalhub
                         cpu_request: 500m
                         memory_request: 512Mi
@@ -1993,24 +1977,13 @@ components:
         status:
           type: string
           description: Overall status (e.g. healthy, degraded)
-        version:
-          type: string
-          description: Service version
         timestamp:
           type: string
           format: date-time
           description: Server timestamp
-        git_hash:
-          type: string
-          description: Commit hash
-        uptime:
-          type: integer
-          description: Uptime in nanoseconds (or use string for duration)
       required:
         - status
-        - version
         - timestamp
-        - uptime
     Error:
       type: object
       description: Error response
@@ -2101,6 +2074,14 @@ components:
         message_code:
           type: string
           description: Machine-readable code
+        message_origin:
+          type: string
+          description: Origin of the message
+          enum:
+            - server
+            - runtime
+            - adapter
+            - sdk
       required:
         - message
         - message_code
@@ -2408,13 +2389,44 @@ components:
         bucket: my-eval-bucket
         key: datasets/benchmark-a/v1
         secret_ref: my-s3-connection-secret
+    TestDataRefPVC:
+      type: object
+      description: |
+        PersistentVolumeClaim (PVC) test data. Only applies when Eval Hub runs the benchmark as a
+        **Kubernetes Job** (cluster execution). It does not apply to local-only evaluation runs.
+
+        The PVC is mounted **read-only** directly into the evaluation container at **`/test_data`**.
+        No init container is scheduled — the data must already reside on the PVC before job submission.
+
+        **Requirements:**
+        - The PersistentVolumeClaim named by **`claim_name`** must already exist in the **same namespace**
+          as the evaluation job.
+        - Eval Hub does not create, provision, or manage the PVC — this is the tenant's responsibility.
+        - The evaluation adapter reads data from `/test_data` identically to S3-backed jobs.
+      required:
+        - claim_name
+      properties:
+        claim_name:
+          type: string
+          pattern: ^[a-z0-9]([-a-z0-9]*[a-z0-9])?$
+          description: |
+            Name of the PersistentVolumeClaim in the evaluation job namespace (same as Kubernetes
+            `PersistentVolumeClaimVolumeSource.claimName`). Must be a valid RFC 1123 DNS label.
+        sub_path:
+          type: string
+          description: |
+            Optional path within the PVC to mount at `/test_data` instead of the PVC root.
+            Useful when a single PVC contains data for multiple benchmarks in separate directories.
+      example:
+        claim_name: eval-datasets-pvc
+        sub_path: benchmark-a/v1
     TestDataRef:
       type: object
       description: |
-        Reference to external test data for a benchmark.
+        Reference to external test data for a benchmark. Exactly one of `s3` or `pvc` must be set.
 
-        When the evaluation runs as a **Kubernetes Job**, setting `s3` makes Eval Hub schedule
-        an **init container** on the evaluation job pod before the adapter runs. That init container:
+        **`s3`** — When the evaluation runs as a **Kubernetes Job**, Eval Hub schedules an
+        **init container** on the evaluation job pod before the adapter runs. That init container:
 
         - Reads **`bucket`**, **`key`**, and **`secret_ref`** from the job spec (same JSON
           mounted into the pod).
@@ -2424,13 +2436,25 @@ components:
           **`emptyDir`** volume at **`/test_data`**, preserving relative paths.
         - Exits; the **adapter container** mounts `/test_data` and reads the files.
 
+        **`pvc`** — The PersistentVolumeClaim is mounted **read-only** directly into the evaluation
+        container at **`/test_data`**. No init container is used; the PVC must already contain the
+        data and must exist in the same namespace as the evaluation job.
+
         Do not put credentials in the Eval Hub API request body; only reference an existing
-        Secret via **`secret_ref`**.
-      required:
-        - s3
+        Secret via **`secret_ref`** (for S3).
+      additionalProperties: false
       properties:
         s3:
           $ref: '#/components/schemas/TestDataRefS3'
+        pvc:
+          $ref: '#/components/schemas/TestDataRefPVC'
+      minProperties: 1
+      maxProperties: 1
+      oneOf:
+        - required:
+            - s3
+        - required:
+            - pvc
     EvaluationBenchmarkConfig:
       type: object
       description: |
@@ -2466,9 +2490,10 @@ components:
             test_data_ref:
               $ref: '#/components/schemas/TestDataRef'
               description: |
-                Optional external test data (e.g. **S3**). For **Kubernetes Job** runs, may
-                trigger a pre-run init container that downloads files to **`/test_data`** for
-                the adapter. Omit if the benchmark does not need mounted files.
+                Optional external test data mounted at **`/test_data`** for **Kubernetes Job** runs.
+                Set **`s3`** to download objects via a pre-run init container, or **`pvc`** to mount
+                an existing PersistentVolumeClaim read-only with no init container. Omit if the
+                benchmark does not need mounted files.
     PassCriteriaWithDefault:
       type: object
       description: Pass/fail threshold criteria.
@@ -3098,9 +3123,10 @@ components:
             test_data_ref:
               $ref: '#/components/schemas/TestDataRef'
               description: |
-                Optional external test data (e.g. **S3**). For **Kubernetes Job** runs, may
-                trigger a pre-run init container that downloads files to **`/test_data`** for
-                the adapter. Omit if the benchmark does not need mounted files.
+                Optional external test data mounted at **`/test_data`** for **Kubernetes Job** runs.
+                Set **`s3`** to download objects via a pre-run init container, or **`pvc`** to mount
+                an existing PersistentVolumeClaim read-only with no init container. Omit if the
+                benchmark does not need mounted files.
     CollectionConfig:
       type: object
       description: Request to create or update a collection.
@@ -3158,6 +3184,12 @@ components:
                 $ref: '#/components/schemas/CollectionResource'
               description: Collection resources
   examples:
+    NotFoundError:
+      summary: Not found error with status code 404
+      value:
+        message: The resource was not found.
+        message_code: not_found
+        trace: b12692e1-8582-4628-88ca-7a13fefb73e2
     BadRequestError:
       summary: Bad request error with status code 400
       value:
@@ -3176,12 +3208,6 @@ components:
         message: The user does not have access to the endpoint.
         message_code: endpoint_access_forbidden
         trace: b12692e1-8582-4628-88ca-7a13fefb73e2
-    NotFoundError:
-      summary: Not found error with status code 404
-      value:
-        message: The resource was not found.
-        message_code: not_found
-        trace: b12692e1-8582-4628-88ca-7a13fefb73e2
     ConflictError:
       summary: Conflict error with status code 409
       value:
@@ -3189,6 +3215,15 @@ components:
         message_code: conflict
         trace: b12692e1-8582-4628-88ca-7a13fefb73e2
   responses:
+    NotFound:
+      description: Not Found
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/Error'
+          examples:
+            NotFoundError:
+              $ref: '#/components/examples/NotFoundError'
     BadRequest:
       description: Bad Request
       content:
@@ -3216,15 +3251,6 @@ components:
           examples:
             AuthorizationError:
               $ref: '#/components/examples/AuthorizationError'
-    NotFound:
-      description: Not Found
-      content:
-        application/json:
-          schema:
-            $ref: '#/components/schemas/Error'
-          examples:
-            NotFoundError:
-              $ref: '#/components/examples/NotFoundError'
     Conflict:
       description: Conflict
       content:

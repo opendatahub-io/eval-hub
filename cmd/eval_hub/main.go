@@ -25,7 +25,7 @@ import (
 
 var (
 	// Version can be set during the compilation
-	Version string = "0.4.4"
+	Version string = "0.4.5"
 	// Build is set during the compilation
 	Build string
 	// BuildDate is set during the compilation
@@ -78,7 +78,10 @@ func main() {
 	serviceConfig.Service.LocalMode = args.LocalMode
 
 	// set up the validator
-	validate := validation.NewValidator()
+	validate, err := validation.NewValidator()
+	if err != nil {
+		startUpFailed(serviceConfig, err, "Failed to create validator", logger)
+	}
 
 	// set up the provider configs
 	providerConfigs, err := config.LoadProviderConfigs(logger, validate, args.ConfigDir)

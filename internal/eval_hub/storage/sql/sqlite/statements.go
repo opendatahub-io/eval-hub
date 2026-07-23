@@ -102,6 +102,11 @@ func (s *sqliteStatementsFactory) CreateEvaluationGetEntityStatement(query *shar
 	return fmt.Sprintf(`SELECT id, created_at, updated_at, tenant_id, owner, status, experiment_id, entity FROM evaluations WHERE %s;`, where), whereArgs, []any{&query.Resource.ID, &query.Resource.CreatedAt, &query.Resource.UpdatedAt, &query.Resource.Tenant, &query.Resource.Owner, &query.Status, &query.MLFlowExperimentID, &query.EntityJSON}
 }
 
+func (s *sqliteStatementsFactory) CreateEvaluationGetEntityForUpdateStatement(query *shared.EntityQuery) (string, []any, []any) {
+	// SQLite serializes writers via SetMaxOpenConns(1); FOR UPDATE is unsupported.
+	return s.CreateEvaluationGetEntityStatement(query)
+}
+
 // entityFilterCondition returns the SQL condition and args for a filter key.
 func (s *sqliteStatementsFactory) CreateEntityFilterCondition(key string, value any, index int, tableName string) (condition string, args []any) {
 	switch key {
@@ -213,7 +218,7 @@ func (s *sqliteStatementsFactory) getWhereStatement(tenant api.Tenant, id string
 		if sb.Len() > 0 {
 			sb.WriteString(" AND ")
 		}
-		sb.WriteString(fmt.Sprintf("(tenant_id = ? OR owner = '%s')", abstractions.OwnerSystem))
+		fmt.Fprintf(&sb, "(tenant_id = ? OR owner = '%s')", abstractions.OwnerSystem)
 		args = append(args, tenant.String())
 	}
 	return sb.String(), args

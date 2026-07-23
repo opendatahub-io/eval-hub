@@ -20,7 +20,6 @@ import (
 	"github.com/eval-hub/eval-hub/internal/eval_hub/runtimes/shared"
 	"github.com/eval-hub/eval-hub/internal/eval_hub/server"
 	"github.com/eval-hub/eval-hub/internal/eval_hub/storage"
-	"github.com/eval-hub/eval-hub/internal/eval_hub/validation"
 	"github.com/eval-hub/eval-hub/internal/logging"
 	"github.com/eval-hub/eval-hub/internal/testhelpers"
 	"github.com/eval-hub/eval-hub/pkg/api"
@@ -100,7 +99,7 @@ func (r *stubRuntime) GetEvaluationLogs(
 
 func TestNewServer(t *testing.T) {
 	t.Run("creates server with default port", func(t *testing.T) {
-		os.Unsetenv("PORT")
+		_ = os.Unsetenv("PORT")
 		srv, err := createServer(t, 8080)
 		if err != nil {
 			t.Fatalf("NewServer() returned error: %v", err)
@@ -239,6 +238,55 @@ func TestServerSetupRoutes(t *testing.T) {
 	}
 }
 
+func TestHealthEndpoint(t *testing.T) {
+	srv, err := createServer(t, 8080)
+	if err != nil {
+		t.Fatalf("createServer: %v", err)
+	}
+	handler, err := srv.SetupRoutes()
+	if err != nil {
+		t.Fatalf("SetupRoutes: %v", err)
+	}
+
+	t.Run("GET returns healthy status without build metadata", func(t *testing.T) {
+		req := httptest.NewRequest(http.MethodGet, "/api/v1/health", nil)
+		w := httptest.NewRecorder()
+		handler.ServeHTTP(w, req)
+
+		if w.Code != http.StatusOK {
+			t.Fatalf("got status %d body %s", w.Code, w.Body.String())
+		}
+		if ct := w.Header().Get("Content-Type"); ct != "application/json" {
+			t.Errorf("Content-Type: got %q want application/json", ct)
+		}
+
+		var body map[string]any
+		if err := json.Unmarshal(w.Body.Bytes(), &body); err != nil {
+			t.Fatalf("decode body: %v", err)
+		}
+		if body["status"] != "healthy" {
+			t.Errorf("status: got %v want healthy", body["status"])
+		}
+		if _, ok := body["timestamp"]; !ok {
+			t.Error("response missing timestamp")
+		}
+		for _, field := range []string{"build", "build_date", "git_hash", "version"} {
+			if _, ok := body[field]; ok {
+				t.Errorf("/api/v1/health must not expose %q", field)
+			}
+		}
+	})
+
+	t.Run("POST returns 405", func(t *testing.T) {
+		req := httptest.NewRequest(http.MethodPost, "/api/v1/health", strings.NewReader(""))
+		w := httptest.NewRecorder()
+		handler.ServeHTTP(w, req)
+		if w.Code != http.StatusMethodNotAllowed {
+			t.Errorf("got status %d want 405", w.Code)
+		}
+	})
+}
+
 func TestServerShutdown(t *testing.T) {
 	t.Run("shutdown works with running server", func(t *testing.T) {
 		srv, err := createServer(t, 0) // Use random port for testing
@@ -287,7 +335,7 @@ func createServerWithLocalMode(t *testing.T, port int, localMode bool) (*server.
 	if err != nil {
 		return nil, err
 	}
-	validate := validation.NewValidator()
+	validate := testhelpers.NewValidator(t)
 	serviceConfig, err := config.LoadConfig(logger, testhelpers.Version(t), "local", time.Now().Format(time.RFC3339), "")
 	if err != nil {
 		return nil, fmt.Errorf("failed to load service config: %w", err)

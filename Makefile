@@ -1,4 +1,4 @@
-.PHONY: help autoupdate-precommit pre-commit clean build build-coverage build-service build-init build-sidecar build-mcp build-all-platforms cross-compile-mcp build-all-platforms-mcp start-service stop-service start-sidecar stop-sidecar lint validate-configs test test-fvt-server test-all test-coverage test-fvt-coverage test-fvt-server-coverage test-all-coverage install-deps update-deps get-deps fmt vet update-deps generate-public-docs verify-api-docs generate-ignore-file documentation check-unused-components fvt-report docker-image-local docker-mcp-version test-mcp-build-all test-mcp-binary-info test-mcp-binary-naming test-mcp-version test-mcp-no-runtime-deps test-mcp-container-build test-mcp-container-http test-mcp-checksums test-mcp-formula-syntax test-mcp-native-smoke test-mcp-brew-install test-mcp-brew-test test-mcp-brew-uninstall test-mcp-cross-platform test-mcp-fvt test-mcp-e2e test-mcp test-mcp-vscode test-help clean-mcp-wheels build-mcp-wheel build-all-mcp-wheels
+.PHONY: help autoupdate-precommit pre-commit clean build build-coverage build-service build-init build-sidecar build-mcp build-all-platforms cross-compile-mcp build-all-platforms-mcp start-service stop-service start-sidecar stop-sidecar lint validate-configs test test-fuzz test-fvt-server test-all test-coverage test-fvt-coverage test-fvt-server-coverage test-all-coverage install-deps update-deps get-deps fmt vet generate-public-docs verify-api-docs generate-ignore-file documentation check-unused-components docker-image-local docker-mcp-version test-mcp-build-all test-mcp-binary-info test-mcp-binary-naming test-mcp-version test-mcp-no-runtime-deps test-mcp-container-build test-mcp-container-http test-mcp-checksums test-mcp-formula-syntax test-mcp-native-smoke test-mcp-brew-install test-mcp-brew-test test-mcp-brew-uninstall test-mcp-cross-platform test-mcp-fvt test-mcp-e2e test-mcp test-mcp-vscode test-help clean-mcp-wheels build-mcp-wheel build-all-mcp-wheels
 
 GOPATH := $(shell go env GOPATH)
 GOBIN := $(shell go env GOPATH)/bin
@@ -160,11 +160,36 @@ vet: ## Run go vet
 	@go vet ./...
 	@echo "Vet complete"
 
-test: ## Run unit tests
+# Iterations (Nx) or duration for mutational fuzzing during make test / make test-fuzz.
+# Prefer Nx so CI finishes deterministically; seed corpora also run under plain go test.
+FUZZTIME ?= 10000x
+# Packages that define Fuzz* tests. Keep in sync when adding new fuzz targets.
+FUZZ_PACKAGES ?= ./pkg/ociclient ./pkg/mlflowclient ./internal/eval_hub/handlers ./internal/eval_hub/storage/sql/shared ./internal/eval_runtime_sidecar/handlers
+
+test: ## Run unit tests (including fuzz seed corpora and a short fuzzing pass)
 	@echo "Running unit tests..."
 	@bash -c 'set -o pipefail; go test -v ./internal/... ./cmd/... ./pkg/... | ${PWD}/scripts/grcat ${PWD}/.conf.go-test'
+	@$(MAKE) test-fuzz
 	@echo "Unit tests complete"
 
+test-fuzz: ## Run mutational fuzzing briefly for each Fuzz* test
+	@echo "Running fuzz tests (fuzztime=$(FUZZTIME))..."
+	@failed=0; \
+	for pkg in $(FUZZ_PACKAGES); do \
+		list_output=$$(go test "$$pkg" -list='^Fuzz' 2>&1); \
+		if [ $$? -ne 0 ]; then \
+			echo "$$list_output"; \
+			echo "failed to list fuzz tests in $$pkg"; \
+			failed=1; \
+			continue; \
+		fi; \
+		for fuzz in $$(echo "$$list_output" | grep '^Fuzz'); do \
+			echo "Fuzzing $$pkg $$fuzz..."; \
+			go test "$$pkg" -run='^$$' -fuzz="^$${fuzz}$$" -fuzztime=$(FUZZTIME) || failed=1; \
+		done; \
+	done; \
+	if [ $$failed -ne 0 ]; then exit 1; fi
+	@echo "Fuzz tests complete"
 test-coverage: $(BIN_DIR) ## Run unit tests with coverage
 	@echo "Running unit tests with coverage..."
 	@go test -v -race -coverprofile=$(BIN_DIR)/coverage.out -covermode=atomic ./internal/... ./cmd/... ./pkg/...
@@ -214,16 +239,6 @@ test-fvt-server-coverage: start-service-coverage ## Run FVT tests using godog ag
 	@echo "Coverage report generated: $(BIN_DIR)/coverage-fvt.html"
 
 test-all-coverage: test-coverage test-fvt-server-coverage ## Run all tests (unit + FVT) with coverage
-
-fvt-report: ## Generate HTML report for FVT tests
-	@echo "Generating FVT JSON report..."
-	@GODOG_FORMAT=cucumber GODOG_OUTPUT="$${PWD}/cucumber-fvt.json" go test -v -race ./tests/features/...; status=$$?; \
-	echo "Converting JSON report to HTML..."; \
-	node -e "require('cucumber-html-reporter').generate({theme:'bootstrap',jsonFile:'cucumber-fvt.json',output:'cucumber-report.html'})" 2>&1; \
-	report_status=$$?; \
-	if [ $$report_status -ne 0 ]; then echo "Report generation failed (see output above)."; fi; \
-	if [ -f cucumber-report.html ]; then echo "Report generated: cucumber-report.html"; else echo "Report not generated: cucumber-report.html"; fi; \
-	exit $$status
 
 ${GOBIN}/go-cover-treemap:
 	go install github.com/nikolaydubina/go-cover-treemap@latest

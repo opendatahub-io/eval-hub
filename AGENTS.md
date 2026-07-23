@@ -62,6 +62,17 @@ If a `.pre-commit-config.yaml` file exists, run `pre-commit install && pre-commi
 
 **Do not modify the Go version in `go.mod`.** The version specified there is the source of truth. If your local Go toolchain is older, use `GOTOOLCHAIN=auto` to let Go automatically download the required version. Never downgrade `go.mod` to match a locally installed toolchain.
 
+### Version Bumps
+
+When updating the project version, edit these four source files:
+
+1. **`VERSION`** — single-line version string
+2. **`cmd/eval_hub/main.go`** — `Version` constant
+3. **`Containerfile`** — both `BUILD_NUMBER` ARG defaults (builder and runtime stages)
+4. **`docs/src/openapi.yaml`** — `info.version`
+
+Then run `make documentation` to regenerate the bundled docs. Do **not** hand-edit the generated files under `docs/` (`openapi.yaml`, `openapi.json`, `openapi-internal.yaml`, `openapi-internal.json`, `index*.html`).
+
 ### Dependencies
 
 ```bash
@@ -103,11 +114,7 @@ Made-with: Cursor
 Generated with: Claude Code
 ```
 
-Always end the commit message body with this sign-off trailer (after any AI-assistance trailers) for the current user, for example:
-
-```text
-Signed-off-by: Julian Payne <julpayne@redhat.com>
-```
+For DCO sign-off, use `git commit -s` (or `git commit --signoff`). Do **not** include a `Signed-off-by` line in the commit message body; `-s` appends it from the author's configured `user.name` and `user.email`.
 
 ## Architecture Overview
 
@@ -212,6 +219,8 @@ Cluster traffic reaches eval-hub through **kube-rbac-proxy**, which handles Bear
 
 - **`X-Tenant`** — tenant namespace; required on evaluation API routes in cluster mode only
 - **`X-User`** — authenticated caller identity; required in cluster mode; used for resource ownership
+
+**`GET /api/v1/health`** is unauthenticated (no identity headers) and returns `status` and `timestamp` only.
 
 eval-hub does not perform in-process TokenReview/SAR; it trusts these headers from the proxy and applies tenant/user scoping in storage and handlers.
 

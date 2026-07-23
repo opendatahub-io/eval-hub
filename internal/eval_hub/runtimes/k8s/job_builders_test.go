@@ -11,6 +11,47 @@ import (
 	corev1 "k8s.io/api/core/v1"
 )
 
+func TestSidecarPortFromInt(t *testing.T) {
+	t.Parallel()
+
+	got, err := sidecarPortFromInt(8080)
+	if err != nil {
+		t.Fatalf("sidecarPortFromInt(8080) = %v, want nil error", err)
+	}
+	if got != 8080 {
+		t.Fatalf("sidecarPortFromInt(8080) = %d, want 8080", got)
+	}
+
+	for _, port := range []int{0, -1, 65536} {
+		if _, err := sidecarPortFromInt(port); err == nil {
+			t.Fatalf("sidecarPortFromInt(%d) = nil error, want out of range error", port)
+		}
+	}
+}
+
+func TestBuildJobRejectsInvalidSidecarPort(t *testing.T) {
+	cfg := &jobConfig{
+		jobID:          "job-bad-port",
+		resourceGUID:   "guid-bp",
+		benchmarkIndex: 0,
+		namespace:      "default",
+		providerID:     "provider-1",
+		benchmarkID:    "bench-1",
+		adapterImage:   "adapter:latest",
+		sidecarConfig: &config.SidecarConfig{
+			Port: 70000,
+		},
+	}
+
+	_, err := buildJob(cfg)
+	if err == nil {
+		t.Fatal("buildJob() = nil, want sidecar port error")
+	}
+	if !strings.Contains(err.Error(), "sidecar port") {
+		t.Fatalf("buildJob() error = %v, want sidecar port error", err)
+	}
+}
+
 func findContainer(containers []corev1.Container, name string) *corev1.Container {
 	for i := range containers {
 		if containers[i].Name == name {
@@ -348,11 +389,11 @@ func TestBuildJobWithOCICredentials(t *testing.T) {
 	for _, v := range job.Spec.Template.Spec.Volumes {
 		if v.Name == ociCredentialsVolumeName {
 			foundVolume = true
-			if v.VolumeSource.Secret == nil {
+			if v.Secret == nil {
 				t.Fatalf("expected secret volume source for %s", ociCredentialsVolumeName)
 			}
-			if v.VolumeSource.Secret.SecretName != "my-pull-secret" {
-				t.Fatalf("expected secret name %q, got %q", "my-pull-secret", v.VolumeSource.Secret.SecretName)
+			if v.Secret.SecretName != "my-pull-secret" {
+				t.Fatalf("expected secret name %q, got %q", "my-pull-secret", v.Secret.SecretName)
 			}
 		}
 	}
@@ -574,7 +615,7 @@ func TestBuildJobWithS3TestData(t *testing.T) {
 		}
 		if v.Name == testDataSecretVolumeName {
 			foundSecretVolume = true
-			if v.VolumeSource.Secret == nil || v.VolumeSource.Secret.SecretName != "s3-secret" {
+			if v.Secret == nil || v.Secret.SecretName != "s3-secret" {
 				t.Fatalf("expected secret volume %q with secret %q", testDataSecretVolumeName, "s3-secret")
 			}
 		}
@@ -660,13 +701,13 @@ func TestBuildJobWithModelAuthSecret(t *testing.T) {
 	if foundVolume == nil {
 		t.Fatalf("expected projected volume %s on adapter", modelInternalAuthVolumeName)
 	}
-	if foundVolume.VolumeSource.Projected == nil {
+	if foundVolume.Projected == nil {
 		t.Fatalf("expected projected volume source for %s", modelInternalAuthVolumeName)
 	}
-	if len(foundVolume.VolumeSource.Projected.Sources) != 1 {
-		t.Fatalf("expected exactly 1 projected source (passthrough only), got %d", len(foundVolume.VolumeSource.Projected.Sources))
+	if len(foundVolume.Projected.Sources) != 1 {
+		t.Fatalf("expected exactly 1 projected source (passthrough only), got %d", len(foundVolume.Projected.Sources))
 	}
-	src := foundVolume.VolumeSource.Projected.Sources[0]
+	src := foundVolume.Projected.Sources[0]
 	if src.Secret == nil || src.Secret.Name != "model-auth-secret" {
 		t.Fatalf("expected projected source from real secret %q, got %+v", "model-auth-secret", src)
 	}
@@ -920,11 +961,11 @@ func TestBuildJobSATokenSidecarOnly(t *testing.T) {
 	for _, v := range job.Spec.Template.Spec.Volumes {
 		if v.Name == evalhubSATokenVolumeName {
 			foundPodVolume = true
-			if v.VolumeSource.Projected == nil {
+			if v.Projected == nil {
 				t.Fatal("evalhub-sa-token volume must be a projected volume")
 			}
 			hasSAToken := false
-			for _, src := range v.VolumeSource.Projected.Sources {
+			for _, src := range v.Projected.Sources {
 				if src.ServiceAccountToken != nil {
 					hasSAToken = true
 				}
@@ -976,11 +1017,11 @@ func TestBuildJobSATokenSidecarOnly(t *testing.T) {
 	for _, v := range job.Spec.Template.Spec.Volumes {
 		if v.Name == adapterNamespaceVolumeName {
 			foundNamespaceVolume = true
-			if v.VolumeSource.Projected == nil {
+			if v.Projected == nil {
 				t.Fatal("pod-namespace volume must be a projected volume")
 			}
 			hasDownwardAPI := false
-			for _, src := range v.VolumeSource.Projected.Sources {
+			for _, src := range v.Projected.Sources {
 				if src.DownwardAPI != nil {
 					hasDownwardAPI = true
 				}

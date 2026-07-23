@@ -9,8 +9,8 @@ import (
 	"time"
 
 	"github.com/eval-hub/eval-hub/internal/eval_hub/abstractions"
-	"github.com/eval-hub/eval-hub/internal/eval_hub/validation"
 	"github.com/eval-hub/eval-hub/internal/logging"
+	"github.com/eval-hub/eval-hub/internal/testhelpers"
 	"github.com/eval-hub/eval-hub/pkg/api"
 	"github.com/fsnotify/fsnotify"
 )
@@ -50,15 +50,19 @@ func TestWatcher_ReloadsOnFileChange(t *testing.T) {
 	dir := t.TempDir()
 	provDir := filepath.Join(dir, "providers")
 	collDir := filepath.Join(dir, "collections")
-	os.MkdirAll(provDir, 0755)
-	os.MkdirAll(collDir, 0755)
+	if err := os.MkdirAll(provDir, 0755); err != nil {
+		t.Fatalf("MkdirAll providers: %v", err)
+	}
+	if err := os.MkdirAll(collDir, 0755); err != nil {
+		t.Fatalf("MkdirAll collections: %v", err)
+	}
 
 	// Write initial provider config
 	writeTestProvider(t, provDir, "alpha", "Alpha Provider")
 
 	logger := logging.FallbackLogger()
 	store := &mockStorage{}
-	validate := validation.NewValidator()
+	validate := testhelpers.NewValidator(t)
 
 	w := NewWatcher(logger, validate, store, dir)
 	w.debounce = 100 * time.Millisecond // speed up tests
@@ -80,10 +84,7 @@ func TestWatcher_ReloadsOnFileChange(t *testing.T) {
 
 	// Wait for the debounced reload to fire
 	deadline := time.After(3 * time.Second)
-	for {
-		if store.getLoadCalls() > 0 {
-			break
-		}
+	for store.getLoadCalls() == 0 {
 		select {
 		case <-deadline:
 			t.Fatal("Timed out waiting for reload after file change")
@@ -105,12 +106,16 @@ func TestWatcher_DebouncesMutipleEvents(t *testing.T) {
 	dir := t.TempDir()
 	provDir := filepath.Join(dir, "providers")
 	collDir := filepath.Join(dir, "collections")
-	os.MkdirAll(provDir, 0755)
-	os.MkdirAll(collDir, 0755)
+	if err := os.MkdirAll(provDir, 0755); err != nil {
+		t.Fatalf("MkdirAll providers: %v", err)
+	}
+	if err := os.MkdirAll(collDir, 0755); err != nil {
+		t.Fatalf("MkdirAll collections: %v", err)
+	}
 
 	logger := logging.FallbackLogger()
 	store := &mockStorage{}
-	validate := validation.NewValidator()
+	validate := testhelpers.NewValidator(t)
 
 	w := NewWatcher(logger, validate, store, dir)
 	w.debounce = 200 * time.Millisecond
@@ -142,11 +147,13 @@ func TestWatcher_DebouncesMutipleEvents(t *testing.T) {
 func TestWatcher_StopsOnContextCancel(t *testing.T) {
 	dir := t.TempDir()
 	provDir := filepath.Join(dir, "providers")
-	os.MkdirAll(provDir, 0755)
+	if err := os.MkdirAll(provDir, 0755); err != nil {
+		t.Fatalf("MkdirAll providers: %v", err)
+	}
 
 	logger := logging.FallbackLogger()
 	store := &mockStorage{}
-	validate := validation.NewValidator()
+	validate := testhelpers.NewValidator(t)
 
 	w := NewWatcher(logger, validate, store, dir)
 

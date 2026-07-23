@@ -47,7 +47,7 @@ func (c *Config) IsPrometheusEnabled() bool {
 
 // RequiresIdentityHeaders reports whether evaluation API routes require X-Tenant and X-User.
 // Cluster mode (not --local): kube-rbac-proxy sets these headers. Local mode does not require
-// or enforce them.
+// or enforce them. GET /api/v1/health never requires identity headers (probe-friendly).
 func (c *Config) RequiresIdentityHeaders() bool {
 	return (c != nil) && (c.Service != nil) && !c.Service.LocalMode
 }
