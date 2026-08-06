@@ -21,8 +21,9 @@ var (
 		"resource_id": "required,min=1,max=36",
 	}
 
-	// RFC 1123 DNS label: lowercase alphanumeric, internal hyphens, no leading/trailing hyphen.
-	rfc1123DNSLabelRegex = regexp.MustCompile(`^[a-z0-9]([-a-z0-9]*[a-z0-9])?$`)
+	// RFC 1123 DNS label: lowercase alphanumeric, internal hyphens, no leading/trailing
+	// hyphen, max 63 characters (1 + up to 61 middle + 1, or a single alphanumeric).
+	rfc1123DNSLabelRegex = regexp.MustCompile(`^[a-z0-9]([-a-z0-9]{0,61}[a-z0-9])?$`)
 )
 
 func NewValidator() (*validator.Validate, error) {
@@ -56,10 +57,11 @@ func registerCustomValidators(instance *validator.Validate) error {
 	if err := instance.RegisterValidation("rfc1123_dns_label", validateRFC1123DNSLabel); err != nil {
 		return fmt.Errorf("register validator failed for rfc1123_dns_label: %w", err)
 	}
-	// Benchmarks min=1 only when Collection is not set (required_without handles presence; this enforces length)
-	instance.RegisterStructValidation(evaluationJobConfigBenchmarksMin, api.EvaluationJobConfig{})
+	instance.RegisterStructValidation(evaluationJobConfig, api.EvaluationJobConfig{})
 	// Exactly one of s3 or pvc must be set in TestDataRef.
 	instance.RegisterStructValidation(validateTestDataRefMutualExclusion, api.TestDataRef{})
+	// hardware_profile_name is mutually exclusive with inline queue/cpu/memory/gpu.
+	instance.RegisterStructValidation(validateBenchmarkHardwareConfigExclusive, api.BenchmarkHardwareConfig{})
 	return nil
 }
 
@@ -116,6 +118,32 @@ func validateTestDataRefMutualExclusion(sl validator.StructLevel) {
 	}
 }
 
+// validateBenchmarkHardwareConfigExclusive rejects combining a hardware profile name
+// with inline queue/cpu/memory/gpu overrides.
+func validateBenchmarkHardwareConfigExclusive(sl validator.StructLevel) {
+	hw, ok := sl.Current().Interface().(api.BenchmarkHardwareConfig)
+	if !ok {
+		return
+	}
+	if strings.TrimSpace(hw.HardwareProfileName) == "" {
+		return
+	}
+	if hw.HasDirectFields() {
+		sl.ReportError(
+			hw.HardwareProfileName,
+			"hardware_profile_name",
+			"HardwareProfileName",
+			"hardware_config_exclusive",
+			"hardware_profile_name cannot be combined with queue, cpu, memory, or gpu",
+		)
+	}
+}
+
+func evaluationJobConfig(sl validator.StructLevel) {
+	evaluationJobConfigBenchmarksMin(sl)
+	evaluationJobConfigModelRequired(sl)
+}
+
 // evaluationJobConfigBenchmarksMin ensures Benchmarks has at least one element when Collection is not present
 // and no benchmarks are provided when Collection is set.
 func evaluationJobConfigBenchmarksMin(sl validator.StructLevel) {
@@ -128,6 +156,15 @@ func evaluationJobConfigBenchmarksMin(sl validator.StructLevel) {
 		}
 		if len(cfg.Benchmarks) < 1 {
 			sl.ReportError(cfg.Benchmarks, "benchmarks", "benchmarks", "minimum one benchmark", "1")
+		}
+	}
+}
+
+// evaluationJobConfigModelRequired ensures Model is set.
+func evaluationJobConfigModelRequired(sl validator.StructLevel) {
+	if cfg, ok := sl.Current().Interface().(api.EvaluationJobConfig); ok {
+		if cfg.Model == nil {
+			sl.ReportError(cfg.Model, "model", "model", "model required", "model")
 		}
 	}
 }

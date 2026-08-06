@@ -77,6 +77,10 @@ When updating the project version, edit these four source files:
 
 Then run `make documentation` to regenerate the bundled docs. Do **not** hand-edit the generated files under `docs/` (`openapi.yaml`, `openapi.json`, `openapi-internal.yaml`, `openapi-internal.json`, `index*.html`).
 
+For each GitHub release, publish curated release notes (human-readable summary and
+upgrade impact — not raw `git log`). Use the `release-notes` skill at
+`.claude/skills/release-notes/SKILL.md` (see also `CLAUDE.md`).
+
 ### Dependencies
 
 ```bash
@@ -186,9 +190,9 @@ make build-mcp
 go test -v ./cmd/evalhub_mcp/ ./internal/evalhub_mcp/...
 ```
 
-**CLI flags:** `--transport stdio|http|http-sse` (`http` = Streamable HTTP, default for remote; `http-sse` = legacy HTTP+SSE only), `--host`, `--port`, `--config`, `--insecure`, `--version`
+**CLI flags:** `--transport stdio|http|http-sse` (`http` = Streamable HTTP, default for remote; `http-sse` = legacy HTTP+SSE only), `--host`, `--port`, `--config`, `--version`
 
-**Configuration precedence:** CLI flags > env vars (`EVALHUB_BASE_URL`, `EVALHUB_TOKEN`, `EVALHUB_TENANT`, `EVALHUB_INSECURE`, `EVALHUB_LIST_PAGE_LIMIT`) > YAML config (`~/.evalhub/config.yaml`)
+**Configuration precedence:** CLI flags > env vars (`EVALHUB_BASE_URL`, `EVALHUB_TOKEN`, `EVALHUB_TENANT`, `EVALHUB_CA_CERT_PATH`, `EVALHUB_LIST_PAGE_LIMIT`) > YAML config (`~/.evalhub/config.yaml`)
 
 **Architecture:**
 

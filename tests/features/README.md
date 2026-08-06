@@ -85,7 +85,7 @@ When running in local server mode, the tests will:
 | `@gpu` | GPU resource management scenarios in `gpu_resources.feature`; requires a cluster with GPU test setup (see `GPU_TESTING.md`) |
 | `@kueue` | Scenarios that require Kueue queue integration (`evaluation_jobs.feature`, `gpu_resources.feature`) |
 | `@negative` | Used to mark this as a negative test |
-| `@mlflow` | Tests that only work when running with a configured mlflow service |
+| `@mlflow` | Tests that only work when running with a configured mlflow service (`MLFLOW_TRACKING_URI`); includes API assertions and FVT steps that call the MLflow API. |
 | `@slow` | Tests that take more than the normal timeout (currently 1 hour) |
 | `@ignore` | Can be used to ignore a test |
 | `@connected` | Used by the Jenkins jobs and set when running on a connected cluster |
@@ -93,7 +93,7 @@ When running in local server mode, the tests will:
 | `@hardware_profile` | Hardware profile API and Kubernetes Job adapter resource tests in `evaluation_jobs.feature`; require pipeline env vars (see below). |
 | `@metrics` | Prometheus `/metrics` scrape tests in `metrics.feature`; in cluster/remote mode require `METRICS_URL` (see below). |
 | `@logs` | Evaluation job log collection scenarios in `evaluation_local_jobs.feature` and `evaluation_jobs.feature` |
-| `@pvc` | Evaluation jobs that mount offline test data from a PersistentVolumeClaim (`evaluation_jobs.feature`). Defaults: claim `evalhub-offline-test-data`, `sub_path` `staging`. Override with `TEST_DATA_PVC_CLAIM_NAME` / `TEST_DATA_PVC_SUB_PATH`. Missing-PVC negative case uses `TEST_DATA_PVC_MISSING_CLAIM_NAME` (default `evalhub-offline-test-data-does-not-exist`) and waits up to 2m30s for operator failure sync. Opt in with `GODOG_TAGS="@pvc"`. |
+| `@pvc` | Evaluation jobs that mount offline test data from a PersistentVolumeClaim (`evaluation_jobs.feature`). Defaults: claim `evalhub-offline-test-data`, `sub_path` `staging`. Override with `TEST_DATA_PVC_CLAIM_NAME` / `TEST_DATA_PVC_SUB_PATH`. Missing-PVC negative case uses `TEST_DATA_PVC_MISSING_CLAIM_NAME` (default `evalhub-offline-test-data-does-not-exist`) and waits up to 5m for operator failure sync. Opt in with `GODOG_TAGS="@pvc"`. |
 | `@gha-wheel-sanity` | Local-runtime wheel validation scenario run by `scripts/gha_wheel_sanity_test.sh` during GHA wheel checks |
 
 ### Metrics tests (`@metrics`)
@@ -117,12 +117,12 @@ If `SERVER_URL` is set but `METRICS_URL` is not, `@metrics` scenarios are **skip
 
 ### Hardware profile tests (`@hardware_profile`)
 
-These scenarios validate that evaluation job APIs accept and persist `hardware_config.hardware_profile_ref`, and that the created Kubernetes Job adapter container receives CPU/memory from the referenced profile. They do **not** create `HardwareProfile` CRs or fetch profile specs in the test binary — the pipeline supplies the profile name and expected adapter resources via environment variables.
+These scenarios validate that evaluation job APIs accept and persist `hardware_config.hardware_profile_name`, and that the created Kubernetes Job adapter container receives CPU/memory from the referenced profile. They do **not** create `HardwareProfile` CRs or fetch profile specs in the test binary — the pipeline supplies the profile name and expected adapter resources via environment variables.
 
 **Pipeline / cluster prerequisites** (outside the test binary):
 
 1. Confirm `hardwareprofiles.infrastructure.opendatahub.io` CRD is installed (e.g. `oc get crd hardwareprofiles.infrastructure.opendatahub.io`).
-2. Ensure a `HardwareProfile` exists in the tenant namespace (`X_TENANT`).
+2. Ensure the EvalHub deployment sets `EVALHUB_HARDWARE_PROFILES_NAMESPACE` to the platform namespace that holds HardwareProfiles (typically `opendatahub` or `redhat-ods-applications`), and that a `HardwareProfile` exists there.
 3. Export its name and expected adapter resources (must match the profile's `defaultCount` / `maxCount` for CPU and memory):
 
 ```bash

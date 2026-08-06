@@ -693,14 +693,16 @@ func TestEvaluateEvaluationJobJsonnetWithQueue(t *testing.T) {
               "num_examples": 10,
               "num_fewshot": 3,
               "tokenizer": "google/flan-t5-small"
+            },
+            "hardware_config": {
+              "queue": {
+                "kind": "kueue",
+                "name": "{{env:QUEUE_NAME|user-queue}}"
+              }
             }
           }
         ],
         "name": "test-evaluation-job",
-        "queue": {
-          "kind": "kueue",
-          "name": "{{env:QUEUE_NAME|user-queue}}"
-        },
         "tags": [
           "environment"
         ]
@@ -750,9 +752,6 @@ func TestEvaluateEvaluationJobJsonnetWithQueue(t *testing.T) {
 		}
 		if !reflect.DeepEqual(outJob.Experiment, queueJob.Experiment) {
 			t.Errorf("experiment = %+v, want %+v", outJob.Experiment, queueJob.Experiment)
-		}
-		if !reflect.DeepEqual(outJob.Queue, queueJob.Queue) {
-			t.Errorf("queue = %+v, want %+v", outJob.Queue, queueJob.Queue)
 		}
 		t.Errorf("got = %+v,\n\nwant %+v", outJob, queueJob)
 	}
@@ -875,6 +874,9 @@ func TestEvaluateOobCollectionJobJsonnetDisconnectedAware(t *testing.T) {
 		minBenchmarks  int
 	}{
 		{"evaluation_job_oob_toxicity.jsonnet", "toxicity-and-ethical-principles", 3},
+		{"mcp_submit_cluster_collection.jsonnet", "toxicity-and-ethical-principles", 3},
+		{"evalcard_collection.jsonnet", "toxicity-and-ethical-principles", 3},
+		{"evalcard_collection_id.jsonnet", "toxicity-and-ethical-principles", 3},
 	}
 	for _, disconnected := range []bool{false, true} {
 		mode := "connected"
@@ -924,10 +926,16 @@ type jsonnetTestDataRef struct {
 }
 
 type jsonnetBenchmarkPayload struct {
-	ID          string              `json:"id"`
-	ProviderID  string              `json:"provider_id"`
-	Parameters  map[string]any      `json:"parameters"`
-	TestDataRef *jsonnetTestDataRef `json:"test_data_ref"`
+	ID             string              `json:"id"`
+	ProviderID     string              `json:"provider_id"`
+	Parameters     map[string]any      `json:"parameters"`
+	TestDataRef    *jsonnetTestDataRef `json:"test_data_ref"`
+	HardwareConfig *struct {
+		Queue *struct {
+			Kind string `json:"kind"`
+			Name string `json:"name"`
+		} `json:"queue"`
+	} `json:"hardware_config"`
 }
 
 type jsonnetPayloadDocument struct {
@@ -936,10 +944,6 @@ type jsonnetPayloadDocument struct {
 	PassCriteria *struct {
 		Threshold float64 `json:"threshold"`
 	} `json:"pass_criteria"`
-	Queue *struct {
-		Kind string `json:"kind"`
-		Name string `json:"name"`
-	} `json:"queue"`
 	Tags []string `json:"tags"`
 }
 
@@ -1093,6 +1097,51 @@ func TestEvaluateFVTJsonnetPayloadFiles(t *testing.T) {
 			wantQueueKind: "kueue",
 			wantQueueName: "  user-queue  ",
 		},
+		{
+			file:          "mcp_submit_cluster.jsonnet",
+			wantName:      "mcp_cluster_test",
+			minBenchmarks: 1,
+		},
+		{
+			file:          "mcp_submit_cluster_multi_benchmark.jsonnet",
+			wantName:      "mcp_cluster_multi_benchmark_test",
+			minBenchmarks: 2,
+		},
+		{
+			file:          "mcp_submit_cluster_results.jsonnet",
+			wantName:      "mcp_cluster_results_validation",
+			minBenchmarks: 1,
+		},
+		{
+			file:          "evalcard_benchmark.jsonnet",
+			wantName:      "evalcard_benchmark_test",
+			minBenchmarks: 1,
+		},
+		{
+			file:          "evalcard_multi_benchmark.jsonnet",
+			wantName:      "evalcard_multibenchmark_test",
+			minBenchmarks: 2,
+		},
+		{
+			file:          "evalcard_arc_easy.jsonnet",
+			wantName:      "evalcard_arc_easy_test",
+			minBenchmarks: 1,
+		},
+		{
+			file:          "evalcard_mcp.jsonnet",
+			wantName:      "evalcard_mcp_test",
+			minBenchmarks: 1,
+		},
+		{
+			file:          "evalcard_mcp_resource.jsonnet",
+			wantName:      "evalcard_mcp_resource_test",
+			minBenchmarks: 1,
+		},
+		{
+			file:          "evalcard_no_pass_criteria.jsonnet",
+			wantName:      "evalcard_no_pass_criteria_test",
+			minBenchmarks: 1,
+		},
 	}
 
 	for _, disconnected := range []bool{false, true} {
@@ -1135,20 +1184,16 @@ func TestEvaluateFVTJsonnetPayloadFiles(t *testing.T) {
 						t.Errorf("pass_criteria.threshold = %v, want %v", doc.PassCriteria.Threshold, *tc.wantPassCriteriaThreshold)
 					}
 				}
-				if tc.wantQueueKind != "" {
-					if doc.Queue == nil {
-						t.Fatal("queue is nil")
+				if tc.wantQueueKind != "" || tc.wantQueueName != "" {
+					if len(doc.Benchmarks) == 0 || doc.Benchmarks[0].HardwareConfig == nil || doc.Benchmarks[0].HardwareConfig.Queue == nil {
+						t.Fatal("benchmarks[0].hardware_config.queue is nil")
 					}
-					if doc.Queue.Kind != tc.wantQueueKind {
-						t.Errorf("queue.kind = %q, want %q", doc.Queue.Kind, tc.wantQueueKind)
+					q := doc.Benchmarks[0].HardwareConfig.Queue
+					if tc.wantQueueKind != "" && q.Kind != tc.wantQueueKind {
+						t.Errorf("hardware_config.queue.kind = %q, want %q", q.Kind, tc.wantQueueKind)
 					}
-				}
-				if tc.wantQueueName != "" {
-					if doc.Queue == nil {
-						t.Fatal("queue is nil")
-					}
-					if doc.Queue.Name != tc.wantQueueName {
-						t.Errorf("queue.name = %q, want %q", doc.Queue.Name, tc.wantQueueName)
+					if tc.wantQueueName != "" && q.Name != tc.wantQueueName {
+						t.Errorf("hardware_config.queue.name = %q, want %q", q.Name, tc.wantQueueName)
 					}
 				}
 				if tc.wantTags != nil {

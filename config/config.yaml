@@ -19,10 +19,10 @@ env_mappings:
   API_HOST: service.host
   TLS_CERT_FILE: service.tls_cert_file
   TLS_KEY_FILE: service.tls_key_file
+  DB_DRIVER: database.driver
   DB_URL: database.url
   MLFLOW_TRACKING_URI: mlflow.tracking_uri
   MLFLOW_CA_CERT_PATH: mlflow.ca_cert_path
-  MLFLOW_INSECURE_SKIP_VERIFY: mlflow.insecure_skip_verify
   MLFLOW_TOKEN_PATH: mlflow.token_path
   MLFLOW_WORKSPACE: mlflow.workspace
   EVALHUB_CA_CERT_PATH: sidecar.eval_hub.ca_cert_path
@@ -83,7 +83,6 @@ sidecar:
   #   ca_cert_path: /etc/pki/ca-trust/source/anchors/registry-ca.crt  # optional
   #   insecure_skip_verify: false
   sidecar_container:
-    image: quay.io/rh-ee-nbs/nbs-dev:eval-hub_v27
     resources:
       requests:
         cpu: 100m

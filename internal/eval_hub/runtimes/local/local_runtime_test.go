@@ -145,7 +145,7 @@ func sampleEvaluation(providerID string) *api.EvaluationJobResource {
 			Resource: api.Resource{ID: "job-1"},
 		},
 		EvaluationJobConfig: api.EvaluationJobConfig{
-			Model: api.ModelRef{
+			Model: &api.ModelRef{
 				URL:  "http://model.example",
 				Name: "model-1",
 			},
@@ -214,6 +214,20 @@ func TestLocalRuntimeName(t *testing.T) {
 	rt := &LocalRuntime{tracker: newTracker()}
 	if rt.Name() != "local" {
 		t.Fatalf("expected Name() to return %q, got %q", "local", rt.Name())
+	}
+}
+
+func TestLocalRuntimeValidateHardwareProfiles(t *testing.T) {
+	rt := &LocalRuntime{tracker: newTracker()}
+	err := rt.ValidateHardwareProfiles([]api.EvaluationBenchmarkConfig{{
+		Ref:        api.Ref{ID: "bench-1"},
+		ProviderID: "provider-1",
+		HardwareConfig: &api.BenchmarkHardwareConfig{
+			HardwareProfileName: "any-profile",
+		},
+	}})
+	if err != nil {
+		t.Fatalf("local runtime should skip hardware profile validation, got %v", err)
 	}
 }
 

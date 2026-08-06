@@ -2,6 +2,7 @@ package validation
 
 import (
 	"errors"
+	"strings"
 	"testing"
 
 	"github.com/eval-hub/eval-hub/internal/eval_hub/messages"
@@ -36,7 +37,7 @@ func TestEvaluationJobConfigBenchmarksMin_WithCollection(t *testing.T) {
 	// When Collection is set with ID, empty Benchmarks is allowed
 	cfg := api.EvaluationJobConfig{
 		Name:       "test-evaluation-job",
-		Model:      api.ModelRef{URL: "http://test.com", Name: "model"},
+		Model:      &api.ModelRef{URL: "http://test.com", Name: "model"},
 		Collection: &api.CollectionRef{ID: "coll-1"},
 		Benchmarks: []api.EvaluationBenchmarkConfig{},
 	}
@@ -51,7 +52,7 @@ func TestEvaluationJobConfigBenchmarksMin_WithoutCollection_EmptyBenchmarks(t *t
 	// When Collection is not set, Benchmarks must have at least 1 element
 	cfg := api.EvaluationJobConfig{
 		Name:       "test-evaluation-job",
-		Model:      api.ModelRef{URL: "http://test.com", Name: "model"},
+		Model:      &api.ModelRef{URL: "http://test.com", Name: "model"},
 		Benchmarks: []api.EvaluationBenchmarkConfig{},
 	}
 	err := validate.Struct(cfg)
@@ -72,7 +73,7 @@ func TestEvaluationJobConfigBenchmarksMin_WithoutCollection_WithBenchmark(t *tes
 	validate := newTestValidator(t)
 	cfg := api.EvaluationJobConfig{
 		Name:  "test-evaluation-job",
-		Model: api.ModelRef{URL: "http://test.com", Name: "model"},
+		Model: &api.ModelRef{URL: "http://test.com", Name: "model"},
 		Benchmarks: []api.EvaluationBenchmarkConfig{
 			{Ref: api.Ref{ID: "b1"}, ProviderID: "provider-1"},
 		},
@@ -87,7 +88,7 @@ func TestEvaluationJobConfig_ExperimentWithoutNameFails(t *testing.T) {
 	validate := newTestValidator(t)
 	cfg := api.EvaluationJobConfig{
 		Name:  "test-evaluation-job",
-		Model: api.ModelRef{URL: "http://test.com", Name: "model"},
+		Model: &api.ModelRef{URL: "http://test.com", Name: "model"},
 		Benchmarks: []api.EvaluationBenchmarkConfig{
 			{Ref: api.Ref{ID: "b1"}, ProviderID: "provider-1"},
 		},
@@ -117,7 +118,7 @@ func TestEvaluationJobConfig_ExperimentNameEmptyStringFails(t *testing.T) {
 	validate := newTestValidator(t)
 	cfg := api.EvaluationJobConfig{
 		Name:  "test-evaluation-job",
-		Model: api.ModelRef{URL: "http://test.com", Name: "model"},
+		Model: &api.ModelRef{URL: "http://test.com", Name: "model"},
 		Benchmarks: []api.EvaluationBenchmarkConfig{
 			{Ref: api.Ref{ID: "b1"}, ProviderID: "provider-1"},
 		},
@@ -148,7 +149,7 @@ func TestEvaluationJobConfig_ExperimentNameWhitespaceOnlyFails(t *testing.T) {
 	ws := " \t "
 	cfg := api.EvaluationJobConfig{
 		Name:  "test-evaluation-job",
-		Model: api.ModelRef{URL: "http://test.com", Name: "model"},
+		Model: &api.ModelRef{URL: "http://test.com", Name: "model"},
 		Benchmarks: []api.EvaluationBenchmarkConfig{
 			{Ref: api.Ref{ID: "b1"}, ProviderID: "provider-1"},
 		},
@@ -186,20 +187,55 @@ func TestQueueConfig_InvalidNameRejected(t *testing.T) {
 		"Uppercase-Queue",
 		"my_queue",
 		"queue.name",
+		strings.Repeat("a", 64),
 	}
 	for _, name := range invalid {
-		cfg := api.EvaluationJobConfig{
-			Name:  "test-job",
-			Model: api.ModelRef{URL: "http://test.com", Name: "model"},
-			Benchmarks: []api.EvaluationBenchmarkConfig{
-				{Ref: api.Ref{ID: "b1"}, ProviderID: "provider-1"},
-			},
-			Queue: &api.QueueConfig{Kind: "kueue", Name: name},
-		}
-		err := validate.Struct(cfg)
-		if err == nil {
-			t.Errorf("expected validation error for queue name %q", name)
-		}
+		t.Run("benchmark_hardware_config/"+name, func(t *testing.T) {
+			cfg := api.EvaluationJobConfig{
+				Name:  "test-job",
+				Model: &api.ModelRef{URL: "http://test.com", Name: "model"},
+				Benchmarks: []api.EvaluationBenchmarkConfig{
+					{
+						Ref:        api.Ref{ID: "b1"},
+						ProviderID: "provider-1",
+						HardwareConfig: &api.BenchmarkHardwareConfig{
+							Queue: &api.QueueConfig{Kind: "kueue", Name: name},
+						},
+					},
+				},
+			}
+			if err := validate.Struct(cfg); err == nil {
+				t.Errorf("expected validation error for queue name %q", name)
+			}
+		})
+		t.Run("evaluation_hardware_config/"+name, func(t *testing.T) {
+			cfg := api.EvaluationJobConfig{
+				Name:  "test-job",
+				Model: &api.ModelRef{URL: "http://test.com", Name: "model"},
+				Benchmarks: []api.EvaluationBenchmarkConfig{
+					{Ref: api.Ref{ID: "b1"}, ProviderID: "provider-1"},
+				},
+				HardwareConfig: &api.BenchmarkHardwareConfig{
+					Queue: &api.QueueConfig{Kind: "kueue", Name: name},
+				},
+			}
+			if err := validate.Struct(cfg); err == nil {
+				t.Errorf("expected validation error for evaluation.hardware_config.queue name %q", name)
+			}
+		})
+		t.Run("deprecated_evaluation_queue/"+name, func(t *testing.T) {
+			cfg := api.EvaluationJobConfig{
+				Name:  "test-job",
+				Model: &api.ModelRef{URL: "http://test.com", Name: "model"},
+				Benchmarks: []api.EvaluationBenchmarkConfig{
+					{Ref: api.Ref{ID: "b1"}, ProviderID: "provider-1"},
+				},
+				Queue: &api.QueueConfig{Kind: "kueue", Name: name},
+			}
+			if err := validate.Struct(cfg); err == nil {
+				t.Errorf("expected validation error for evaluation.queue name %q", name)
+			}
+		})
 	}
 }
 
@@ -210,20 +246,55 @@ func TestQueueConfig_ValidNameAccepted(t *testing.T) {
 		"queue1",
 		"a",
 		"gpu-profile-v1",
+		strings.Repeat("a", 63),
 	}
 	for _, name := range valid {
-		cfg := api.EvaluationJobConfig{
-			Name:  "test-job",
-			Model: api.ModelRef{URL: "http://test.com", Name: "model"},
-			Benchmarks: []api.EvaluationBenchmarkConfig{
-				{Ref: api.Ref{ID: "b1"}, ProviderID: "provider-1"},
-			},
-			Queue: &api.QueueConfig{Kind: "kueue", Name: name},
-		}
-		err := validate.Struct(cfg)
-		if err != nil {
-			t.Errorf("expected no error for queue name %q, got: %v", name, err)
-		}
+		t.Run("benchmark_hardware_config/"+name, func(t *testing.T) {
+			cfg := api.EvaluationJobConfig{
+				Name:  "test-job",
+				Model: &api.ModelRef{URL: "http://test.com", Name: "model"},
+				Benchmarks: []api.EvaluationBenchmarkConfig{
+					{
+						Ref:        api.Ref{ID: "b1"},
+						ProviderID: "provider-1",
+						HardwareConfig: &api.BenchmarkHardwareConfig{
+							Queue: &api.QueueConfig{Kind: "kueue", Name: name},
+						},
+					},
+				},
+			}
+			if err := validate.Struct(cfg); err != nil {
+				t.Errorf("expected no error for queue name %q, got: %v", name, err)
+			}
+		})
+		t.Run("evaluation_hardware_config/"+name, func(t *testing.T) {
+			cfg := api.EvaluationJobConfig{
+				Name:  "test-job",
+				Model: &api.ModelRef{URL: "http://test.com", Name: "model"},
+				Benchmarks: []api.EvaluationBenchmarkConfig{
+					{Ref: api.Ref{ID: "b1"}, ProviderID: "provider-1"},
+				},
+				HardwareConfig: &api.BenchmarkHardwareConfig{
+					Queue: &api.QueueConfig{Kind: "kueue", Name: name},
+				},
+			}
+			if err := validate.Struct(cfg); err != nil {
+				t.Errorf("expected no error for evaluation.hardware_config.queue name %q, got: %v", name, err)
+			}
+		})
+		t.Run("deprecated_evaluation_queue/"+name, func(t *testing.T) {
+			cfg := api.EvaluationJobConfig{
+				Name:  "test-job",
+				Model: &api.ModelRef{URL: "http://test.com", Name: "model"},
+				Benchmarks: []api.EvaluationBenchmarkConfig{
+					{Ref: api.Ref{ID: "b1"}, ProviderID: "provider-1"},
+				},
+				Queue: &api.QueueConfig{Kind: "kueue", Name: name},
+			}
+			if err := validate.Struct(cfg); err != nil {
+				t.Errorf("expected no error for evaluation.queue name %q, got: %v", name, err)
+			}
+		})
 	}
 }
 
@@ -238,82 +309,129 @@ func TestBenchmarkHardwareConfig_InvalidNameRejected(t *testing.T) {
 		"GPU-Profile",
 		"cpu_profile",
 		"gpu.profile.v1",
+		strings.Repeat("a", 64),
 	}
 	for _, name := range invalid {
 		cfg := api.EvaluationJobConfig{
 			Name:  "test-job",
-			Model: api.ModelRef{URL: "http://test.com", Name: "model"},
+			Model: &api.ModelRef{URL: "http://test.com", Name: "model"},
 			Benchmarks: []api.EvaluationBenchmarkConfig{
 				{
 					Ref:        api.Ref{ID: "b1"},
 					ProviderID: "provider-1",
 					HardwareConfig: &api.BenchmarkHardwareConfig{
-						HardwareProfileRef: api.HardwareProfileRef{Name: name},
+						HardwareProfileName: name,
 					},
 				},
 			},
 		}
 		err := validate.Struct(cfg)
 		if err == nil {
-			t.Errorf("expected validation error for hardware profile ref %q", name)
+			t.Errorf("expected validation error for hardware profile name %q", name)
 		}
 	}
 }
 
 func TestBenchmarkHardwareConfig_ValidNameAccepted(t *testing.T) {
 	validate := newTestValidator(t)
-	valid := []struct {
-		name      string
-		namespace string
-	}{
-		{name: "default-profile"},
-		{name: "gpu-profile-v1", namespace: "opendatahub"},
-		{name: "a"},
+	valid := []string{
+		"default-profile",
+		"gpu-profile-v1",
+		"a",
+		strings.Repeat("a", 63),
 	}
-	for _, tc := range valid {
+	for _, name := range valid {
 		cfg := api.EvaluationJobConfig{
 			Name:  "test-job",
-			Model: api.ModelRef{URL: "http://test.com", Name: "model"},
+			Model: &api.ModelRef{URL: "http://test.com", Name: "model"},
 			Benchmarks: []api.EvaluationBenchmarkConfig{
 				{
 					Ref:        api.Ref{ID: "b1"},
 					ProviderID: "provider-1",
 					HardwareConfig: &api.BenchmarkHardwareConfig{
-						HardwareProfileRef: api.HardwareProfileRef{
-							Name:      tc.name,
-							Namespace: tc.namespace,
-						},
+						HardwareProfileName: name,
 					},
 				},
 			},
 		}
 		err := validate.Struct(cfg)
 		if err != nil {
-			t.Errorf("expected no error for hardware profile ref %#v, got: %v", tc, err)
+			t.Errorf("expected no error for hardware profile name %q, got: %v", name, err)
 		}
 	}
 }
 
-func TestBenchmarkHardwareConfig_InvalidNamespaceRejected(t *testing.T) {
+func TestBenchmarkHardwareConfig_ProfileWithDirectFieldsRejected(t *testing.T) {
+	validate := newTestValidator(t)
+	cases := []struct {
+		name string
+		hw   *api.BenchmarkHardwareConfig
+	}{
+		{
+			name: "with cpu",
+			hw: &api.BenchmarkHardwareConfig{
+				HardwareProfileName: "my-hw-spec",
+				CPU:                 &api.HardwareResourceQuantity{Request: "1", Limit: "2"},
+			},
+		},
+		{
+			name: "with memory",
+			hw: &api.BenchmarkHardwareConfig{
+				HardwareProfileName: "my-hw-spec",
+				Memory:              &api.HardwareResourceQuantity{Request: "1Gi"},
+			},
+		},
+		{
+			name: "with gpu",
+			hw: &api.BenchmarkHardwareConfig{
+				HardwareProfileName: "my-hw-spec",
+				GPU:                 &api.HardwareGPUConfig{Name: "nvidia.com/gpu", Count: 1},
+			},
+		},
+		{
+			name: "with queue",
+			hw: &api.BenchmarkHardwareConfig{
+				HardwareProfileName: "my-hw-spec",
+				Queue:               &api.QueueConfig{Kind: "kueue", Name: "my-queue"},
+			},
+		},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			cfg := api.EvaluationJobConfig{
+				Name:  "test-job",
+				Model: &api.ModelRef{URL: "http://test.com", Name: "model"},
+				Benchmarks: []api.EvaluationBenchmarkConfig{
+					{Ref: api.Ref{ID: "b1"}, ProviderID: "provider-1", HardwareConfig: tc.hw},
+				},
+			}
+			if err := validate.Struct(cfg); err == nil {
+				t.Fatal("expected validation error")
+			}
+		})
+	}
+}
+
+func TestBenchmarkHardwareConfig_DirectFieldsAccepted(t *testing.T) {
 	validate := newTestValidator(t)
 	cfg := api.EvaluationJobConfig{
 		Name:  "test-job",
-		Model: api.ModelRef{URL: "http://test.com", Name: "model"},
+		Model: &api.ModelRef{URL: "http://test.com", Name: "model"},
 		Benchmarks: []api.EvaluationBenchmarkConfig{
 			{
 				Ref:        api.Ref{ID: "b1"},
 				ProviderID: "provider-1",
 				HardwareConfig: &api.BenchmarkHardwareConfig{
-					HardwareProfileRef: api.HardwareProfileRef{
-						Name:      "valid-profile",
-						Namespace: "invalid namespace",
-					},
+					Queue:  &api.QueueConfig{Kind: "kueue", Name: "my-queue"},
+					CPU:    &api.HardwareResourceQuantity{Request: "1", Limit: "2"},
+					Memory: &api.HardwareResourceQuantity{Request: "1Gi", Limit: "2Gi"},
+					GPU:    &api.HardwareGPUConfig{Name: "nvidia.com/gpu", Count: 1},
 				},
 			},
 		},
 	}
-	if err := validate.Struct(cfg); err == nil {
-		t.Fatal("expected validation error for invalid hardware profile namespace")
+	if err := validate.Struct(cfg); err != nil {
+		t.Fatalf("expected no error for direct hardware_config, got: %v", err)
 	}
 }
 
@@ -321,7 +439,7 @@ func TestEvaluationJobConfig_ExperimentOmittedOk(t *testing.T) {
 	validate := newTestValidator(t)
 	cfg := api.EvaluationJobConfig{
 		Name:  "test-evaluation-job",
-		Model: api.ModelRef{URL: "http://test.com", Name: "model"},
+		Model: &api.ModelRef{URL: "http://test.com", Name: "model"},
 		Benchmarks: []api.EvaluationBenchmarkConfig{
 			{Ref: api.Ref{ID: "b1"}, ProviderID: "provider-1"},
 		},
