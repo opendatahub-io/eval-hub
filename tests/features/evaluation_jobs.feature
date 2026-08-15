@@ -6,7 +6,7 @@ Feature: Evaluation Jobs
   So that I evaluate models
 
   Background:
-    Given I set the header "X-Tenant" to "{{env:X_TENANT|test-tenant}}"
+    Given I set the header "X-Tenant" to "{{env:X_TENANT|tenant}}"
     And I set the header "X-User" to "{{env:X_USER|test-user}}"
     And I set the wait deadline to "{{env:WAIT_DEADLINE|30m}}"
     And the model endpoint is reachable
@@ -18,7 +18,7 @@ Feature: Evaluation Jobs
     Given the service is running
     When I send a POST request to "/api/v1/evaluations/jobs" with body "file:/evaluation_job.json"
     Then the response code should be 202
-    And the response should contain the value "{{env:X_TENANT|test-tenant}}" at path "$.resource.tenant"
+    And the response should contain the value "{{env:X_TENANT|tenant}}" at path "$.resource.tenant"
     And the response should have schema from file "file:/schemas/evaluation_job_resource_connected.schema.json"
 
   @disconnected
@@ -26,7 +26,7 @@ Feature: Evaluation Jobs
     Given the service is running
     When I send a POST request to "/api/v1/evaluations/jobs" with body "file:/evaluation_job.json"
     Then the response code should be 202
-    And the response should contain the value "{{env:X_TENANT|test-tenant}}" at path "$.resource.tenant"
+    And the response should contain the value "{{env:X_TENANT|tenant}}" at path "$.resource.tenant"
     And the response should have schema from file "file:/schemas/evaluation_job_resource_disconnected.schema.json"
 
   Scenario: Verifying results returned for Evaluation job

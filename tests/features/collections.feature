@@ -5,7 +5,7 @@ Feature: Collections Endpoint
   So that I evaluate models on these collections
 
   Background:
-    Given I set the header "X-Tenant" to "{{env:X_TENANT|test-tenant}}"
+    Given I set the header "X-Tenant" to "{{env:X_TENANT|tenant}}"
     And I set the header "X-User" to "{{env:X_USER|test-user}}"
 
   Scenario: Create a collection of benchmarks and get by id
@@ -669,7 +669,7 @@ Feature: Collections Endpoint
     And there is a system collection with id "safety-and-fairness-v1"
     When I send a GET request to "/api/v1/evaluations/collections/safety-and-fairness-v1"
     Then the response code should be 200
-    And the response should contain "name" with value "Safety and Fairness"
+    And the response should contain "name" with value "Safety & Fairness"
 
   Scenario: Verify out of box collection retrieval - category - safety-and-fairness-v1
     Given the service is running
