@@ -5,7 +5,7 @@ Feature: Evaluations Endpoint
   So that I evaluate models
 
   Background:
-    Given I set the header "X-Tenant" to "{{env:X_TENANT|test-tenant}}"
+    Given I set the header "X-Tenant" to "{{env:X_TENANT|tenant}}"
     And I set the header "X-User" to "{{env:X_USER|test-user}}"
 
   @negative
@@ -156,13 +156,13 @@ Feature: Evaluations Endpoint
     Given the service is running
     When I send a POST request to "/api/v1/evaluations/jobs" with body "file:/evaluation_job.json"
     Then the response code should be 202
-    And the response should contain the value "{{env:X_TENANT|test-tenant}}" at path "$.resource.tenant"
+    And the response should contain the value "{{env:X_TENANT|tenant}}" at path "$.resource.tenant"
     When I send a POST request to "/api/v1/evaluations/jobs" with body "file:/evaluation_job.json"
     Then the response code should be 202
-    And the response should contain the value "{{env:X_TENANT|test-tenant}}" at path "$.resource.tenant"
+    And the response should contain the value "{{env:X_TENANT|tenant}}" at path "$.resource.tenant"
     When I send a POST request to "/api/v1/evaluations/jobs" with body "file:/evaluation_job.json"
     Then the response code should be 202
-    And the response should contain the value "{{env:X_TENANT|test-tenant}}" at path "$.resource.tenant"
+    And the response should contain the value "{{env:X_TENANT|tenant}}" at path "$.resource.tenant"
     When I send a GET request to "/api/v1/evaluations/jobs?limit=2"
     Then the response code should be 200
     And the "next.href" field in the response should be saved as "value:next_url"
@@ -242,17 +242,17 @@ Feature: Evaluations Endpoint
     When I send a POST request to "/api/v1/evaluations/jobs" with body "file:/evaluation_job.json"
     Then the response code should be 202
     And the response should contain the value "test-user-1" at path "$.resource.owner"
-    And the response should contain the value "{{env:X_TENANT|test-tenant}}" at path "$.resource.tenant"
+    And the response should contain the value "{{env:X_TENANT|tenant}}" at path "$.resource.tenant"
     And I set the header "X-User" to "test-user-2"
     When I send a POST request to "/api/v1/evaluations/jobs" with body "file:/evaluation_job.json"
     Then the response code should be 202
     And the response should contain the value "test-user-2" at path "$.resource.owner"
-    And the response should contain the value "{{env:X_TENANT|test-tenant}}" at path "$.resource.tenant"
+    And the response should contain the value "{{env:X_TENANT|tenant}}" at path "$.resource.tenant"
     And I set the header "X-User" to "test-user-3"
     When I send a POST request to "/api/v1/evaluations/jobs" with body "file:/evaluation_job.json"
     Then the response code should be 202
     And the response should contain the value "test-user-3" at path "$.resource.owner"
-    And the response should contain the value "{{env:X_TENANT|test-tenant}}" at path "$.resource.tenant"
+    And the response should contain the value "{{env:X_TENANT|tenant}}" at path "$.resource.tenant"
     When I send a GET request to "/api/v1/evaluations/jobs?limit=2"
     Then the response code should be 200
     And the "next.href" field in the response should be saved as "value:next_url"
@@ -325,7 +325,7 @@ Feature: Evaluations Endpoint
       }
     """
     And the response should contain the value "test-user-1" at path "$.items[0].resource.owner"
-    And the response should contain the value "{{env:X_TENANT|test-tenant}}" at path "$.items[0].resource.tenant"
+    And the response should contain the value "{{env:X_TENANT|tenant}}" at path "$.items[0].resource.tenant"
     When I send a GET request to "/api/v1/evaluations/jobs?owner=test-user-2"
     Then the response code should be 200
     And the response should have schema as:
@@ -342,7 +342,7 @@ Feature: Evaluations Endpoint
       }
     """
     And the response should contain the value "test-user-2" at path "$.items[0].resource.owner"
-    And the response should contain the value "{{env:X_TENANT|test-tenant}}" at path "$.items[0].resource.tenant"
+    And the response should contain the value "{{env:X_TENANT|tenant}}" at path "$.items[0].resource.tenant"
     When I send a GET request to "/api/v1/evaluations/jobs?owner=test-user-3"
     Then the response code should be 200
     And the response should have schema as:
@@ -359,7 +359,7 @@ Feature: Evaluations Endpoint
       }
     """
     And the response should contain the value "test-user-3" at path "$.items[0].resource.owner"
-    And the response should contain the value "{{env:X_TENANT|test-tenant}}" at path "$.items[0].resource.tenant"
+    And the response should contain the value "{{env:X_TENANT|tenant}}" at path "$.items[0].resource.tenant"
     When I send a GET request to "/api/v1/evaluations/jobs?owner=test-user-not-3"
     Then the response code should be 200
     And the response should have schema as:
@@ -676,7 +676,7 @@ Feature: Evaluations Endpoint
     And the response should contain at least the value "1" at path "$.total_count"
     When I send a GET request to "/api/v1/evaluations/jobs?limit=10"
     Then the response code should be 200
-    And the response should contain the value "{{env:X_TENANT|test-tenant}}" at path "$.items[0].resource.tenant"
+    And the response should contain the value "{{env:X_TENANT|tenant}}" at path "$.items[0].resource.tenant"
     And the response should contain at least the value "4" at path "$.total_count"
     When I set transaction-id to "search-user-and-tags"
     When I send a GET request to "/api/v1/evaluations/jobs?tags=environment&limit=10"
@@ -718,7 +718,7 @@ Feature: Evaluations Endpoint
     Then the response code should be 200
     When I send a GET request to "/api/v1/evaluations/jobs?limit=10"
     Then the response code should be 200
-    And the response should contain the value "{{env:X_TENANT|test-tenant}}" at path "$.items[0].resource.tenant"
+    And the response should contain the value "{{env:X_TENANT|tenant}}" at path "$.items[0].resource.tenant"
     And the response should contain at least the value "4" at path "$.total_count"
 
   @negative

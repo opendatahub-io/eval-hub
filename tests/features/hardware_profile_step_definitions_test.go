@@ -41,7 +41,7 @@ func (s *hardwareProfileScenarioState) reset() {
 func (tc *scenarioConfig) tenantNamespace() string {
 	namespace := tc.reqHeaders["X-Tenant"]
 	if namespace == "" {
-		namespace = "test-tenant"
+		namespace = "tenant"
 	}
 	return namespace
 }

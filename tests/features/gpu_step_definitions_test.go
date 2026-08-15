@@ -605,7 +605,7 @@ func (tc *scenarioConfig) iWaitForKubernetesJobToBeCreated(evalJobID string) err
 
 	namespace := tc.reqHeaders["X-Tenant"]
 	if namespace == "" {
-		namespace = "test-tenant"
+		namespace = "tenant"
 	}
 
 	for {
@@ -637,7 +637,7 @@ func (tc *scenarioConfig) iWaitForKubernetesJobToComplete(evalJobID string) erro
 
 	namespace := tc.reqHeaders["X-Tenant"]
 	if namespace == "" {
-		namespace = "test-tenant"
+		namespace = "tenant"
 	}
 
 	for {
@@ -677,7 +677,7 @@ func (tc *scenarioConfig) jobSpecShouldHaveGPULimit(expectedValue string) error 
 func (tc *scenarioConfig) checkJobResourceSpec(resourceType, resourceName, expectedValue string) error {
 	namespace := tc.reqHeaders["X-Tenant"]
 	if namespace == "" {
-		namespace = "test-tenant"
+		namespace = "tenant"
 	}
 
 	id := tc.lastId
@@ -720,7 +720,7 @@ func (tc *scenarioConfig) checkJobResourceSpec(resourceType, resourceName, expec
 func (tc *scenarioConfig) jobSpecShouldHaveNodeSelector(selectorKeyValue string) error {
 	namespace := tc.reqHeaders["X-Tenant"]
 	if namespace == "" {
-		namespace = "test-tenant"
+		namespace = "tenant"
 	}
 
 	id := tc.lastId
@@ -771,7 +771,7 @@ func (tc *scenarioConfig) jobSpecShouldHaveNodeSelector(selectorKeyValue string)
 func (tc *scenarioConfig) jobSpecShouldNotHaveNodeSelector() error {
 	namespace := tc.reqHeaders["X-Tenant"]
 	if namespace == "" {
-		namespace = "test-tenant"
+		namespace = "tenant"
 	}
 
 	id := tc.lastId
@@ -799,7 +799,7 @@ func (tc *scenarioConfig) jobSpecShouldNotHaveNodeSelector() error {
 func (tc *scenarioConfig) jobSpecShouldHaveLabel(labelKeyValue string) error {
 	namespace := tc.reqHeaders["X-Tenant"]
 	if namespace == "" {
-		namespace = "test-tenant"
+		namespace = "tenant"
 	}
 
 	id := tc.lastId
@@ -850,7 +850,7 @@ func (tc *scenarioConfig) podShouldHaveGPUAttached(evalJobID string) error {
 
 	namespace := tc.reqHeaders["X-Tenant"]
 	if namespace == "" {
-		namespace = "test-tenant"
+		namespace = "tenant"
 	}
 
 	// Escape dots in resource name for JSONPath
@@ -886,7 +886,7 @@ func (tc *scenarioConfig) podShouldBeOnNodeWithLabel(evalJobID, labelKeyValue st
 
 	namespace := tc.reqHeaders["X-Tenant"]
 	if namespace == "" {
-		namespace = "test-tenant"
+		namespace = "tenant"
 	}
 
 	parts := strings.SplitN(labelKeyValue, "=", 2)
@@ -935,7 +935,7 @@ func (tc *scenarioConfig) podShouldNotBeScheduled(evalJobID string) error {
 
 	namespace := tc.reqHeaders["X-Tenant"]
 	if namespace == "" {
-		namespace = "test-tenant"
+		namespace = "tenant"
 	}
 
 	cmd := exec.Command("oc", "get", "pod", "-n", namespace, "-l",
@@ -969,7 +969,7 @@ func (tc *scenarioConfig) iWaitForSchedulingError(duration string) error {
 
 	namespace := tc.reqHeaders["X-Tenant"]
 	if namespace == "" {
-		namespace = "test-tenant"
+		namespace = "tenant"
 	}
 
 	id := tc.lastId
@@ -1259,7 +1259,7 @@ func InitializeGPUTestSuite(ctx *godog.TestSuiteContext) {
 		// This will be called for all test runs, but we only setup if needed
 		namespace := os.Getenv("X_TENANT")
 		if namespace == "" {
-			namespace = "test-tenant"
+			namespace = "tenant"
 		}
 
 		logDebug("Setting up GPU test resources for test suite\n")
@@ -1274,7 +1274,7 @@ func InitializeGPUTestSuite(ctx *godog.TestSuiteContext) {
 	ctx.AfterSuite(func() {
 		namespace := os.Getenv("X_TENANT")
 		if namespace == "" {
-			namespace = "test-tenant"
+			namespace = "tenant"
 		}
 		if len(gpuTestProviderIDs) > 0 {
 			logDebug("Cleaning up GPU test providers via API\n")

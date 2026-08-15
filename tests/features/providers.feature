@@ -5,7 +5,7 @@ Feature: Providers Endpoint
   So that I discover the service capabilities
 
   Background:
-    Given I set the header "X-Tenant" to "{{env:X_TENANT|test-tenant}}"
+    Given I set the header "X-Tenant" to "{{env:X_TENANT|tenant}}"
     And I set the header "X-User" to "{{env:X_USER|test-user}}"
 
   Scenario: List providers returns 200 with response structure and pagination

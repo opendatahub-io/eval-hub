@@ -1,5 +1,5 @@
 id: safety-and-fairness-v1
-name: Safety and Fairness
+name: Safety & Fairness
 category: safety
 description: Evaluates model safety, bias, and fairness across diverse scenarios.
 tags:
