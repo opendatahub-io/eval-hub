@@ -188,6 +188,39 @@ func TestNewMLFlowHTTPClient(t *testing.T) {
 			t.Fatal("expected non-nil client")
 		}
 	})
+
+	t.Run("https with insecure_skip_verify does not require CA cert", func(t *testing.T) {
+		cfg := &config.Config{
+			MLFlow: &config.MLFlowConfig{
+				TrackingURI:        "https://mlflow.example.com",
+				InsecureSkipVerify: true,
+			},
+		}
+		client, err := NewMLFlowHTTPClient(cfg, false, logger)
+		if err != nil {
+			t.Fatalf("unexpected error: %v", err)
+		}
+		if client == nil {
+			t.Fatal("expected non-nil client")
+		}
+	})
+
+	t.Run("insecure_skip_verify skips CA loading even with CACertPath", func(t *testing.T) {
+		cfg := &config.Config{
+			MLFlow: &config.MLFlowConfig{
+				TrackingURI:        "https://mlflow.example.com",
+				InsecureSkipVerify: true,
+				CACertPath:         "/nonexistent/ca.crt",
+			},
+		}
+		client, err := NewMLFlowHTTPClient(cfg, false, logger)
+		if err != nil {
+			t.Fatalf("unexpected error: %v; InsecureSkipVerify should skip CA loading", err)
+		}
+		if client == nil {
+			t.Fatal("expected non-nil client")
+		}
+	})
 }
 
 func TestNewModelHTTPClient(t *testing.T) {

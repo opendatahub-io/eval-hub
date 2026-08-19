@@ -131,6 +131,29 @@ func TestSidecarForJobPod_UsesEffectiveBaseURL(t *testing.T) {
 	})
 }
 
+func TestSidecarForJobPodPropagatesMLFlowInsecureSkipVerify(t *testing.T) {
+	cfg := &config.Config{
+		Sidecar: &config.SidecarConfig{BaseURL: config.DefaultSidecarBaseURL},
+		MLFlow: &config.MLFlowConfig{
+			InsecureSkipVerify: true,
+		},
+	}
+	jc := &jobConfig{
+		evalHubURL:        "http://eval-hub:8080",
+		mlflowTrackingURI: "https://mlflow:5000",
+	}
+	export, err := sidecarForJobPod(cfg, jc)
+	if err != nil {
+		t.Fatalf("sidecarForJobPod: %v", err)
+	}
+	if export.MLFlow == nil {
+		t.Fatal("expected MLFlow in sidecar export")
+	}
+	if !export.MLFlow.InsecureSkipVerify {
+		t.Fatal("expected InsecureSkipVerify=true to be propagated to sidecar MLFlow config")
+	}
+}
+
 func TestSidecarForJobPodIncludesOTEL(t *testing.T) {
 	cfg := &config.Config{
 		OTEL: &config.OTELConfig{
