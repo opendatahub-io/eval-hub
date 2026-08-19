@@ -47,7 +47,7 @@ func newHTTPClient(timeout time.Duration, tlsConfig *tls.Config, isOTELEnabled b
 // When insecureSkipVerify is true, custom CA files are not read: verification is off, so loading a CA
 // would not affect trust and skipping avoids failing on missing paths in local/test environments.
 // When caCertPath is empty and insecureSkipVerify is false, system roots are used (default *tls.Config).
-// MLflow and OCI callers always pass insecureSkipVerify=false; skip-verify is not supported for those TLS paths.
+// OCI callers always pass insecureSkipVerify=false. MLflow passes the config value through.
 func buildTLSConfig(caCertPath string, insecureSkipVerify bool, logger *slog.Logger, certLabel string) (*tls.Config, error) {
 	tlsConfig := &tls.Config{
 		MinVersion: tls.VersionTLS12,
@@ -135,11 +135,10 @@ func NewMLFlowHTTPClient(serviceConfig *config.Config, isOTELEnabled bool, logge
 		timeout = mlflowConfig.HTTPTimeout
 	}
 
-	// TLS verification is always enabled for MLflow; use CACertPath for custom CAs.
 	var tlsConfig *tls.Config
 	if schemeRequiresTLS(mlflowConfig.TrackingURI) {
 		var err error
-		tlsConfig, err = buildTLSConfig(mlflowConfig.CACertPath, false, logger, "MLflow")
+		tlsConfig, err = buildTLSConfig(mlflowConfig.CACertPath, mlflowConfig.InsecureSkipVerify, logger, "MLflow")
 		if err != nil {
 			return nil, err
 		}

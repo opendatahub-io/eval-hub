@@ -141,6 +141,44 @@ func TestNewMLFlowClient(t *testing.T) {
 			t.Fatalf("unexpected error: %v", err)
 		}
 	})
+
+	t.Run("insecure skip verify sets TLS InsecureSkipVerify", func(t *testing.T) {
+		t.Parallel()
+		cfg := mlflowServiceConfig(t, "http://localhost:5000", func(m *config.MLFlowConfig) {
+			m.InsecureSkipVerify = true
+		})
+		_, err := NewMLFlowClient(cfg, logger)
+		if err != nil {
+			t.Fatalf("NewMLFlowClient() err = %v", err)
+		}
+		if cfg.MLFlow.TLSConfig == nil {
+			t.Fatal("expected TLSConfig to be set")
+		}
+		if !cfg.MLFlow.TLSConfig.InsecureSkipVerify {
+			t.Fatal("expected InsecureSkipVerify to be true on TLSConfig")
+		}
+	})
+
+	t.Run("insecure skip verify skips CA cert loading", func(t *testing.T) {
+		t.Parallel()
+		cfg := mlflowServiceConfig(t, "http://localhost:5000", func(m *config.MLFlowConfig) {
+			m.InsecureSkipVerify = true
+			m.CACertPath = filepath.Join(t.TempDir(), "missing-ca.pem")
+		})
+		_, err := NewMLFlowClient(cfg, logger)
+		if err != nil {
+			t.Fatalf("NewMLFlowClient() err = %v; InsecureSkipVerify should skip CA loading", err)
+		}
+		if cfg.MLFlow.TLSConfig == nil {
+			t.Fatal("expected TLSConfig to be set")
+		}
+		if !cfg.MLFlow.TLSConfig.InsecureSkipVerify {
+			t.Fatal("expected InsecureSkipVerify to be true on TLSConfig")
+		}
+		if cfg.MLFlow.TLSConfig.RootCAs != nil {
+			t.Fatal("expected RootCAs to be nil when InsecureSkipVerify is true")
+		}
+	})
 }
 
 func TestHasExperimentName(t *testing.T) {
