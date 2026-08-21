@@ -133,3 +133,10 @@ func (r *stubLogsRuntime) GetEvaluationLogs(_ *api.EvaluationJobResource, _ []ap
 	close(r.exported)
 	return r.logs, nil
 }
+func (r *stubLogsRuntime) ValidateHardwareProfiles(_ []api.EvaluationBenchmarkConfig) error {
+	return nil
+}
+func (r *stubLogsRuntime) NotifyJobPhaseTransition(_ context.Context, _ *api.EvaluationJobResource, _ int, _ api.State) {
+}
+func (r *stubLogsRuntime) NotifyThresholdViolation(_ context.Context, _ *api.EvaluationJobResource, _ int, _ string, _, _ float32) {
+}

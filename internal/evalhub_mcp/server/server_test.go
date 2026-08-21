@@ -62,10 +62,9 @@ func TestNewEvalHubClientNilWhenNoBaseURL(t *testing.T) {
 func TestNewEvalHubClientCreated(t *testing.T) {
 	t.Parallel()
 	cfg := &config.Config{
-		BaseURL:  "http://localhost:8080",
-		Token:    "test-token",
-		Tenant:   "test-tenant",
-		Insecure: true,
+		BaseURL: "http://localhost:8080",
+		Token:   "test-token",
+		Tenant:  "test-tenant",
 	}
 	client := NewEvalHubClient(cfg, discardLogger)
 	if client == nil {
@@ -113,9 +112,6 @@ func TestCapabilitiesAdvertised(t *testing.T) {
 	}
 	if caps.Prompts == nil {
 		t.Error("expected prompts capability to be advertised")
-	}
-	if caps.Logging == nil {
-		t.Error("expected logging capability to be advertised")
 	}
 }
 

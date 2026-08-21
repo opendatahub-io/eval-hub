@@ -96,6 +96,14 @@ func (r *stubRuntime) GetEvaluationLogs(
 ) (string, error) {
 	return "", nil
 }
+func (r *stubRuntime) NotifyJobPhaseTransition(_ context.Context, _ *api.EvaluationJobResource, _ int, _ api.State) {
+}
+func (r *stubRuntime) NotifyThresholdViolation(_ context.Context, _ *api.EvaluationJobResource, _ int, _ string, _, _ float32) {
+}
+
+func (r *stubRuntime) ValidateHardwareProfiles(_ []api.EvaluationBenchmarkConfig) error {
+	return nil
+}
 
 func TestNewServer(t *testing.T) {
 	t.Run("creates server with default port", func(t *testing.T) {

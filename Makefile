@@ -1,4 +1,4 @@
-.PHONY: help autoupdate-precommit pre-commit clean build build-coverage build-service build-init build-sidecar build-mcp build-all-platforms cross-compile-mcp build-all-platforms-mcp start-service stop-service start-sidecar stop-sidecar lint validate-configs test test-fuzz test-fvt-server test-all test-coverage test-fvt-coverage test-fvt-server-coverage test-all-coverage install-deps update-deps get-deps fmt vet generate-public-docs verify-api-docs generate-ignore-file documentation check-unused-components docker-image-local docker-mcp-version test-mcp-build-all test-mcp-binary-info test-mcp-binary-naming test-mcp-version test-mcp-no-runtime-deps test-mcp-container-build test-mcp-container-http test-mcp-checksums test-mcp-formula-syntax test-mcp-native-smoke test-mcp-brew-install test-mcp-brew-test test-mcp-brew-uninstall test-mcp-cross-platform test-mcp-fvt test-mcp-e2e test-mcp test-mcp-vscode test-help clean-mcp-wheels build-mcp-wheel build-all-mcp-wheels
+.PHONY: help autoupdate-precommit pre-commit clean build build-coverage build-service build-init build-sidecar build-mcp build-all-platforms cross-compile-mcp build-all-platforms-mcp cross-compile-sidecar build-all-platforms-sidecar start-service stop-service start-sidecar stop-sidecar lint golangci-lint validate-configs test test-fuzz test-fvt-server test-all test-coverage test-fvt-coverage test-fvt-server-coverage test-all-coverage install-deps update-deps get-deps fmt vet generate-public-docs verify-api-docs generate-ignore-file documentation check-unused-components docker-image-local docker-mcp-version test-mcp-build-all test-mcp-binary-info test-mcp-binary-naming test-mcp-version test-mcp-no-runtime-deps test-mcp-container-build test-mcp-container-http test-mcp-checksums test-mcp-formula-syntax test-mcp-native-smoke test-mcp-brew-install test-mcp-brew-test test-mcp-brew-uninstall test-mcp-cross-platform test-mcp-fvt test-mcp-e2e test-mcp test-mcp-vscode test-help clean-mcp-wheels build-mcp-wheel build-all-mcp-wheels show-local-api-docs doc-build
 
 GOPATH := $(shell go env GOPATH)
 GOBIN := $(shell go env GOPATH)/bin
@@ -103,9 +103,8 @@ stop-service:
 # Sidecar (eval-runtime-sidecar) starter/stopper
 SIDECAR_PID_FILE ?= $(BIN_DIR)/sidecar.pid
 SIDECAR_LOG ?= $(BIN_DIR)/sidecar.log
-SIDECAR_PORT ?= 8081
-# Config dir containing sidecar_runtime_local.json (or minimal JSON is generated from SIDECAR_PORT)
-SIDECAR_CONFIG_DIR ?= config
+# Sidecar config JSON (port is derived from base_url in the file)
+SIDECAR_CONFIG_FILE ?= config/sidecar_runtime_local.json
 
 build-sidecar: $(BIN_DIR) ## Build only the sidecar binary
 	@echo "Building $(SIDECAR_BINARY_NAME) with ${LDFLAGS}"
@@ -117,10 +116,10 @@ build-mcp: $(BIN_DIR) ## Build the evalhub-mcp MCP server binary
 	@go build -race -ldflags "${LDFLAGS}" -o $(BIN_DIR)/$(MCP_BINARY_NAME) $(MCP_CMD_PATH)
 	@echo "Build complete: $(BIN_DIR)/$(MCP_BINARY_NAME)"
 
-start-sidecar: build-sidecar ## Run the sidecar in background (port $(SIDECAR_PORT), config from $(SIDECAR_CONFIG_DIR))
+start-sidecar: build-sidecar ## Run the sidecar in background (config from $(SIDECAR_CONFIG_FILE))
 	@rm -f "${SIDECAR_PID_FILE}" && true
-	@echo "Running $(SIDECAR_BINARY_NAME) on port $(SIDECAR_PORT) (config: $(SIDECAR_CONFIG_DIR))..."
-	@SIDECAR_PORT="$(SIDECAR_PORT)" ./scripts/start_sidecar.sh "${SIDECAR_PID_FILE}" "${BIN_DIR}/$(SIDECAR_BINARY_NAME)" "${SIDECAR_LOG}" "$(SIDECAR_PORT)" "$(SIDECAR_CONFIG_DIR)"
+	@echo "Running $(SIDECAR_BINARY_NAME) (config: $(SIDECAR_CONFIG_FILE))..."
+	@./scripts/start_sidecar.sh "${SIDECAR_PID_FILE}" "${BIN_DIR}/$(SIDECAR_BINARY_NAME)" "${SIDECAR_LOG}" "$(SIDECAR_CONFIG_FILE)"
 
 stop-sidecar: ## Stop the sidecar
 	-./scripts/stop_server.sh "${SIDECAR_PID_FILE}"
@@ -142,10 +141,21 @@ stop-mcp: ## Stop the MCP server
 start-inspector-mcp:
 	npx @modelcontextprotocol/inspector
 
-lint: ## Lint the code (runs go vet)
-	@echo "Linting code..."
-	@go vet ./...
-	@echo "Lint complete"
+lint: vet golangci-lint ## Lint the code (go vet + golangci-lint)
+
+GOLANGCI_LINT_VERSION ?= v2.12.2
+GOLANGCI_LINT_STAMP  := $(BIN_DIR)/.golangci-lint-$(GOLANGCI_LINT_VERSION)
+
+golangci-lint: $(GOLANGCI_LINT_STAMP) ## Run golangci-lint (uses .golangci.yml)
+	@echo "Running golangci-lint..."
+	@$(GOBIN)/golangci-lint run ./...
+	@echo "golangci-lint complete"
+
+$(GOLANGCI_LINT_STAMP): | $(BIN_DIR)
+	@echo "Installing golangci-lint $(GOLANGCI_LINT_VERSION)..."
+	@go install github.com/golangci/golangci-lint/v2/cmd/golangci-lint@$(GOLANGCI_LINT_VERSION)
+	@rm -f $(BIN_DIR)/.golangci-lint-*
+	@touch $@
 
 validate-configs: ## Validate bundled provider and collection YAML (standalone CLI, not part of build)
 	@go run ./cmd/validate_configs
@@ -327,6 +337,23 @@ build-mcp-platform-%:
 build-all-platforms-mcp: ## Build MCP for all supported platforms (parallel: make -j5 build-all-platforms-mcp)
 	@$(MAKE) -j5 $(addprefix build-mcp-platform-,$(SUPPORTED_PLATFORMS))
 
+# Sidecar cross-compilation
+SIDECAR_CROSS_OUTPUT = bin/eval-runtime-sidecar-$(CROSS_GOOS)-$(CROSS_GOARCH)$(if $(filter windows,$(CROSS_GOOS)),.exe,)
+
+.PHONY: cross-compile-sidecar
+cross-compile-sidecar: ## Build sidecar for specific platform: make cross-compile-sidecar CROSS_GOOS=linux CROSS_GOARCH=amd64
+	@echo "Cross-compiling sidecar for $(CROSS_GOOS)/$(CROSS_GOARCH)..."
+	@mkdir -p $(BIN_DIR)
+	GOOS=$(CROSS_GOOS) GOARCH=$(CROSS_GOARCH) CGO_ENABLED=0 go build -o $(SIDECAR_CROSS_OUTPUT) -ldflags="-s -w ${LDFLAGS_X}" $(SIDECAR_CMD_PATH)
+	@echo "Built: $(SIDECAR_CROSS_OUTPUT)"
+
+build-sidecar-platform-%:
+	@$(MAKE) cross-compile-sidecar CROSS_GOOS=$(word 1,$(subst -, ,$*)) CROSS_GOARCH=$(word 2,$(subst -, ,$*))
+
+.PHONY: build-all-platforms-sidecar
+build-all-platforms-sidecar: ## Build sidecar for all supported platforms (parallel: make -j5 build-all-platforms-sidecar)
+	@$(MAKE) -j5 $(addprefix build-sidecar-platform-,$(SUPPORTED_PLATFORMS))
+
 # Python virtual environment - expects uv venv
 VENV_DIR = .venv
 VENV_PYTHON = $(VENV_DIR)/bin/python
@@ -353,6 +380,7 @@ install-wheel-tools: venv ## Install Python wheel build tools using uv
 WHEEL_BUILD_DIR = python-server/build-$(CROSS_GOOS)-$(CROSS_GOARCH)
 
 WHEEL_BINARY_NAME = eval-hub$(if $(filter windows,$(CROSS_GOOS)),.exe,)
+SIDECAR_WHEEL_BINARY_NAME = eval-runtime-sidecar$(if $(filter windows,$(CROSS_GOOS)),.exe,)
 
 .PHONY: clean-wheels
 clean-wheels: ## Clean Python wheel build artifacts
@@ -379,6 +407,10 @@ build-wheel: ## Build Python wheel: make build-wheel WHEEL_PLATFORM=manylinux_2_
 	@echo "Staging binary $(CROSS_OUTPUT) as $(WHEEL_BINARY_NAME)"
 	@cp $(CROSS_OUTPUT) $(WHEEL_BUILD_DIR)/binaries/$(WHEEL_BINARY_NAME)
 	@chmod +x $(WHEEL_BUILD_DIR)/binaries/$(WHEEL_BINARY_NAME)
+	@test -f $(SIDECAR_CROSS_OUTPUT) || $(MAKE) cross-compile-sidecar
+	@echo "Staging sidecar binary $(SIDECAR_CROSS_OUTPUT) as $(SIDECAR_WHEEL_BINARY_NAME)"
+	@cp $(SIDECAR_CROSS_OUTPUT) $(WHEEL_BUILD_DIR)/binaries/$(SIDECAR_WHEEL_BINARY_NAME)
+	@chmod +x $(WHEEL_BUILD_DIR)/binaries/$(SIDECAR_WHEEL_BINARY_NAME)
 	@echo "Building wheel for $(WHEEL_PLATFORM)..."
 	WHEEL_PLATFORM=$(WHEEL_PLATFORM) uv build --wheel $(WHEEL_BUILD_DIR) --out-dir python-server/dist
 	@rm -rf $(WHEEL_BUILD_DIR)
@@ -466,9 +498,15 @@ check-unused-components:
 
 documentation: check-unused-components generate-public-docs verify-api-docs
 
+show-local-api-docs:
+	open docs/index.html
+
+doc-build: documentation
+	$(MAKE) show-local-api-docs
+
 update-redocly-cli:
 	rm -f package-lock.json
-	npm install @redocly/cli@latest
+	npm install --save-exact @redocly/cli@latest
 
 # Local image build (same Containerfile and BUILD_DATE as .github/workflows/ci.yml docker-build-push; pass GIT_HASH for embedded evalhub-mcp metadata).
 DOCKER_IMAGE_LOCAL ?= eval-hub:local
@@ -760,59 +798,34 @@ test-mcp-vscode: start-service build-mcp ## Run VS Code/Cursor MCP test scripts 
 ## Atris Upgrade Tests
 ## ------------------------------------------------------------------------------------------------
 
+UPGRADE_STATE_JSON ?= test-reports/upgrade-state.json
+UPGRADE_TEST_TIMEOUT ?= 15m
+
 .PHONY: run-pre-upgrade run-post-upgrade-verify run-post-upgrade run-post-upgrade-cleanup run-atris-upgrade
 
 run-pre-upgrade:
 	@echo "Running pre-upgrade tests for ${SOURCE_RELEASE} ..."
-	@test -n "$(JUNIT_XML)" || { \
-		echo "ERROR: JUNIT_XML is not set or is empty."; \
-		exit 1; \
-	}
+	@test -n "$(JUNIT_XML)" || { echo "ERROR: JUNIT_XML is not set or is empty."; exit 1; }
 	@mkdir -p $(dir $(JUNIT_XML))
-	@echo "TODO"
-	@printf '%s\n' \
-		'<?xml version="1.0" encoding="UTF-8"?>' \
-		'<testsuites name="EvalHub Upgrade Tests" tests="0" skipped="0" failures="0" errors="0" time="0.0">' \
-		'</testsuites>' \
-		> "$(JUNIT_XML)"
-	@echo "Results saved to ${JUNIT_XML}"
-	@echo "Pre-upgrade tests complete"
+	UPGRADE_STATE_JSON=$(abspath $(UPGRADE_STATE_JSON)) go test -timeout=$(UPGRADE_TEST_TIMEOUT) -count=1 ./tests/upgrade/... --godog.tags=@pre-upgrade --godog.format=junit:$(abspath $(JUNIT_XML)),pretty -v
 
 run-post-upgrade-verify:
 	@echo "Running post-upgrade verification tests for ${SOURCE_RELEASE} to ${TARGET_RELEASE} ..."
-	@test -n "$(JUNIT_XML)" || { \
-		echo "ERROR: JUNIT_XML is not set or is empty."; \
-		exit 1; \
-	}
+	@test -n "$(JUNIT_XML)" || { echo "ERROR: JUNIT_XML is not set or is empty."; exit 1; }
 	@mkdir -p $(dir $(JUNIT_XML))
-	@echo "TODO"
-	@printf '%s\n' \
-		'<?xml version="1.0" encoding="UTF-8"?>' \
-		'<testsuites name="EvalHub Upgrade Tests" tests="0" skipped="0" failures="0" errors="0" time="0.0">' \
-		'</testsuites>' \
-		> "$(JUNIT_XML)"
-	@echo "Results saved to ${JUNIT_XML}"
-	@echo "Post-upgrade verification tests complete"
+	UPGRADE_STATE_JSON=$(abspath $(UPGRADE_STATE_JSON)) go test -timeout=$(UPGRADE_TEST_TIMEOUT) -count=1 ./tests/upgrade/... --godog.tags=@post-upgrade-verify --godog.format=junit:$(abspath $(JUNIT_XML)),pretty -v
 
 run-post-upgrade:
 	@echo "Running post-upgrade tests for ${TARGET_RELEASE} ..."
-	@test -n "$(JUNIT_XML)" || { \
-		echo "ERROR: JUNIT_XML is not set or is empty."; \
-		exit 1; \
-	}
+	@test -n "$(JUNIT_XML)" || { echo "ERROR: JUNIT_XML is not set or is empty."; exit 1; }
 	@mkdir -p $(dir $(JUNIT_XML))
-	@echo "TODO"
-	@printf '%s\n' \
-		'<?xml version="1.0" encoding="UTF-8"?>' \
-		'<testsuites name="EvalHub Upgrade Tests" tests="0" skipped="0" failures="0" errors="0" time="0.0">' \
-		'</testsuites>' \
-		> "$(JUNIT_XML)"
-	@echo "Results saved to ${JUNIT_XML}"
-	@echo "Post-upgrade tests complete"
+	UPGRADE_STATE_JSON=$(abspath $(UPGRADE_STATE_JSON)) go test -timeout=$(UPGRADE_TEST_TIMEOUT) -count=1 ./tests/upgrade/... --godog.tags=@post-upgrade --godog.format=junit:$(abspath $(JUNIT_XML)),pretty -v
 
 run-post-upgrade-cleanup:
 	@echo "Running post-upgrade cleanup for ${TARGET_RELEASE} ..."
-	@echo "TODO"
+	@test -n "$(JUNIT_XML)" || { echo "ERROR: JUNIT_XML is not set or is empty."; exit 1; }
+	@mkdir -p $(dir $(JUNIT_XML))
+	UPGRADE_STATE_JSON=$(abspath $(UPGRADE_STATE_JSON)) go test -timeout=$(UPGRADE_TEST_TIMEOUT) -count=1 ./tests/upgrade/... --godog.tags=@post-upgrade-cleanup --godog.format=junit:$(abspath $(JUNIT_XML)),pretty -v || true
 	@echo "Post-upgrade cleanup complete"
 
 run-atris-upgrade: run-pre-upgrade run-post-upgrade-verify run-post-upgrade run-post-upgrade-cleanup

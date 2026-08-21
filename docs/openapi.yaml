@@ -2,7 +2,7 @@ openapi: 3.1.0
 info:
   title: Eval Hub
   description: API REST server for evaluation backend orchestration
-  version: 0.4.5
+  version: 1.0.2
   contact:
     name: API Support
   license:
@@ -106,8 +106,8 @@ paths:
                     id: standard-safety-collection
                   pass_criteria:
                     threshold: 0.5
-              CreateEvaluationWithAuthAndQueue:
-                summary: Evaluate an authenticated model with Kueue scheduling
+              CreateEvaluationWithAuthAndHardwareProfile:
+                summary: Evaluate an authenticated model with HardwareProfile Kueue scheduling
                 value:
                   name: granite-3.1-8b-gpu-eval
                   description: GPU-scheduled evaluation with model authentication
@@ -125,11 +125,10 @@ paths:
                       parameters:
                         num_fewshot: 0
                         limit: 100
+                      hardware_config:
+                        hardware_profile_name: gpu-queue-profile
                   pass_criteria:
                     threshold: 0.5
-                  queue:
-                    kind: kueue
-                    name: gpu-local-queue
               CreateEvaluationWithExperiment:
                 summary: Evaluate with MLFlow experiment tracking
                 value:
@@ -2029,6 +2028,28 @@ components:
               items:
                 $ref: '#/components/schemas/BenchmarkStatus'
               description: Per-benchmark status
+    MetricSchema:
+      type: object
+      description: One entry in metrics_schema that names a metric and its result type.
+      required:
+        - name
+        - type
+      properties:
+        name:
+          type: string
+          description: Metric name that also appears as a key in the metrics map.
+          example: acc
+        type:
+          type: string
+          enum:
+            - numeric
+            - categorical
+            - array_ordered
+            - array_unordered
+            - time_series
+          description: |
+            Result type for this metric. One of numeric, categorical, array_ordered, array_unordered, or time_series.
+          example: numeric
     BenchmarkTest:
       type: object
       description: The test result of a single benchmark run
@@ -2060,7 +2081,25 @@ components:
         metrics:
           type: object
           additionalProperties: true
-          description: Metric name to value
+          description: |
+            Metrics produced by evaluating the model on this benchmark, keyed by metric name. Each value may be a scalar, list, or object.
+          example:
+            acc: 0.691
+            acc_norm: 0.637
+            acc_stderr: 0.009
+        metrics_schema:
+          type: array
+          description: |
+            Metadata describing how each metric in metrics should be interpreted. Each entry names a metric key and its result type. Metrics without an entry default to numeric.
+          example:
+            - name: acc
+              type: numeric
+            - name: acc_norm
+              type: numeric
+            - name: acc_stderr
+              type: numeric
+          items:
+            $ref: '#/components/schemas/MetricSchema'
         additional_info:
           type: object
           additionalProperties: true
@@ -2119,22 +2158,29 @@ components:
       type: object
       description: Model specification for evaluation requests
       required:
-        - url
         - name
       properties:
-        url:
-          type: string
-          description: Model URL
         name:
           type: string
-          description: Model name
+          description: |
+            The model name.
+        url:
+          type: string
+          description: |
+            The model URL.
+
+            Note that if `pre_recorded_data` is set for all `test_data_ref.type`
+            in the `benchmarks` section then `url` will not be `required` for the job run,
+            in all other cases a `url` is required.
         parameters:
           type: object
           additionalProperties: true
-          description: Model specific parameters
+          description: |
+            The model specific parameters.
         auth:
           $ref: '#/components/schemas/ModelAuth'
-          description: The model authentication configuration
+          description: |
+            The model authentication configuration.
     EvaluationJobConfigCommon1:
       type: object
       title: EvaluationJobConfigCommon1
@@ -2161,7 +2207,7 @@ components:
         model:
           $ref: '#/components/schemas/ModelRef'
           description: |
-            The model to evaluate.
+            The model to evaluate, or the model that was used to generate the pre-recorded data.
     Ref:
       type: object
       description: Reference by ID
@@ -2192,36 +2238,105 @@ components:
           description: Threshold value.
       required:
         - threshold
-    HardwareProfileRef:
+    QueueConfig:
       type: object
-      title: HardwareProfileRef
-      description: Reference to an OpenDataHub HardwareProfile custom resource.
+      title: QueueConfig
+      description: |
+        Optional workload scheduling queue under a benchmark's or evaluation's direct `hardware_config.queue` (e.g. Kueue LocalQueue), or the deprecated top-level `evaluation.queue` field. Prefer `benchmark.hardware_config` or `evaluation.hardware_config`. Precedence at job scheduling time (highest first): queue-backed HardwareProfile; then `hardware_config.queue` (benchmark, else evaluation-level fallback); then deprecated `evaluation.queue`.
       required:
         - name
       properties:
+        kind:
+          type: string
+          enum:
+            - kueue
+          default: kueue
+          description: |
+            Queue integration to use. When omitted, the server behaves as if `kueue` was set. Only `kueue` is supported today.
         name:
           type: string
-          pattern: ^[a-z0-9]([-a-z0-9]*[a-z0-9])?$
+          maxLength: 63
+          pattern: ^[a-z0-9]([-a-z0-9]{0,61}[a-z0-9])?$
           description: |
-            Name of the `HardwareProfile` custom resource (`hardwareprofiles.infrastructure.opendatahub.io`). Must conform to RFC 1123 DNS label naming (lowercase letters, digits, and internal hyphens).
-          examples:
-            - default-profile
-            - gpu-profile-v1
-        namespace:
+            Queue resource name (for Kueue, the LocalQueue name). Must conform to RFC 1123 DNS label naming (lowercase letters, digits, and internal hyphens; max 63 characters). Set on the Job as label `kueue.x-k8s.io/queue-name`.
+    HardwareResourceQuantity:
+      type: object
+      title: HardwareResourceQuantity
+      description: |
+        Optional Kubernetes CPU or memory request and limit quantities for a benchmark's direct `hardware_config` override.
+      properties:
+        request:
           type: string
-          pattern: ^[a-z0-9]([-a-z0-9]*[a-z0-9])?$
           description: |
-            Namespace of the `HardwareProfile` custom resource. When omitted, the server defaults to the evaluation job tenant namespace (from the `X-Tenant` request header in cluster mode).
+            Kubernetes resource request quantity (for example `1`, `250m`, or `1Gi`).
           examples:
-            - my-tenant-namespace
+            - '1'
+            - 250m
+            - 1Gi
+        limit:
+          type: string
+          description: |
+            Kubernetes resource limit quantity (for example `2`, `1`, or `2Gi`).
+          examples:
+            - '2'
+            - '1'
+            - 2Gi
+    HardwareGPUConfig:
+      type: object
+      title: HardwareGPUConfig
+      description: |
+        Optional GPU resource override for a benchmark's direct `hardware_config`. Kubernetes sets GPU requests and limits to the same value (`count`).
+      properties:
+        name:
+          type: string
+          description: |
+            Kubernetes extended resource name (for example `nvidia.com/gpu` or `amd.com/gpu`).
+          examples:
+            - nvidia.com/gpu
+        count:
+          type: integer
+          minimum: 1
+          description: |
+            Number of GPU units to request on the evaluation Job. Applied as both request and limit.
+          examples:
+            - 1
     BenchmarkHardwareConfig:
       type: object
       title: BenchmarkHardwareConfig
       description: |
-        Optional per-benchmark hardware override for Kubernetes runtimes. When `hardware_profile_ref` is set, the server fetches the named OpenDataHub `HardwareProfile` custom resource and applies its CPU, memory, and GPU resource values to the evaluation Job adapter container. Values missing from the profile fall back to the provider `runtime.k8s` configuration (and built-in defaults when those are unset).
+        Optional per-benchmark hardware override for Kubernetes runtimes.
+        Two mutually exclusive modes:
+        - **Profile mode:** set `hardware_profile_name` to fetch a named OpenDataHub
+          `HardwareProfile` custom resource and apply its CPU, memory, and GPU resource
+          values plus optional scheduling (`spec.scheduling`) to the evaluation Job.
+          Node scheduling applies `nodeSelector` and `tolerations`; Queue scheduling
+          applies the Kueue LocalQueue name and optional priority class. When
+          `hardware_profile_name` is set, `queue`, `cpu`, `memory`, and `gpu` must not
+          be present — the request is rejected. Disabled profiles
+          (`opendatahub.io/disabled: "true"`) are rejected on create.
+
+        - **Direct mode:** omit `hardware_profile_name` and set `queue`, `cpu`,
+          `memory`, and/or `gpu` directly. Values missing from these fields fall back
+          to the provider `runtime.k8s` configuration (and built-in defaults when those
+          are unset).
       properties:
-        hardware_profile_ref:
-          $ref: '#/components/schemas/HardwareProfileRef'
+        hardware_profile_name:
+          type: string
+          maxLength: 63
+          pattern: ^[a-z0-9]([-a-z0-9]{0,61}[a-z0-9])?$
+          description: |
+            Name of the OpenDataHub `HardwareProfile` custom resource (`hardwareprofiles.infrastructure.opendatahub.io`) in the platform namespace (`EVALHUB_HARDWARE_PROFILES_NAMESPACE`, typically `opendatahub` or `redhat-ods-applications`). Must conform to RFC 1123 DNS label naming (lowercase letters, digits, and internal hyphens; max 63 characters). Mutually exclusive with `queue`, `cpu`, `memory`, and `gpu`.
+          examples:
+            - default-profile
+            - gpu-profile-v1
+        queue:
+          $ref: '#/components/schemas/QueueConfig'
+        cpu:
+          $ref: '#/components/schemas/HardwareResourceQuantity'
+        memory:
+          $ref: '#/components/schemas/HardwareResourceQuantity'
+        gpu:
+          $ref: '#/components/schemas/HardwareGPUConfig'
     TestDataRefS3:
       type: object
       description: |
@@ -2262,6 +2377,22 @@ components:
         bucket: my-eval-bucket
         key: datasets/benchmark-a/v1
         secret_ref: my-s3-connection-secret
+    TestDataRefResolvedSHA:
+      type: string
+      readOnly: true
+      description: |
+        Resolved content identity for the test data source (e.g. git commit SHA).
+        Server-populated after the evaluation run for reproducibility of the exact data
+        state used. Not set on job submission.
+      example: a3f9c12e8b4d6f1c2e9a7b3d5f0e8c4a2b6d9e1f
+    TestDataRefType:
+      type: string
+      description: |
+        The type of test data being referenced, the default is `data_set` if not specified. The `model` section remains required for all job runs; however, if `pre_recorded_data` is set for all benchmarks then `model.url` may be omitted.
+      enum:
+        - data_set
+        - pre_recorded_data
+      default: data_set
     TestDataRefPVC:
       type: object
       description: |
@@ -2281,10 +2412,12 @@ components:
       properties:
         claim_name:
           type: string
-          pattern: ^[a-z0-9]([-a-z0-9]*[a-z0-9])?$
+          maxLength: 63
+          pattern: ^[a-z0-9]([-a-z0-9]{0,61}[a-z0-9])?$
           description: |
             Name of the PersistentVolumeClaim in the evaluation job namespace (same as Kubernetes
-            `PersistentVolumeClaimVolumeSource.claimName`). Must be a valid RFC 1123 DNS label.
+            `PersistentVolumeClaimVolumeSource.claimName`). Must be a valid RFC 1123 DNS label
+            (lowercase letters, digits, and internal hyphens; max 63 characters).
         sub_path:
           type: string
           description: |
@@ -2293,10 +2426,83 @@ components:
       example:
         claim_name: eval-datasets-pvc
         sub_path: benchmark-a/v1
+    TestDataRefGit:
+      type: object
+      description: |
+        Git repository test data. Only applies when Eval Hub runs the benchmark as a
+        **Kubernetes Job** (cluster execution). It does not apply to local-only evaluation runs.
+
+        The repository is cloned and checked out at **`ref`** into **`/test_data`** before
+        the adapter runs. If **`sub_path`** is provided, only that subdirectory is exposed.
+
+        The resolved commit SHA is recorded as **`resolved_sha`** on the parent
+        **`test_data_ref`** object on the evaluation job response, providing commit-level
+        reproducibility.
+
+        **Public repositories** — omit `secret_ref`; the repository may be cloned over
+        HTTP or HTTPS without credentials.
+
+        **Private repositories** — supply a **`secret_ref`** and an **`https://`** URL
+        pointing to a Kubernetes Secret of type `kubernetes.io/basic-auth` in the same
+        namespace as the evaluation job:
+
+        ```yaml
+        apiVersion: v1
+        kind: Secret
+        metadata:
+          name: my-git-credentials
+        type: kubernetes.io/basic-auth
+        stringData:
+          username: my-username
+          password: ghp_xxxxxxxxxxxx  # Personal Access Token or password
+        ```
+
+        Do not put credentials in the Eval Hub API request body; only reference an existing
+        Secret via **`secret_ref`**.
+      required:
+        - url
+        - ref
+      properties:
+        url:
+          type: string
+          description: |
+            HTTP(S) URL of the git repository to clone. SSH URLs are not supported.
+            Plain `http://` is allowed only for unauthenticated clones; when **`secret_ref`**
+            is set the URL must use **`https://`**.
+          example: https://github.com/my-org/my-eval-datasets.git
+        ref:
+          type: string
+          description: |
+            Git ref to check out — a branch name, tag name, or full commit SHA.
+            The init container resolves whichever type is provided; no `type` field is needed.
+
+            - **Branch**: `main`, `feat/my-branch`
+            - **Tag**: `v1.2.0`, `release-3.6`
+            - **Commit SHA**: `a3f9c12e8b...` (7–40 hex characters)
+          example: main
+        sub_path:
+          type: string
+          description: |
+            Optional path within the cloned repository to mount at `/test_data` instead of
+            the repository root. Useful when the repository contains data for multiple
+            benchmarks in separate directories.
+          example: datasets/lm-eval
+        secret_ref:
+          type: string
+          description: |
+            Name of a Kubernetes **`Secret`** of type `kubernetes.io/basic-auth` in the
+            evaluation job namespace, mounted read-only into the git-clone init container.
+            Omit for public repositories.
+          example: my-git-credentials
+      example:
+        url: https://github.com/my-org/my-eval-datasets.git
+        ref: main
+        sub_path: datasets/lm-eval
+        secret_ref: my-git-credentials
     TestDataRef:
       type: object
       description: |
-        Reference to external test data for a benchmark. Exactly one of `s3` or `pvc` must be set.
+        Reference to external test data for a benchmark. Exactly one of `s3`, `pvc`, or `git` must be set.
 
         **`s3`** — When the evaluation runs as a **Kubernetes Job**, Eval Hub schedules an
         **init container** on the evaluation job pod before the adapter runs. That init container:
@@ -2313,21 +2519,49 @@ components:
         container at **`/test_data`**. No init container is used; the PVC must already contain the
         data and must exist in the same namespace as the evaluation job.
 
+        **`git`** — The specified repository is cloned and checked out at the given ref into
+        **`/test_data`** before the adapter runs. The resolved commit SHA is recorded as
+        **`resolved_sha`** on this object on the evaluation job for reproducibility.
+
         Do not put credentials in the Eval Hub API request body; only reference an existing
-        Secret via **`secret_ref`** (for S3).
-      additionalProperties: false
-      properties:
-        s3:
-          $ref: '#/components/schemas/TestDataRefS3'
-        pvc:
-          $ref: '#/components/schemas/TestDataRefPVC'
-      minProperties: 1
-      maxProperties: 1
+        Secret via **`secret_ref`** (for S3 or git).
       oneOf:
-        - required:
+        - type: object
+          properties:
+            s3:
+              $ref: '#/components/schemas/TestDataRefS3'
+            resolved_sha:
+              $ref: '#/components/schemas/TestDataRefResolvedSHA'
+            type:
+              $ref: '#/components/schemas/TestDataRefType'
+          additionalProperties: false
+          required:
             - s3
-        - required:
+          title: S3
+        - type: object
+          properties:
+            pvc:
+              $ref: '#/components/schemas/TestDataRefPVC'
+            resolved_sha:
+              $ref: '#/components/schemas/TestDataRefResolvedSHA'
+            type:
+              $ref: '#/components/schemas/TestDataRefType'
+          additionalProperties: false
+          required:
             - pvc
+          title: PVC
+        - type: object
+          properties:
+            git:
+              $ref: '#/components/schemas/TestDataRefGit'
+            resolved_sha:
+              $ref: '#/components/schemas/TestDataRefResolvedSHA'
+            type:
+              $ref: '#/components/schemas/TestDataRefType'
+          additionalProperties: false
+          required:
+            - git
+          title: Git
     EvaluationBenchmarkConfig:
       type: object
       description: |
@@ -2364,9 +2598,10 @@ components:
               $ref: '#/components/schemas/TestDataRef'
               description: |
                 Optional external test data mounted at **`/test_data`** for **Kubernetes Job** runs.
-                Set **`s3`** to download objects via a pre-run init container, or **`pvc`** to mount
-                an existing PersistentVolumeClaim read-only with no init container. Omit if the
-                benchmark does not need mounted files.
+                Set **`s3`** to download objects via a pre-run init container, **`pvc`** to mount
+                an existing PersistentVolumeClaim read-only with no init container, or **`git`**
+                to clone a repository via a pre-run init container. Omit if the benchmark does
+                not need mounted files.
     PassCriteriaWithDefault:
       type: object
       description: Pass/fail threshold criteria.
@@ -2477,26 +2712,6 @@ components:
             The OCI artifact export configuration.
       additionalProperties: false
       title: EvaluationExports
-    QueueConfig:
-      type: object
-      title: QueueConfig
-      description: |
-        Optional workload scheduling queue for Kubernetes runtimes (e.g. Kueue LocalQueue).
-      required:
-        - name
-      properties:
-        kind:
-          type: string
-          enum:
-            - kueue
-          default: kueue
-          description: |
-            Queue integration to use. When omitted, the server behaves as if `kueue` was set. Only `kueue` is supported today.
-        name:
-          type: string
-          pattern: ^[a-z0-9]([-a-z0-9]*[a-z0-9])?$
-          description: |
-            Queue resource name (for Kueue, the LocalQueue name). Must conform to RFC 1123 DNS label naming (lowercase letters, digits, and internal hyphens). Set on the Job as label `kueue.x-k8s.io/queue-name`.
     EvaluationJobConfigCommon2:
       type: object
       title: EvaluationJobConfigCommon2
@@ -2511,10 +2726,15 @@ components:
           $ref: '#/components/schemas/EvaluationExports'
           description: |
             Optional exports configuration for the evaluation job. When provided, the evaluation job results will be exported to the specified location.
+        hardware_config:
+          $ref: '#/components/schemas/BenchmarkHardwareConfig'
+          description: |
+            Optional evaluation-level hardware override for Kubernetes-backed jobs. Applied as a fallback for every benchmark that does not specify its own `hardware_config`. Prefer per-benchmark `hardware_config` when individual benchmarks need different hardware. When neither is set, the deprecated top-level `queue` field may still supply a scheduling queue.
         queue:
           $ref: '#/components/schemas/QueueConfig'
+          deprecated: true
           description: |
-            Optional scheduling queue for Kubernetes-backed evaluation jobs (e.g. Kueue).
+            Deprecated. Prefer `benchmark.hardware_config` or evaluation-level `hardware_config` instead. This field will be discontinued in a future release. Retained for backward compatibility: when neither `benchmark.hardware_config` nor evaluation `hardware_config` is set, this queue is applied to scheduled jobs. When a benchmark references a queue-backed HardwareProfile (or sets `hardware_config.queue`), that configuration takes precedence over this field.
         custom:
           type: object
           additionalProperties: true
@@ -2675,7 +2895,7 @@ components:
           additionalProperties:
             type: string
           description: |
-            Optional node label key/value pairs added to the evaluation pod to target a GPU model or node pool (for example `nvidia.com/gpu.product: NVIDIA-H100-SXM5-80GB`). Ignored when the evaluation job is submitted with a queue; in that case Kueue ResourceFlavors govern node selection.
+            Optional node label key/value pairs added to the evaluation pod to target a GPU model or node pool (for example `nvidia.com/gpu.product: NVIDIA-H100-SXM5-80GB`). Ignored when a HardwareProfile with Queue scheduling is applied; in that case Kueue ResourceFlavors govern node selection. Overridden when a HardwareProfile with Node scheduling provides its own nodeSelector.
           examples:
             - nvidia.com/gpu.product: NVIDIA-H100-SXM5-80GB
     EnvVar:
@@ -2940,9 +3160,10 @@ components:
               $ref: '#/components/schemas/TestDataRef'
               description: |
                 Optional external test data mounted at **`/test_data`** for **Kubernetes Job** runs.
-                Set **`s3`** to download objects via a pre-run init container, or **`pvc`** to mount
-                an existing PersistentVolumeClaim read-only with no init container. Omit if the
-                benchmark does not need mounted files.
+                Set **`s3`** to download objects via a pre-run init container, **`pvc`** to mount
+                an existing PersistentVolumeClaim read-only with no init container, or **`git`**
+                to clone a repository via a pre-run init container. Omit if the benchmark does
+                not need mounted files.
     CollectionConfig:
       type: object
       description: Request to create or update a collection.

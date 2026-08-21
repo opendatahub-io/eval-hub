@@ -12,15 +12,6 @@ local harness = std.parseJson(std.extVar('harness'));
   value(name, default='')::
     if std.objectHas(harness, 'values') && std.objectHas(harness.values, name) then harness.values[name] else default,
 
-  // Collection reference from a saved value (e.g. collection_id); null when unset (use with mergeOptional).
-  collection(idKey='collection_id')::
-    local id = $.value(idKey);
-    if id != '' then {
-      collection: {
-        id: id,
-      },
-    },
-
   // Experiment name when MLflow is configured; empty otherwise (matches {{mlflow:...}}).
   mlflow(name)::
     if harness.mlflow_enabled then name else '',
@@ -48,7 +39,19 @@ local harness = std.parseJson(std.extVar('harness'));
       },
     },
 
+  // Git test data reference (init container clones into /test_data).
+  // Defaults clone this repository and use tests/git-testdata (arc_easy + tokenizer).
+  gitTestDataRef(overrides={})::
+    {
+      git: {
+        url: $.env('TEST_DATA_GIT_URL', 'https://github.com/eval-hub/eval-hub'),
+        ref: $.env('TEST_DATA_GIT_REF', 'main'),
+        sub_path: $.env('TEST_DATA_GIT_SUB_PATH', 'tests/git-testdata'),
+      } + overrides,
+    },
+
   // Evaluation/collection benchmark with disconnected-aware tokenizer and optional test_data_ref.
+  // When harness.queue_enabled is true, attaches hardware_config.queue for Kueue scheduling.
   benchmark(id, providerId, parameters)::
     local base = {
       id: id,
@@ -56,7 +59,7 @@ local harness = std.parseJson(std.extVar('harness'));
       parameters: {
         tokenizer: $.defaultTokenizer(),
       } + parameters,
-    };
+    } + $.hardwareConfigQueue();
     if harness.disconnected then base + { test_data_ref: $.testDataRef() } else base,
 
   // Benchmark that always mounts offline data from a PVC (tokenizer under /test_data).
@@ -68,6 +71,35 @@ local harness = std.parseJson(std.extVar('harness'));
         tokenizer: '/test_data/tokenizer',
       } + parameters,
       test_data_ref: $.pvcTestDataRef(),
+    } + $.hardwareConfigQueue(),
+
+  // Benchmark that always clones offline data from git (tokenizer under /test_data).
+  gitBenchmark(id, providerId, parameters, gitOverrides={})::
+    {
+      id: id,
+      provider_id: providerId,
+      parameters: {
+        tokenizer: '/test_data/tokenizer',
+      } + parameters,
+      test_data_ref: $.gitTestDataRef(gitOverrides),
+    } + $.hardwareConfigQueue(),
+
+  // Optional hardware_config.queue when queue is enabled for the scenario.
+  hardwareConfigQueue()::
+    if harness.queue_enabled then {
+      hardware_config: {
+        queue: {
+          kind: 'kueue',
+          name: $.env('QUEUE_NAME', '{{env:QUEUE_NAME|user-queue}}'),
+        },
+      },
+    } else {},
+
+  // Queue object for embedding under hardware_config (always present; used by @kueue payloads).
+  queueConfig()::
+    {
+      kind: 'kueue',
+      name: $.env('QUEUE_NAME', 'user-queue'),
     },
 
   // arc_easy benchmark with common FVT defaults; extra parameters override or extend.
@@ -83,6 +115,20 @@ local harness = std.parseJson(std.extVar('harness'));
       num_examples: 10,
       num_fewshot: 3,
     } + parameters),
+
+  // arc_easy with git offline test data (url/ref from env by default).
+  gitArcEasyBenchmark(parameters={}, gitOverrides={})::
+    $.gitBenchmark('arc_easy', 'lm_evaluation_harness', {
+      num_examples: 10,
+      num_fewshot: 3,
+    } + parameters, gitOverrides),
+
+  // truthfulqa_mc1 with git offline test data (used under tests/git-testdata/staging_sub_path).
+  gitTruthfulqaMc1Benchmark(parameters={}, gitOverrides={})::
+    $.gitBenchmark('truthfulqa_mc1', 'lm_evaluation_harness', {
+      num_examples: 10,
+      num_fewshot: 0,
+    } + parameters, gitOverrides),
 
   // Default benchmark for evaluation_job.jsonnet (disconnected vs connected FVT).
   defaultBenchmark():: $.arcEasyBenchmark({}),
@@ -144,7 +190,14 @@ local harness = std.parseJson(std.extVar('harness'));
       model: $.model(),
       collection: {
         id: collectionId,
-      },
+      } + if harness.queue_enabled then {
+        benchmarks: [{
+          provider_id: 'lm_evaluation_harness',
+          hardware_config: {
+            queue: $.queueConfig(),
+          },
+        }],
+      } else {},
     },
 
   // Same as oobCollectionRefJob with collection id from a saved scenario value.
@@ -163,6 +216,37 @@ local harness = std.parseJson(std.extVar('harness'));
       },
     } else {},
 
+  // EvalCard @mlflow FVT job: disconnected-aware arc_easy + experiment (always present).
+  evalCardArcEasyJob(name, description, tags, experimentName, numExamples=5)::
+    {
+      name: name,
+      description: description,
+      tags: tags,
+      model: $.model(),
+      benchmarks: [
+        $.benchmark('arc_easy', 'lm_evaluation_harness', {
+          num_examples: numExamples,
+        }),
+      ],
+      experiment: {
+        name: experimentName,
+      },
+    },
+
+  // EvalCard collection job against toxicity-and-ethical-principles (disconnected-aware overrides).
+  evalCardToxicityCollectionJob(name, description, tags, experimentName)::
+    $.oobCollectionRefJobWithLimit(
+      name,
+      'toxicity-and-ethical-principles',
+      $.toxicityAndEthicalPrinciplesBenchmarkIds(),
+    ) + {
+      description: description,
+      tags: tags,
+      experiment: {
+        name: experimentName,
+      },
+    },
+
   // Merge base with an optional object; optional may be null (adds nothing).
   mergeOptional(base, optional)::
     if optional == null then base else base + optional,
@@ -177,12 +261,23 @@ local harness = std.parseJson(std.extVar('harness'));
       },
     },
 
-  // Queue block, or null when queue is not enabled (use with mergeOptional).
-  queue()::
-    if harness.queue_enabled then {
-      queue: {
-        kind: 'kueue',
-        name: $.env('QUEUE_NAME', '{{env:QUEUE_NAME|user-queue}}'),
-      },
+  // Collection reference from a saved value (e.g. collection_id); null when unset (use with mergeOptional).
+  // When queue is enabled, adds a provider-level hardware_config.queue override.
+  collection(idKey='collection_id')::
+    local id = $.value(idKey);
+    if id != '' then {
+      collection: {
+        id: id,
+      } + if harness.queue_enabled then {
+        benchmarks: [{
+          provider_id: 'lm_evaluation_harness',
+          hardware_config: {
+            queue: {
+              kind: 'kueue',
+              name: $.env('QUEUE_NAME', '{{env:QUEUE_NAME|user-queue}}'),
+            },
+          },
+        }],
+      } else {},
     },
 }

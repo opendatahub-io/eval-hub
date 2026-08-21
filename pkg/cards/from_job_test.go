@@ -7,6 +7,62 @@ import (
 	"github.com/eval-hub/eval-hub/pkg/api"
 )
 
+func TestNewEvaluationCardPropagatesMetricsSchema(t *testing.T) {
+	job := &api.EvaluationJobResource{
+		Resource: api.EvaluationResource{
+			Resource: api.Resource{ID: "job-metrics-schema"},
+		},
+		EvaluationJobConfig: api.EvaluationJobConfig{
+			Model: &api.ModelRef{URL: "https://vllm.example.com/v1", Name: "model"},
+			Benchmarks: []api.EvaluationBenchmarkConfig{
+				{Ref: api.Ref{ID: "arc_easy"}, ProviderID: "lm_evaluation_harness"},
+			},
+		},
+		Status: &api.EvaluationJobStatus{
+			EvaluationJobState: api.EvaluationJobState{
+				State: api.OverallStateCompleted,
+				Message: &api.MessageInfo{
+					Message:     "Evaluation job is completed",
+					MessageCode: "evaluation.job.updated",
+				},
+			},
+			Benchmarks: []api.BenchmarkStatus{
+				{
+					ID:             "arc_easy",
+					ProviderID:     "lm_evaluation_harness",
+					BenchmarkIndex: 0,
+					Status:         api.StateCompleted,
+				},
+			},
+		},
+		Results: &api.EvaluationJobResults{
+			Benchmarks: []api.BenchmarkResult{
+				{
+					ID:             "arc_easy",
+					ProviderID:     "lm_evaluation_harness",
+					BenchmarkIndex: 0,
+					Metrics:        map[string]any{"acc": 0.9},
+					MetricsSchema: []api.MetricSchema{
+						{Name: "acc", Type: api.ResultTypeNumeric},
+					},
+				},
+			},
+		},
+	}
+
+	card := NewEvaluationCard(job)
+	if card == nil || card.Results == nil || len(card.Results.Benchmarks) != 1 {
+		t.Fatalf("card results = %#v", card)
+	}
+	got := card.Results.Benchmarks[0]
+	if len(got.MetricsSchema) != 1 {
+		t.Fatalf("metrics_schema len = %d, want 1", len(got.MetricsSchema))
+	}
+	if got.MetricsSchema[0].Name != "acc" || got.MetricsSchema[0].Type != api.ResultTypeNumeric {
+		t.Fatalf("metrics_schema = %#v", got.MetricsSchema)
+	}
+}
+
 func TestNewEvaluationCardFromDirectBenchmarkJob(t *testing.T) {
 	threshold := float32(0.3)
 	job := &api.EvaluationJobResource{
@@ -18,7 +74,7 @@ func TestNewEvaluationCardFromDirectBenchmarkJob(t *testing.T) {
 			},
 		},
 		EvaluationJobConfig: api.EvaluationJobConfig{
-			Model: api.ModelRef{
+			Model: &api.ModelRef{
 				URL:     "https://vllm.example.com/v1",
 				Name:    "meta-llama/Llama-3.2-1B-Instruct",
 				CardURL: "https://example.com/model-card",
@@ -121,7 +177,7 @@ func TestNewEvaluationCardFromCollectionJob(t *testing.T) {
 			Resource: api.Resource{ID: "job-456"},
 		},
 		EvaluationJobConfig: api.EvaluationJobConfig{
-			Model: api.ModelRef{URL: "https://vllm.example.com/v1", Name: "model"},
+			Model: &api.ModelRef{URL: "https://vllm.example.com/v1", Name: "model"},
 			Collection: &api.CollectionRef{
 				ID: "my-collection",
 			},
@@ -170,7 +226,7 @@ func TestNewEvaluationCardPartiallyFailedJobStatus(t *testing.T) {
 			Resource: api.Resource{ID: "job-789"},
 		},
 		EvaluationJobConfig: api.EvaluationJobConfig{
-			Model: api.ModelRef{URL: "https://vllm.example.com/v1", Name: "model"},
+			Model: &api.ModelRef{URL: "https://vllm.example.com/v1", Name: "model"},
 			Benchmarks: []api.EvaluationBenchmarkConfig{
 				{Ref: api.Ref{ID: "arc_easy"}, ProviderID: "lm_evaluation_harness"},
 				{Ref: api.Ref{ID: "arc_challenge"}, ProviderID: "lm_evaluation_harness"},
@@ -248,7 +304,7 @@ func TestNewEvaluationCardFromResultsWithoutStatusBenchmarks(t *testing.T) {
 	job := &api.EvaluationJobResource{
 		Resource: api.EvaluationResource{Resource: api.Resource{ID: "job-results-only"}},
 		EvaluationJobConfig: api.EvaluationJobConfig{
-			Model: api.ModelRef{URL: "https://vllm.example.com/v1", Name: "model"},
+			Model: &api.ModelRef{URL: "https://vllm.example.com/v1", Name: "model"},
 			Benchmarks: []api.EvaluationBenchmarkConfig{
 				{Ref: api.Ref{ID: "arc_easy"}, ProviderID: "lm_evaluation_harness"},
 			},
@@ -282,7 +338,7 @@ func TestNewEvaluationCardStatusOnlyResults(t *testing.T) {
 	job := &api.EvaluationJobResource{
 		Resource: api.EvaluationResource{Resource: api.Resource{ID: "job-status-only"}},
 		EvaluationJobConfig: api.EvaluationJobConfig{
-			Model: api.ModelRef{URL: "https://vllm.example.com/v1", Name: "model"},
+			Model: &api.ModelRef{URL: "https://vllm.example.com/v1", Name: "model"},
 		},
 		Status: &api.EvaluationJobStatus{
 			EvaluationJobState: api.EvaluationJobState{

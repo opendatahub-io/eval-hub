@@ -13,7 +13,7 @@ import (
 	"github.com/eval-hub/eval-hub/internal/eval_hub/common"
 	"github.com/eval-hub/eval-hub/internal/eval_hub/constants"
 	"github.com/eval-hub/eval-hub/internal/eval_hub/executioncontext"
-	"github.com/eval-hub/eval-hub/internal/eval_hub/http_wrappers"
+	"github.com/eval-hub/eval-hub/internal/eval_hub/httpwrappers"
 	"github.com/eval-hub/eval-hub/internal/eval_hub/messages"
 	"github.com/eval-hub/eval-hub/internal/eval_hub/metrics"
 	"github.com/eval-hub/eval-hub/internal/eval_hub/mlflow"
@@ -98,21 +98,98 @@ func (h *Handlers) getStorage(ctx *executioncontext.ExecutionContext) abstractio
 	return h.storage.WithLogger(ctx.Logger).WithContext(ctx.Ctx).WithTenant(ctx.Tenant).WithOwner(ctx.User)
 }
 
-// ApplyEvaluationJobQueueDefaults trims queue name/kind and sets kind to "kueue" when empty.
-// Call after validating a decoded EvaluationJobConfig (e.g. before persisting or starting a job).
-func ApplyEvaluationJobQueueDefaults(cfg *api.EvaluationJobConfig) {
-	if cfg == nil || cfg.Queue == nil {
+// ApplyHardwareConfigQueueDefaults trims queue name/kind on each benchmark's
+// hardware_config.queue (including collection overrides), evaluation-level
+// hardware_config.queue, and the deprecated evaluation.queue field, and sets
+// kind to "kueue" when empty. Call after validating a decoded EvaluationJobConfig.
+func ApplyHardwareConfigQueueDefaults(cfg *api.EvaluationJobConfig) {
+	if cfg == nil {
 		return
 	}
-	cfg.Queue.Name = strings.TrimSpace(cfg.Queue.Name)
-	cfg.Queue.Kind = strings.TrimSpace(cfg.Queue.Kind)
-	if cfg.Queue.Kind == "" {
-		cfg.Queue.Kind = "kueue"
+	for i := range cfg.Benchmarks {
+		applyQueueDefaults(cfg.Benchmarks[i].HardwareConfig)
+	}
+	if cfg.Collection != nil {
+		for i := range cfg.Collection.Benchmarks {
+			applyQueueDefaults(cfg.Collection.Benchmarks[i].HardwareConfig)
+		}
+	}
+	applyQueueDefaults(cfg.HardwareConfig)
+	if cfg.Queue != nil {
+		cfg.Queue.Name = strings.TrimSpace(cfg.Queue.Name)
+		cfg.Queue.Kind = strings.TrimSpace(cfg.Queue.Kind)
+		if cfg.Queue.Kind == "" {
+			cfg.Queue.Kind = "kueue"
+		}
 	}
 }
 
+func applyQueueDefaults(hw *api.BenchmarkHardwareConfig) {
+	if hw == nil || hw.Queue == nil {
+		return
+	}
+	hw.Queue.Name = strings.TrimSpace(hw.Queue.Name)
+	hw.Queue.Kind = strings.TrimSpace(hw.Queue.Kind)
+	if hw.Queue.Kind == "" {
+		hw.Queue.Kind = "kueue"
+	}
+}
+
+// benchmarksWithHardwareConfigFallback returns a copy of benchmarks where nil
+// hardware_config is filled from the evaluation-level fallback. Used only for
+// create-time HardwareProfile validation; persisted job config is unchanged.
+func benchmarksWithHardwareConfigFallback(benchmarks []api.EvaluationBenchmarkConfig, fallback *api.BenchmarkHardwareConfig) []api.EvaluationBenchmarkConfig {
+	if fallback == nil {
+		return benchmarks
+	}
+	out := make([]api.EvaluationBenchmarkConfig, len(benchmarks))
+	copy(out, benchmarks)
+	for i := range out {
+		if out[i].HardwareConfig == nil {
+			out[i].HardwareConfig = fallback
+		}
+	}
+	return out
+}
+
+func allBenchmarksHavePreRecordedData(benchmarks []api.EvaluationBenchmarkConfig) bool {
+	if len(benchmarks) == 0 {
+		return false
+	}
+	for _, benchmark := range benchmarks {
+		if benchmark.TestDataRef == nil || benchmark.TestDataRef.Type != "pre_recorded_data" {
+			return false
+		}
+	}
+	return true
+}
+
+// ValidateReadOnlyResolvedSHA returns an error if resolved_sha is set on any benchmark in the request.
+// resolved_sha is server-populated after the init container resolves the ref and must not be accepted on create.
+func ValidateReadOnlyResolvedSHA(cfg *api.EvaluationJobConfig) error {
+	if cfg == nil {
+		return nil
+	}
+	checkBenchmarks := func(benchmarks []api.EvaluationBenchmarkConfig) error {
+		for i := range benchmarks {
+			b := &benchmarks[i]
+			if b.TestDataRef != nil && b.TestDataRef.ResolvedSHA != "" {
+				return serviceerrors.NewServiceError(messages.ResolvedSHAReadOnly)
+			}
+		}
+		return nil
+	}
+	if err := checkBenchmarks(cfg.Benchmarks); err != nil {
+		return err
+	}
+	if cfg.Collection != nil {
+		return checkBenchmarks(cfg.Collection.Benchmarks)
+	}
+	return nil
+}
+
 // HandleCreateEvaluation handles POST /api/v1/evaluations/jobs
-func (h *Handlers) HandleCreateEvaluation(ctx *executioncontext.ExecutionContext, req http_wrappers.RequestWrapper, w http_wrappers.ResponseWrapper) {
+func (h *Handlers) HandleCreateEvaluation(ctx *executioncontext.ExecutionContext, req httpwrappers.RequestWrapper, w httpwrappers.ResponseWrapper) {
 	storage := h.getStorage(ctx)
 
 	logging.LogRequestStarted(ctx)
@@ -121,6 +198,7 @@ func (h *Handlers) HandleCreateEvaluation(ctx *executioncontext.ExecutionContext
 
 	evaluation := &api.EvaluationJobConfig{}
 	var collection *api.CollectionResource
+	var benchmarks []api.EvaluationBenchmarkConfig
 
 	err := h.withSpan(
 		ctx,
@@ -144,11 +222,29 @@ func (h *Handlers) HandleCreateEvaluation(ctx *executioncontext.ExecutionContext
 				}
 			}
 			jobForResolve := &api.EvaluationJobResource{EvaluationJobConfig: *evaluation}
-			benchmarks, err := GetJobBenchmarks(jobForResolve, collection)
+			benchmarks, err = GetJobBenchmarks(jobForResolve, collection)
 			if err != nil {
 				return err
 			}
-			return h.validateBenchmarkReferences(ctx, benchmarks)
+			if err := ValidateReadOnlyResolvedSHA(evaluation); err != nil {
+				return err
+			}
+			if err := h.validateBenchmarkReferences(ctx, benchmarks); err != nil {
+				return err
+			}
+			if h.runtime != nil {
+				if err := h.runtime.WithLogger(ctx.Logger).WithContext(runtimeCtx).ValidateHardwareProfiles(
+					benchmarksWithHardwareConfigFallback(benchmarks, evaluation.HardwareConfig),
+				); err != nil {
+					return err
+				}
+			}
+			if (evaluation.Model != nil) &&
+				(strings.TrimSpace(evaluation.Model.URL) == "") &&
+				!allBenchmarksHavePreRecordedData(benchmarks) {
+				return serviceerrors.NewServiceError(messages.ModelURLRequired)
+			}
+			return nil
 		},
 		"validation",
 		"validate-evaluation-job",
@@ -160,7 +256,7 @@ func (h *Handlers) HandleCreateEvaluation(ctx *executioncontext.ExecutionContext
 		return
 	}
 
-	ApplyEvaluationJobQueueDefaults(evaluation)
+	ApplyHardwareConfigQueueDefaults(evaluation)
 
 	mlflowExperimentID := ""
 	mlflowExperimentURL := ""
@@ -211,7 +307,7 @@ func (h *Handlers) HandleCreateEvaluation(ctx *executioncontext.ExecutionContext
 						State: api.OverallStatePending,
 						Message: api.WithMessageOrigin(&api.MessageInfo{
 							Message:     "Evaluation job created",
-							MessageCode: constants.MESSAGE_CODE_EVALUATION_JOB_CREATED,
+							MessageCode: constants.MessageCodeEvaluationJobCreated,
 						}, api.MessageOriginServer),
 					},
 				},
@@ -245,7 +341,7 @@ func (h *Handlers) HandleCreateEvaluation(ctx *executioncontext.ExecutionContext
 					state := api.OverallStateFailed
 					message := api.WithMessageOrigin(&api.MessageInfo{
 						Message:     runErr.Error(),
-						MessageCode: constants.MESSAGE_CODE_EVALUATION_JOB_FAILED,
+						MessageCode: constants.MessageCodeEvaluationJobFailed,
 					}, api.MessageOriginServer)
 					metrics.RecordEvaluationJobRuntimeStartFailed(ctx.Ctx, h.runtimeName())
 					metrics.RecordEvaluationJobTerminalState(ctx.Ctx, api.OverallStatePending, state)
@@ -259,7 +355,7 @@ func (h *Handlers) HandleCreateEvaluation(ctx *executioncontext.ExecutionContext
 			} else {
 				message := api.WithMessageOrigin(&api.MessageInfo{
 					Message:     "Evaluation job created but no runtime configured",
-					MessageCode: constants.MESSAGE_CODE_EVALUATION_JOB_UPDATED,
+					MessageCode: constants.MessageCodeEvaluationJobUpdated,
 				}, api.MessageOriginServer)
 				if err := storage.WithContext(runtimeCtx).UpdateEvaluationJobStatus(job.Resource.ID, job.Status.State, message); err != nil {
 					ctx.Logger.Error("Failed to update evaluation status", "error", err, "job_id", job.Resource.ID)
@@ -336,7 +432,7 @@ func (h *Handlers) validateBenchmarkReferences(ctx *executioncontext.ExecutionCo
 }
 
 // HandleListEvaluations handles GET /api/v1/evaluations/jobs
-func (h *Handlers) HandleListEvaluations(ctx *executioncontext.ExecutionContext, req http_wrappers.RequestWrapper, w http_wrappers.ResponseWrapper) {
+func (h *Handlers) HandleListEvaluations(ctx *executioncontext.ExecutionContext, req httpwrappers.RequestWrapper, w httpwrappers.ResponseWrapper) {
 	storage := h.getStorage(ctx)
 
 	var ofilter *abstractions.QueryFilter
@@ -418,15 +514,15 @@ func (h *Handlers) HandleListEvaluations(ctx *executioncontext.ExecutionContext,
 }
 
 // HandleGetEvaluation handles GET /api/v1/evaluations/jobs/{id}
-func (h *Handlers) HandleGetEvaluation(ctx *executioncontext.ExecutionContext, r http_wrappers.RequestWrapper, w http_wrappers.ResponseWrapper) {
+func (h *Handlers) HandleGetEvaluation(ctx *executioncontext.ExecutionContext, r httpwrappers.RequestWrapper, w httpwrappers.ResponseWrapper) {
 	storage := h.getStorage(ctx)
 
 	logging.LogRequestStarted(ctx)
 
 	// Extract ID from path
-	evaluationJobID := r.PathValue(constants.PATH_PARAMETER_JOB_ID)
+	evaluationJobID := r.PathValue(constants.PathParameterJobID)
 	if evaluationJobID == "" {
-		w.Error(serviceerrors.NewServiceError(messages.MissingPathParameter, "ParameterName", constants.PATH_PARAMETER_JOB_ID), ctx.RequestID)
+		w.Error(serviceerrors.NewServiceError(messages.MissingPathParameter, "ParameterName", constants.PathParameterJobID), ctx.RequestID)
 		return
 	}
 
@@ -447,15 +543,15 @@ func (h *Handlers) HandleGetEvaluation(ctx *executioncontext.ExecutionContext, r
 	)
 }
 
-func (h *Handlers) HandleUpdateEvaluation(ctx *executioncontext.ExecutionContext, r http_wrappers.RequestWrapper, w http_wrappers.ResponseWrapper) {
+func (h *Handlers) HandleUpdateEvaluation(ctx *executioncontext.ExecutionContext, r httpwrappers.RequestWrapper, w httpwrappers.ResponseWrapper) {
 	storage := h.getStorage(ctx)
 
 	logging.LogRequestStarted(ctx)
 
 	// Extract ID from path
-	evaluationJobID := r.PathValue(constants.PATH_PARAMETER_JOB_ID)
+	evaluationJobID := r.PathValue(constants.PathParameterJobID)
 	if evaluationJobID == "" {
-		w.Error(serviceerrors.NewServiceError(messages.MissingPathParameter, "ParameterName", constants.PATH_PARAMETER_JOB_ID), ctx.RequestID)
+		w.Error(serviceerrors.NewServiceError(messages.MissingPathParameter, "ParameterName", constants.PathParameterJobID), ctx.RequestID)
 		return
 	}
 
@@ -500,10 +596,33 @@ func (h *Handlers) HandleUpdateEvaluation(ctx *executioncontext.ExecutionContext
 				h.rewriteSidecarURLsInBenchmarkStatus(status.BenchmarkStatusEvent, job, ctx.Logger)
 			}
 
+			// Extract and clear JobMeta before passing the event to UpdateEvaluationJob.
+			// SHA persistence must happen only after validateBenchmarkExists (inside UpdateEvaluationJob)
+			// confirms the benchmark belongs to this job — otherwise a forged SHA on an event with a
+			// wrong provider_id/id would persist even though the status update is then rejected.
+			var resolvedSHA string
+			if status.BenchmarkStatusEvent != nil && status.BenchmarkStatusEvent.JobMeta != nil {
+				resolvedSHA = status.BenchmarkStatusEvent.JobMeta.ResolvedSHA
+				status.BenchmarkStatusEvent.JobMeta = nil // metadata, not benchmark state
+			}
+
 			err = scoped.UpdateEvaluationJob(evaluationJobID, status)
 			if err != nil {
 				w.Error(err, ctx.RequestID)
 				return err
+			}
+
+			// Persist resolved SHA only after benchmark membership was validated.
+			// Best-effort: a failure is logged but does not abort; the sidecar retries on every event.
+			if resolvedSHA != "" {
+				ctx.Logger.Debug("Persisting resolved SHA from status event", "id", evaluationJobID, "sha", resolvedSHA)
+				if err := scoped.UpdateEvaluationJobResolvedSHA(evaluationJobID, status.BenchmarkStatusEvent.BenchmarkIndex, resolvedSHA); err != nil {
+					ctx.Logger.Error("Failed to persist resolved SHA", "id", evaluationJobID, "error", err)
+				}
+			}
+
+			if h.runtime != nil && status.BenchmarkStatusEvent != nil && job != nil {
+				h.runtime.WithLogger(ctx.Logger).NotifyJobPhaseTransition(runtimeCtx, job, status.BenchmarkStatusEvent.BenchmarkIndex, status.BenchmarkStatusEvent.Status)
 			}
 
 			h.onEvaluationJobUpdated(runtimeCtx, scoped, func() (*api.EvaluationJobResource, error) {
@@ -519,15 +638,15 @@ func (h *Handlers) HandleUpdateEvaluation(ctx *executioncontext.ExecutionContext
 }
 
 // HandleCancelEvaluation handles DELETE /api/v1/evaluations/jobs/{id}
-func (h *Handlers) HandleCancelEvaluation(ctx *executioncontext.ExecutionContext, r http_wrappers.RequestWrapper, w http_wrappers.ResponseWrapper) {
+func (h *Handlers) HandleCancelEvaluation(ctx *executioncontext.ExecutionContext, r httpwrappers.RequestWrapper, w httpwrappers.ResponseWrapper) {
 	storage := h.getStorage(ctx)
 
 	logging.LogRequestStarted(ctx)
 
 	// Extract ID from path
-	evaluationJobID := r.PathValue(constants.PATH_PARAMETER_JOB_ID)
+	evaluationJobID := r.PathValue(constants.PathParameterJobID)
 	if evaluationJobID == "" {
-		w.Error(serviceerrors.NewServiceError(messages.MissingPathParameter, "ParameterName", constants.PATH_PARAMETER_JOB_ID), ctx.RequestID)
+		w.Error(serviceerrors.NewServiceError(messages.MissingPathParameter, "ParameterName", constants.PathParameterJobID), ctx.RequestID)
 		return
 	}
 
@@ -591,7 +710,7 @@ func (h *Handlers) HandleCancelEvaluation(ctx *executioncontext.ExecutionContext
 				}
 				err = storage.WithContext(runtimeCtx).UpdateEvaluationJobStatus(evaluationJobID, api.OverallStateCancelled, api.WithMessageOrigin(&api.MessageInfo{
 					Message:     "Evaluation job cancelled",
-					MessageCode: constants.MESSAGE_CODE_EVALUATION_JOB_CANCELLED,
+					MessageCode: constants.MessageCodeEvaluationJobCancelled,
 				}, api.MessageOriginServer))
 				if err != nil {
 					ctx.Logger.Info("Failed to cancel evaluation job", "error", err.Error(), "id", evaluationJobID)

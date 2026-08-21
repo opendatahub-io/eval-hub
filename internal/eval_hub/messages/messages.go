@@ -107,6 +107,13 @@ var (
 		"resource_does_not_exist",
 	)
 
+	// ModelURLRequired The model URL is required when not all benchmarks have pre-recorded data.
+	ModelURLRequired = createMessage(
+		constants.HTTPCodeBadRequest,
+		"The model URL is required when not all benchmarks have pre-recorded data.",
+		"model_url_required",
+	)
+
 	// LocalRuntimeNotEnabled Local runtime is not enabled for provider '{{.ProviderID}}'. Please configure a local runtime command for this provider and try again.
 	LocalRuntimeNotEnabled = createMessage(
 		constants.HTTPCodeBadRequest,
@@ -237,6 +244,55 @@ var (
 		constants.HTTPCodeBadRequest,
 		"The request is missing a required header {{.Header}}.",
 		"missing_user_header",
+	)
+
+	// HardwareProfileDisabled The hardware profile '{{.Name}}' is disabled.
+	HardwareProfileDisabled = createMessage(
+		constants.HTTPCodeBadRequest,
+		"The hardware profile '{{.Name}}' is disabled.",
+		"hardware_profile_disabled",
+	)
+
+	// HardwareProfileNotFound The hardware profile '{{.Name}}' was not found.
+	HardwareProfileNotFound = createMessage(
+		constants.HTTPCodeNotFound,
+		"The hardware profile '{{.Name}}' was not found.",
+		"hardware_profile_not_found",
+	)
+
+	// HardwareProfileFetchFailed Failed to fetch hardware profile '{{.Name}}'.
+	HardwareProfileFetchFailed = createMessage(
+		constants.HTTPCodeInternalServerError,
+		"Failed to fetch hardware profile '{{.Name}}'.",
+		"hardware_profile_fetch_failed",
+	)
+
+	// HardwareProfileInvalid The hardware profile '{{.Name}}' is invalid: '{{.Error}}'.
+	HardwareProfileInvalid = createMessage(
+		constants.HTTPCodeBadRequest,
+		"The hardware profile '{{.Name}}' is invalid: '{{.Error}}'.",
+		"hardware_profile_invalid",
+	)
+
+	// InvalidSecretRefURIParse The model.auth.secret_ref '{{.SecretRef}}' is not a valid URI: {{.Detail}}.
+	InvalidSecretRefURIParse = createMessage(
+		constants.HTTPCodeBadRequest,
+		"The model.auth.secret_ref '{{.SecretRef}}' is not a valid URI: {{.Detail}}.",
+		"invalid_secret_ref_uri_parse",
+	)
+
+	// InvalidSecretRefURI The model.auth.secret_ref '{{.SecretRef}}' must use the file:///path form in local mode.
+	InvalidSecretRefURI = createMessage(
+		constants.HTTPCodeBadRequest,
+		"The model.auth.secret_ref '{{.SecretRef}}' must use the file:///path form (e.g. file:///home/user/secret) in local mode.",
+		"invalid_secret_ref_uri",
+	)
+
+	// ResolvedSHAReadOnly The field 'resolved_sha' is read-only and must not be set on create.
+	ResolvedSHAReadOnly = createMessage(
+		constants.HTTPCodeBadRequest,
+		"The field 'resolved_sha' is read-only and must not be set on create.",
+		"resolved_sha_read_only",
 	)
 )
 

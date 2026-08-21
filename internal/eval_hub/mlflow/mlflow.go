@@ -76,11 +76,6 @@ func NewMLFlowClient(config *config.Config, logger *slog.Logger) (*mlflowclient.
 			logger.Info("Loaded MLflow CA certificate", "path", config.MLFlow.CACertPath)
 		}
 
-		if config.MLFlow.InsecureSkipVerify {
-			tlsConfig.InsecureSkipVerify = true
-			logger.Warn("MLflow TLS certificate verification is disabled")
-		}
-
 		config.MLFlow.TLSConfig = tlsConfig
 	}
 
@@ -153,7 +148,7 @@ func NewMLFlowClient(config *config.Config, logger *slog.Logger) (*mlflowclient.
 	return client, nil
 }
 
-func injectEvaluationJobTags(jobId string, evaluation *api.EvaluationJobConfig) []api.ExperimentTag {
+func injectEvaluationJobTags(jobID string, evaluation *api.EvaluationJobConfig) []api.ExperimentTag {
 	if evaluation.Experiment != nil {
 		tags := evaluation.Experiment.Tags
 		if tags == nil {
@@ -179,7 +174,7 @@ func injectEvaluationJobTags(jobId string, evaluation *api.EvaluationJobConfig) 
 		}
 		tags = append(tags, api.ExperimentTag{
 			Key:   "evaluation_job_id",
-			Value: jobId,
+			Value: jobID,
 		})
 		return tags
 	}
@@ -191,7 +186,7 @@ func HasExperimentName(jobConfig *api.EvaluationJobConfig) bool {
 	return jobConfig.Experiment != nil && strings.TrimSpace(jobConfig.Experiment.Name) != ""
 }
 
-func GetOrCreateExperimentID(mlflowClient *mlflowclient.Client, jobConfig *api.EvaluationJobConfig, jobId string) (experimentID string, experimentURL string, err error) {
+func GetOrCreateExperimentID(mlflowClient *mlflowclient.Client, jobConfig *api.EvaluationJobConfig, jobID string) (experimentID string, experimentURL string, err error) {
 	if !HasExperimentName(jobConfig) {
 		return "", "", nil
 	}
@@ -206,7 +201,7 @@ func GetOrCreateExperimentID(mlflowClient *mlflowclient.Client, jobConfig *api.E
 		return "", "", serviceerrors.NewServiceError(messages.MLFlowRequestFailed, "Error", err.Error())
 	}
 
-	tags := injectEvaluationJobTags(jobId, jobConfig)
+	tags := injectEvaluationJobTags(jobID, jobConfig)
 	req := mlflowclient.CreateExperimentRequest{
 		Name:             jobConfig.Experiment.Name,
 		ArtifactLocation: jobConfig.Experiment.ArtifactLocation,

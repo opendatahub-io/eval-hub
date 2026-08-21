@@ -15,7 +15,7 @@ import (
 	"github.com/eval-hub/eval-hub/internal/eval_hub/evalcards"
 	"github.com/eval-hub/eval-hub/internal/eval_hub/executioncontext"
 	"github.com/eval-hub/eval-hub/internal/eval_hub/handlers"
-	"github.com/eval-hub/eval-hub/internal/eval_hub/http_wrappers"
+	"github.com/eval-hub/eval-hub/internal/eval_hub/httpwrappers"
 	"github.com/eval-hub/eval-hub/internal/eval_hub/messages"
 	"github.com/eval-hub/eval-hub/internal/platform"
 	"github.com/eval-hub/eval-hub/pkg/mlflowclient"
@@ -36,6 +36,7 @@ type Server struct {
 	runtime         abstractions.Runtime
 	mlflowClient    *mlflowclient.Client
 	resultsExporter evalcards.ResultsExporter
+	ociCleanup      func()
 }
 
 func (s *Server) isOTELEnabled() bool {
@@ -84,9 +85,10 @@ func NewServer(logger *slog.Logger,
 		return nil, fmt.Errorf("validator is required for the server")
 	}
 
+	ociFactory, ociCleanup := newOCIPublisherFactory(logger, serviceConfig)
 	resultsExporter := evalcards.NewManager(logger, evalcards.ManagerConfig{
 		MLFlowClient:        mlflowClient,
-		OCIPublisherFactory: newOCIPublisherFactory(logger, serviceConfig),
+		OCIPublisherFactory: ociFactory,
 	})
 
 	return &Server{
@@ -98,6 +100,7 @@ func NewServer(logger *slog.Logger,
 		runtime:         runtime,
 		mlflowClient:    mlflowClient,
 		resultsExporter: resultsExporter,
+		ociCleanup:      ociCleanup,
 	}, nil
 }
 
@@ -128,17 +131,17 @@ func (s *Server) GetPort() int {
 // Returns:
 //   - *slog.Logger: A new logger instance with request-specific fields attached
 func (s *Server) loggerWithRequest(r *http.Request) (string, *slog.Logger) {
-	requestID := r.Header.Get(TRANSACTION_ID_HEADER)
+	requestID := r.Header.Get(TransactionIDHeader)
 	if requestID == "" {
 		requestID = uuid.New().String() // generate a UUID if not present
 	}
 
-	enhancedLogger := s.logger.With(constants.LOG_REQUEST_ID, requestID)
+	enhancedLogger := s.logger.With(constants.LogRequestID, requestID)
 
 	// Extract and add HTTP method and URI if they exist
 	method := r.Method
 	if method != "" {
-		enhancedLogger = enhancedLogger.With(constants.LOG_METHOD, method)
+		enhancedLogger = enhancedLogger.With(constants.LogMethod, method)
 	}
 
 	uri := ""
@@ -152,22 +155,22 @@ func (s *Server) loggerWithRequest(r *http.Request) (string, *slog.Logger) {
 		if r.URL.RawQuery != "" {
 			uri = fmt.Sprintf("%s?%s", uri, r.URL.RawQuery)
 		}
-		enhancedLogger = enhancedLogger.With(constants.LOG_URI, uri)
+		enhancedLogger = enhancedLogger.With(constants.LogURI, uri)
 	}
 
 	// Extract and add HTTP request fields to logger if they exist
 	userAgent := r.Header.Get("User-Agent")
 	if userAgent != "" {
-		enhancedLogger = enhancedLogger.With(constants.LOG_USER_AGENT, userAgent)
+		enhancedLogger = enhancedLogger.With(constants.LogUserAgent, userAgent)
 	}
 
 	remoteAddr := r.RemoteAddr
 	if remoteAddr != "" {
-		enhancedLogger = enhancedLogger.With(constants.LOG_REMOTE_ADR, remoteAddr)
+		enhancedLogger = enhancedLogger.With(constants.LogRemoteAddr, remoteAddr)
 	}
 
 	// Extract remote_user from X-User (kube-rbac-proxy), URL user info, or Remote-User header
-	remoteUser := r.Header.Get(USER_HEADER)
+	remoteUser := r.Header.Get(UserHeader)
 	if remoteUser == "" && r.URL != nil && r.URL.User != nil {
 		remoteUser = r.URL.User.Username()
 	}
@@ -175,18 +178,18 @@ func (s *Server) loggerWithRequest(r *http.Request) (string, *slog.Logger) {
 		remoteUser = r.Header.Get("Remote-User")
 	}
 	if remoteUser != "" {
-		enhancedLogger = enhancedLogger.With(constants.LOG_REMOTE_USER, remoteUser)
+		enhancedLogger = enhancedLogger.With(constants.LogRemoteUser, remoteUser)
 	}
 
 	referer := r.Header.Get("Referer")
 	if referer != "" {
-		enhancedLogger = enhancedLogger.With(constants.LOG_REFERER, referer)
+		enhancedLogger = enhancedLogger.With(constants.LogReferer, referer)
 	}
 
 	return requestID, enhancedLogger
 }
 
-func (s *Server) newRequestWrapper(w http.ResponseWriter, r *http.Request) http_wrappers.RequestWrapper {
+func (s *Server) newRequestWrapper(w http.ResponseWriter, r *http.Request) httpwrappers.RequestWrapper {
 	return NewRequestWrapper(w, r, s.serviceConfig.Service.EffectiveMaxRequestBodyBytes())
 }
 
@@ -243,7 +246,7 @@ func (s *Server) setupEvaluationJobsRoutes(h *handlers.Handlers, router *http.Se
 }
 
 func (s *Server) setupEvaluationJobLogsRoutes(h *handlers.Handlers, router *http.ServeMux) {
-	s.handleFunc(router, fmt.Sprintf("/api/v1/evaluations/jobs/{%s}/benchmarks/{%s}/logs", constants.PATH_PARAMETER_JOB_ID, constants.PATH_PARAMETER_BENCHMARK_INDEX), func(w http.ResponseWriter, r *http.Request) {
+	s.handleFunc(router, fmt.Sprintf("/api/v1/evaluations/jobs/{%s}/benchmarks/{%s}/logs", constants.PathParameterJobID, constants.PathParameterBenchmarkIndex), func(w http.ResponseWriter, r *http.Request) {
 		ctx := s.newExecutionContext(r)
 		resp := NewRespWrapper(w, ctx)
 		req := s.newRequestWrapper(w, r)
@@ -258,7 +261,7 @@ func (s *Server) setupEvaluationJobLogsRoutes(h *handlers.Handlers, router *http
 		}
 	})
 
-	s.handleFunc(router, fmt.Sprintf("/api/v1/evaluations/jobs/{%s}/logs", constants.PATH_PARAMETER_JOB_ID), func(w http.ResponseWriter, r *http.Request) {
+	s.handleFunc(router, fmt.Sprintf("/api/v1/evaluations/jobs/{%s}/logs", constants.PathParameterJobID), func(w http.ResponseWriter, r *http.Request) {
 		ctx := s.newExecutionContext(r)
 		resp := NewRespWrapper(w, ctx)
 		req := s.newRequestWrapper(w, r)
@@ -275,7 +278,7 @@ func (s *Server) setupEvaluationJobLogsRoutes(h *handlers.Handlers, router *http
 }
 
 func (s *Server) setupEvaluationJobEventsRoutes(h *handlers.Handlers, router *http.ServeMux) {
-	s.handleFunc(router, fmt.Sprintf("/api/v1/evaluations/jobs/{%s}/events", constants.PATH_PARAMETER_JOB_ID), func(w http.ResponseWriter, r *http.Request) {
+	s.handleFunc(router, fmt.Sprintf("/api/v1/evaluations/jobs/{%s}/events", constants.PathParameterJobID), func(w http.ResponseWriter, r *http.Request) {
 		ctx := s.newExecutionContext(r)
 		resp := NewRespWrapper(w, ctx)
 		req := s.newRequestWrapper(w, r)
@@ -292,7 +295,7 @@ func (s *Server) setupEvaluationJobEventsRoutes(h *handlers.Handlers, router *ht
 }
 
 func (s *Server) setupEvaluationJobRoutes(h *handlers.Handlers, router *http.ServeMux) {
-	s.handleFunc(router, fmt.Sprintf("/api/v1/evaluations/jobs/{%s}", constants.PATH_PARAMETER_JOB_ID), func(w http.ResponseWriter, r *http.Request) {
+	s.handleFunc(router, fmt.Sprintf("/api/v1/evaluations/jobs/{%s}", constants.PathParameterJobID), func(w http.ResponseWriter, r *http.Request) {
 		ctx := s.newExecutionContext(r)
 		resp := NewRespWrapper(w, ctx)
 		req := s.newRequestWrapper(w, r)
@@ -330,7 +333,7 @@ func (s *Server) setupCollectionsRoutes(h *handlers.Handlers, router *http.Serve
 }
 
 func (s *Server) setupCollectionRoutes(h *handlers.Handlers, router *http.ServeMux) {
-	s.handleFunc(router, fmt.Sprintf("/api/v1/evaluations/collections/{%s}", constants.PATH_PARAMETER_COLLECTION_ID), func(w http.ResponseWriter, r *http.Request) {
+	s.handleFunc(router, fmt.Sprintf("/api/v1/evaluations/collections/{%s}", constants.PathParameterCollectionID), func(w http.ResponseWriter, r *http.Request) {
 		ctx := s.newExecutionContext(r)
 		resp := NewRespWrapper(w, ctx)
 		req := s.newRequestWrapper(w, r)
@@ -372,7 +375,7 @@ func (s *Server) setupProvidersRoutes(h *handlers.Handlers, router *http.ServeMu
 }
 
 func (s *Server) setupProviderRoutes(h *handlers.Handlers, router *http.ServeMux) {
-	s.handleFunc(router, fmt.Sprintf("/api/v1/evaluations/providers/{%s}", constants.PATH_PARAMETER_PROVIDER_ID), func(w http.ResponseWriter, r *http.Request) {
+	s.handleFunc(router, fmt.Sprintf("/api/v1/evaluations/providers/{%s}", constants.PathParameterProviderID), func(w http.ResponseWriter, r *http.Request) {
 		ctx := s.newExecutionContext(r)
 		resp := NewRespWrapper(w, ctx)
 		req := s.newRequestWrapper(w, r)
@@ -428,11 +431,11 @@ func (s *Server) canContinueRequest(ctx *executioncontext.ExecutionContext, resp
 		return true
 	}
 	if ctx.Tenant == "" {
-		resp.ErrorWithMessageCode(ctx.RequestID, messages.MissingTenantHeader, "Header", TENANT_HEADER)
+		resp.ErrorWithMessageCode(ctx.RequestID, messages.MissingTenantHeader, "Header", TenantHeader)
 		return false
 	}
 	if ctx.User == "" {
-		resp.ErrorWithMessageCode(ctx.RequestID, messages.MissingUserHeader, "Header", USER_HEADER)
+		resp.ErrorWithMessageCode(ctx.RequestID, messages.MissingUserHeader, "Header", UserHeader)
 		return false
 	}
 	return true
@@ -545,6 +548,9 @@ func (s *Server) Start() error {
 
 func (s *Server) Shutdown(ctx context.Context) error {
 	s.logger.Info("Shutting down API server gracefully...")
+	if s.ociCleanup != nil {
+		s.ociCleanup()
+	}
 	return s.httpServer.Shutdown(ctx)
 }
 

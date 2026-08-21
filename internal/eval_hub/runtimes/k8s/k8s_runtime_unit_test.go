@@ -67,6 +67,7 @@ func (f *fakeStorage) UpdateEvaluationJobStatus(_ string, _ api.OverallState, _ 
 	f.called = true
 	return nil
 }
+func (f *fakeStorage) UpdateEvaluationJobResolvedSHA(_ string, _ int, _ string) error { return nil }
 func (f *fakeStorage) CreateCollection(_ *api.CollectionResource) error {
 	return nil
 }
@@ -652,10 +653,11 @@ func TestCreateBenchmarkResourcesDeletesConfigMapOnJobFailure(t *testing.T) {
 }
 
 func TestCreateBenchmarkResourcesAppliesHardwareProfile(t *testing.T) {
+	t.Setenv(hardwareProfilesNamespaceEnv, "default")
 	providerID := "provider-1"
 	evaluation := sampleEvaluation(providerID)
 	evaluation.Benchmarks[0].HardwareConfig = &api.BenchmarkHardwareConfig{
-		HardwareProfileRef: api.HardwareProfileRef{Name: "cpu-profile"},
+		HardwareProfileName: "cpu-profile",
 	}
 
 	profile := testHardwareProfileUnstructured("default", "cpu-profile")
@@ -716,24 +718,22 @@ func TestCreateBenchmarkResourcesAppliesHardwareProfile(t *testing.T) {
 	}
 }
 
-func TestCreateBenchmarkResourcesHardwareProfileUsesExplicitNamespace(t *testing.T) {
+func TestCreateBenchmarkResourcesAppliesDirectHardwareConfig(t *testing.T) {
 	providerID := "provider-1"
 	evaluation := sampleEvaluation(providerID)
-	evaluation.Resource.Tenant = "tenant-a"
 	evaluation.Benchmarks[0].HardwareConfig = &api.BenchmarkHardwareConfig{
-		HardwareProfileRef: api.HardwareProfileRef{
-			Name:      "cpu-profile",
-			Namespace: "custom-ns",
-		},
+		CPU:    &api.HardwareResourceQuantity{Request: "1", Limit: "2"},
+		Memory: &api.HardwareResourceQuantity{Request: "1Gi", Limit: "2Gi"},
+		GPU:    &api.HardwareGPUConfig{Name: "nvidia.com/gpu", Count: 1},
+		Queue:  &api.QueueConfig{Kind: "kueue", Name: "my-queue"},
 	}
 
-	profile := testHardwareProfileUnstructured("custom-ns", "cpu-profile")
 	clientset := fake.NewClientset()
 	runtime := &K8sRuntime{
 		logger: slog.New(slog.NewTextHandler(io.Discard, nil)),
 		helper: &KubernetesHelper{
 			clientset:     clientset,
-			dynamicClient: dynamicfake.NewSimpleDynamicClient(k8sruntime.NewScheme(), profile),
+			dynamicClient: dynamicfake.NewSimpleDynamicClient(k8sruntime.NewScheme()),
 		},
 		serviceConfig: &config.Config{
 			Service: &config.ServiceConfig{EvalInitImage: "eval-init-image"},
@@ -741,16 +741,46 @@ func TestCreateBenchmarkResourcesHardwareProfileUsesExplicitNamespace(t *testing
 	}
 
 	storage := &fakeStorage{providerConfigs: sampleProviders(providerID)}
-	if err := runtime.createBenchmarkResources(context.Background(), runtime.logger, evaluation, &evaluation.Benchmarks[0], 0, storage); err != nil {
+	err := runtime.createBenchmarkResources(context.Background(), runtime.logger, evaluation, &evaluation.Benchmarks[0], 0, storage)
+	if err != nil {
 		t.Fatalf("createBenchmarkResources returned error: %v", err)
+	}
+
+	jobs := listJobsByJobID(t, clientset, evaluation.Resource.ID)
+	if len(jobs) != 1 {
+		t.Fatalf("expected 1 job, got %d", len(jobs))
+	}
+	adapter, err := adapterContainerFromJob(&jobs[0])
+	if err != nil {
+		t.Fatalf("adapter container: %v", err)
+	}
+	if cpu := adapter.Resources.Requests.Cpu().String(); cpu != "1" {
+		t.Fatalf("cpu request = %q, want 1", cpu)
+	}
+	if memory := adapter.Resources.Requests.Memory().String(); memory != "1Gi" {
+		t.Fatalf("memory request = %q, want 1Gi", memory)
+	}
+	if cpuLimit := adapter.Resources.Limits.Cpu().String(); cpuLimit != "2" {
+		t.Fatalf("cpu limit = %q, want 2", cpuLimit)
+	}
+	if memoryLimit := adapter.Resources.Limits.Memory().String(); memoryLimit != "2Gi" {
+		t.Fatalf("memory limit = %q, want 2Gi", memoryLimit)
+	}
+	gpuQty := adapter.Resources.Requests["nvidia.com/gpu"]
+	if gpuQty.IsZero() || gpuQty.Value() != 1 {
+		t.Fatalf("gpu request = %s, want 1", gpuQty.String())
+	}
+	if jobs[0].Labels[labelKueueQueueNameKey] != "my-queue" {
+		t.Fatalf("kueue queue label = %q, want my-queue", jobs[0].Labels[labelKueueQueueNameKey])
 	}
 }
 
 func TestCreateBenchmarkResourcesHardwareProfileNotFound(t *testing.T) {
+	t.Setenv(hardwareProfilesNamespaceEnv, "default")
 	providerID := "provider-1"
 	evaluation := sampleEvaluation(providerID)
 	evaluation.Benchmarks[0].HardwareConfig = &api.BenchmarkHardwareConfig{
-		HardwareProfileRef: api.HardwareProfileRef{Name: "missing-profile"},
+		HardwareProfileName: "missing-profile",
 	}
 
 	clientset := fake.NewClientset()
@@ -776,10 +806,11 @@ func TestCreateBenchmarkResourcesHardwareProfileNotFound(t *testing.T) {
 }
 
 func TestCreateBenchmarkResourcesInvalidHardwareProfileSpec(t *testing.T) {
+	t.Setenv(hardwareProfilesNamespaceEnv, "default")
 	providerID := "provider-1"
 	evaluation := sampleEvaluation(providerID)
 	evaluation.Benchmarks[0].HardwareConfig = &api.BenchmarkHardwareConfig{
-		HardwareProfileRef: api.HardwareProfileRef{Name: "bad-profile"},
+		HardwareProfileName: "bad-profile",
 	}
 
 	profile := testHardwareProfileUnstructured("default", "bad-profile")
@@ -819,7 +850,7 @@ func TestCreateBenchmarkResourcesIgnoresEmptyHardwareProfileName(t *testing.T) {
 	providerID := "provider-1"
 	evaluation := sampleEvaluation(providerID)
 	evaluation.Benchmarks[0].HardwareConfig = &api.BenchmarkHardwareConfig{
-		HardwareProfileRef: api.HardwareProfileRef{Name: "   "},
+		HardwareProfileName: "   ",
 	}
 
 	clientset := fake.NewClientset()
@@ -838,6 +869,343 @@ func TestCreateBenchmarkResourcesIgnoresEmptyHardwareProfileName(t *testing.T) {
 	if err := runtime.createBenchmarkResources(context.Background(), runtime.logger, evaluation, &evaluation.Benchmarks[0], 0, storage); err != nil {
 		t.Fatalf("createBenchmarkResources returned error: %v", err)
 	}
+}
+
+func TestCreateBenchmarkResourcesRequiresHardwareProfilesNamespace(t *testing.T) {
+	t.Setenv(hardwareProfilesNamespaceEnv, "")
+	providerID := "provider-1"
+	evaluation := sampleEvaluation(providerID)
+	evaluation.Benchmarks[0].HardwareConfig = &api.BenchmarkHardwareConfig{
+		HardwareProfileName: "cpu-profile",
+	}
+
+	clientset := fake.NewClientset()
+	runtime := &K8sRuntime{
+		logger: slog.New(slog.NewTextHandler(io.Discard, nil)),
+		helper: &KubernetesHelper{
+			clientset:     clientset,
+			dynamicClient: dynamicfake.NewSimpleDynamicClient(k8sruntime.NewScheme()),
+		},
+		serviceConfig: &config.Config{
+			Service: &config.ServiceConfig{EvalInitImage: "eval-init-image"},
+		},
+	}
+
+	storage := &fakeStorage{providerConfigs: sampleProviders(providerID)}
+	err := runtime.createBenchmarkResources(context.Background(), runtime.logger, evaluation, &evaluation.Benchmarks[0], 0, storage)
+	if err == nil {
+		t.Fatal("expected error when hardware profiles namespace env is unset")
+	}
+	if !strings.Contains(err.Error(), hardwareProfilesNamespaceEnv) && !strings.Contains(err.Error(), "not set") {
+		t.Fatalf("expected namespace configuration error, got: %v", err)
+	}
+}
+
+func TestCreateBenchmarkResourcesAppliesNodeAndQueueScheduling(t *testing.T) {
+	t.Setenv(hardwareProfilesNamespaceEnv, "default")
+	providerID := "provider-1"
+
+	t.Run("node scheduling", func(t *testing.T) {
+		evaluation := sampleEvaluation(providerID)
+		evaluation.Benchmarks[0].HardwareConfig = &api.BenchmarkHardwareConfig{
+			HardwareProfileName: "node-profile",
+		}
+		profile := testHardwareProfileUnstructured("default", "node-profile")
+		profile.Object["spec"] = map[string]any{
+			"scheduling": map[string]any{
+				"type": "Node",
+				"node": map[string]any{
+					"nodeSelector": map[string]any{"node.kubernetes.io/instance-type": "g6.12xlarge"},
+					"tolerations": []any{
+						map[string]any{
+							"key":      "nvidia.com/gpu",
+							"operator": "Exists",
+							"effect":   "NoSchedule",
+						},
+					},
+				},
+			},
+		}
+		clientset := fake.NewClientset()
+		runtime := &K8sRuntime{
+			logger: slog.New(slog.NewTextHandler(io.Discard, nil)),
+			helper: &KubernetesHelper{
+				clientset:     clientset,
+				dynamicClient: dynamicfake.NewSimpleDynamicClient(k8sruntime.NewScheme(), profile),
+			},
+			serviceConfig: &config.Config{
+				Service: &config.ServiceConfig{EvalInitImage: "eval-init-image"},
+			},
+		}
+		storage := &fakeStorage{providerConfigs: sampleProviders(providerID)}
+		if err := runtime.createBenchmarkResources(context.Background(), runtime.logger, evaluation, &evaluation.Benchmarks[0], 0, storage); err != nil {
+			t.Fatalf("createBenchmarkResources: %v", err)
+		}
+		jobs := listJobsByJobID(t, clientset, evaluation.Resource.ID)
+		if len(jobs) != 1 {
+			t.Fatalf("expected 1 job, got %d", len(jobs))
+		}
+		podSpec := jobs[0].Spec.Template.Spec
+		if podSpec.NodeSelector["node.kubernetes.io/instance-type"] != "g6.12xlarge" {
+			t.Fatalf("nodeSelector = %v", podSpec.NodeSelector)
+		}
+		if len(podSpec.Tolerations) != 1 || podSpec.Tolerations[0].Key != "nvidia.com/gpu" {
+			t.Fatalf("tolerations = %+v", podSpec.Tolerations)
+		}
+	})
+
+	t.Run("queue scheduling", func(t *testing.T) {
+		evaluation := sampleEvaluation(providerID)
+		evaluation.Benchmarks[0].HardwareConfig = &api.BenchmarkHardwareConfig{
+			HardwareProfileName: "queue-profile",
+		}
+		profile := testHardwareProfileUnstructured("default", "queue-profile")
+		profile.Object["spec"] = map[string]any{
+			"scheduling": map[string]any{
+				"type": "Queue",
+				"kueue": map[string]any{
+					"localQueueName": "gpu-queue",
+					"priorityClass":  "high-priority",
+				},
+			},
+		}
+		clientset := fake.NewClientset()
+		runtime := &K8sRuntime{
+			logger: slog.New(slog.NewTextHandler(io.Discard, nil)),
+			helper: &KubernetesHelper{
+				clientset:     clientset,
+				dynamicClient: dynamicfake.NewSimpleDynamicClient(k8sruntime.NewScheme(), profile),
+			},
+			serviceConfig: &config.Config{
+				Service: &config.ServiceConfig{EvalInitImage: "eval-init-image"},
+			},
+		}
+		storage := &fakeStorage{providerConfigs: sampleProviders(providerID)}
+		if err := runtime.createBenchmarkResources(context.Background(), runtime.logger, evaluation, &evaluation.Benchmarks[0], 0, storage); err != nil {
+			t.Fatalf("createBenchmarkResources: %v", err)
+		}
+		jobs := listJobsByJobID(t, clientset, evaluation.Resource.ID)
+		if len(jobs) != 1 {
+			t.Fatalf("expected 1 job, got %d", len(jobs))
+		}
+		labels := jobs[0].Labels
+		if labels[labelKueueQueueNameKey] != "gpu-queue" {
+			t.Fatalf("queue label = %q", labels[labelKueueQueueNameKey])
+		}
+		if labels[labelKueuePriorityClassKey] != "high-priority" {
+			t.Fatalf("priority label = %q", labels[labelKueuePriorityClassKey])
+		}
+		if jobs[0].Spec.Template.Spec.PriorityClassName != "high-priority" {
+			t.Fatalf("PriorityClassName = %q", jobs[0].Spec.Template.Spec.PriorityClassName)
+		}
+		if len(jobs[0].Spec.Template.Spec.NodeSelector) != 0 {
+			t.Fatalf("expected empty nodeSelector for queue profile, got %v", jobs[0].Spec.Template.Spec.NodeSelector)
+		}
+	})
+
+	t.Run("hardware_config queue when no hardware profile queue", func(t *testing.T) {
+		evaluation := sampleEvaluation(providerID)
+		evaluation.Benchmarks[0].HardwareConfig = &api.BenchmarkHardwareConfig{
+			Queue: &api.QueueConfig{Kind: "kueue", Name: "eval-local-queue"},
+		}
+		clientset := fake.NewClientset()
+		runtime := &K8sRuntime{
+			logger: slog.New(slog.NewTextHandler(io.Discard, nil)),
+			helper: &KubernetesHelper{
+				clientset:     clientset,
+				dynamicClient: dynamicfake.NewSimpleDynamicClient(k8sruntime.NewScheme()),
+			},
+			serviceConfig: &config.Config{
+				Service: &config.ServiceConfig{EvalInitImage: "eval-init-image"},
+			},
+		}
+		storage := &fakeStorage{providerConfigs: sampleProviders(providerID)}
+		if err := runtime.createBenchmarkResources(context.Background(), runtime.logger, evaluation, &evaluation.Benchmarks[0], 0, storage); err != nil {
+			t.Fatalf("createBenchmarkResources: %v", err)
+		}
+		jobs := listJobsByJobID(t, clientset, evaluation.Resource.ID)
+		if len(jobs) != 1 {
+			t.Fatalf("expected 1 job, got %d", len(jobs))
+		}
+		if jobs[0].Labels[labelKueueQueueNameKey] != "eval-local-queue" {
+			t.Fatalf("queue label = %q", jobs[0].Labels[labelKueueQueueNameKey])
+		}
+	})
+
+	t.Run("hardware profile queue wins over hardware_config queue", func(t *testing.T) {
+		evaluation := sampleEvaluation(providerID)
+		evaluation.Benchmarks[0].HardwareConfig = &api.BenchmarkHardwareConfig{
+			HardwareProfileName: "queue-profile",
+		}
+		profile := testHardwareProfileUnstructured("default", "queue-profile")
+		profile.Object["spec"] = map[string]any{
+			"scheduling": map[string]any{
+				"type": "Queue",
+				"kueue": map[string]any{
+					"localQueueName": "profile-queue",
+				},
+			},
+		}
+		clientset := fake.NewClientset()
+		runtime := &K8sRuntime{
+			logger: slog.New(slog.NewTextHandler(io.Discard, nil)),
+			helper: &KubernetesHelper{
+				clientset:     clientset,
+				dynamicClient: dynamicfake.NewSimpleDynamicClient(k8sruntime.NewScheme(), profile),
+			},
+			serviceConfig: &config.Config{
+				Service: &config.ServiceConfig{EvalInitImage: "eval-init-image"},
+			},
+		}
+		storage := &fakeStorage{providerConfigs: sampleProviders(providerID)}
+		if err := runtime.createBenchmarkResources(context.Background(), runtime.logger, evaluation, &evaluation.Benchmarks[0], 0, storage); err != nil {
+			t.Fatalf("createBenchmarkResources: %v", err)
+		}
+		jobs := listJobsByJobID(t, clientset, evaluation.Resource.ID)
+		if len(jobs) != 1 {
+			t.Fatalf("expected 1 job, got %d", len(jobs))
+		}
+		if jobs[0].Labels[labelKueueQueueNameKey] != "profile-queue" {
+			t.Fatalf("queue label = %q, want profile-queue", jobs[0].Labels[labelKueueQueueNameKey])
+		}
+	})
+
+	t.Run("evaluation queue when no hardware_config", func(t *testing.T) {
+		evaluation := sampleEvaluation(providerID)
+		evaluation.Queue = &api.QueueConfig{Kind: "kueue", Name: "eval-local-queue"}
+		clientset := fake.NewClientset()
+		runtime := &K8sRuntime{
+			logger: slog.New(slog.NewTextHandler(io.Discard, nil)),
+			helper: &KubernetesHelper{
+				clientset:     clientset,
+				dynamicClient: dynamicfake.NewSimpleDynamicClient(k8sruntime.NewScheme()),
+			},
+			serviceConfig: &config.Config{
+				Service: &config.ServiceConfig{EvalInitImage: "eval-init-image"},
+			},
+		}
+		storage := &fakeStorage{providerConfigs: sampleProviders(providerID)}
+		if err := runtime.createBenchmarkResources(context.Background(), runtime.logger, evaluation, &evaluation.Benchmarks[0], 0, storage); err != nil {
+			t.Fatalf("createBenchmarkResources: %v", err)
+		}
+		jobs := listJobsByJobID(t, clientset, evaluation.Resource.ID)
+		if len(jobs) != 1 {
+			t.Fatalf("expected 1 job, got %d", len(jobs))
+		}
+		if jobs[0].Labels[labelKueueQueueNameKey] != "eval-local-queue" {
+			t.Fatalf("queue label = %q", jobs[0].Labels[labelKueueQueueNameKey])
+		}
+	})
+
+	t.Run("evaluation hardware_config fallback when benchmark has none", func(t *testing.T) {
+		evaluation := sampleEvaluation(providerID)
+		evaluation.HardwareConfig = &api.BenchmarkHardwareConfig{
+			Queue: &api.QueueConfig{Kind: "kueue", Name: "fallback-queue"},
+			CPU:   &api.HardwareResourceQuantity{Request: "1", Limit: "2"},
+		}
+		evaluation.Queue = &api.QueueConfig{Kind: "kueue", Name: "legacy-queue"}
+		clientset := fake.NewClientset()
+		runtime := &K8sRuntime{
+			logger: slog.New(slog.NewTextHandler(io.Discard, nil)),
+			helper: &KubernetesHelper{
+				clientset:     clientset,
+				dynamicClient: dynamicfake.NewSimpleDynamicClient(k8sruntime.NewScheme()),
+			},
+			serviceConfig: &config.Config{
+				Service: &config.ServiceConfig{EvalInitImage: "eval-init-image"},
+			},
+		}
+		storage := &fakeStorage{providerConfigs: sampleProviders(providerID)}
+		if err := runtime.createBenchmarkResources(context.Background(), runtime.logger, evaluation, &evaluation.Benchmarks[0], 0, storage); err != nil {
+			t.Fatalf("createBenchmarkResources: %v", err)
+		}
+		jobs := listJobsByJobID(t, clientset, evaluation.Resource.ID)
+		if len(jobs) != 1 {
+			t.Fatalf("expected 1 job, got %d", len(jobs))
+		}
+		if jobs[0].Labels[labelKueueQueueNameKey] != "fallback-queue" {
+			t.Fatalf("queue label = %q, want fallback-queue", jobs[0].Labels[labelKueueQueueNameKey])
+		}
+		adapter, err := adapterContainerFromJob(&jobs[0])
+		if err != nil {
+			t.Fatalf("adapter container: %v", err)
+		}
+		if cpu := adapter.Resources.Requests.Cpu().String(); cpu != "1" {
+			t.Fatalf("cpu request = %q, want 1", cpu)
+		}
+	})
+
+	t.Run("benchmark hardware_config wins over evaluation hardware_config and queue", func(t *testing.T) {
+		evaluation := sampleEvaluation(providerID)
+		evaluation.Benchmarks[0].HardwareConfig = &api.BenchmarkHardwareConfig{
+			Queue: &api.QueueConfig{Kind: "kueue", Name: "bench-queue"},
+		}
+		evaluation.HardwareConfig = &api.BenchmarkHardwareConfig{
+			Queue: &api.QueueConfig{Kind: "kueue", Name: "fallback-queue"},
+		}
+		evaluation.Queue = &api.QueueConfig{Kind: "kueue", Name: "legacy-queue"}
+		clientset := fake.NewClientset()
+		runtime := &K8sRuntime{
+			logger: slog.New(slog.NewTextHandler(io.Discard, nil)),
+			helper: &KubernetesHelper{
+				clientset:     clientset,
+				dynamicClient: dynamicfake.NewSimpleDynamicClient(k8sruntime.NewScheme()),
+			},
+			serviceConfig: &config.Config{
+				Service: &config.ServiceConfig{EvalInitImage: "eval-init-image"},
+			},
+		}
+		storage := &fakeStorage{providerConfigs: sampleProviders(providerID)}
+		if err := runtime.createBenchmarkResources(context.Background(), runtime.logger, evaluation, &evaluation.Benchmarks[0], 0, storage); err != nil {
+			t.Fatalf("createBenchmarkResources: %v", err)
+		}
+		jobs := listJobsByJobID(t, clientset, evaluation.Resource.ID)
+		if len(jobs) != 1 {
+			t.Fatalf("expected 1 job, got %d", len(jobs))
+		}
+		if jobs[0].Labels[labelKueueQueueNameKey] != "bench-queue" {
+			t.Fatalf("queue label = %q, want bench-queue", jobs[0].Labels[labelKueueQueueNameKey])
+		}
+	})
+
+	t.Run("hardware profile queue wins over evaluation queue", func(t *testing.T) {
+		evaluation := sampleEvaluation(providerID)
+		evaluation.Queue = &api.QueueConfig{Kind: "kueue", Name: "eval-local-queue"}
+		evaluation.Benchmarks[0].HardwareConfig = &api.BenchmarkHardwareConfig{
+			HardwareProfileName: "queue-profile",
+		}
+		profile := testHardwareProfileUnstructured("default", "queue-profile")
+		profile.Object["spec"] = map[string]any{
+			"scheduling": map[string]any{
+				"type": "Queue",
+				"kueue": map[string]any{
+					"localQueueName": "profile-queue",
+				},
+			},
+		}
+		clientset := fake.NewClientset()
+		runtime := &K8sRuntime{
+			logger: slog.New(slog.NewTextHandler(io.Discard, nil)),
+			helper: &KubernetesHelper{
+				clientset:     clientset,
+				dynamicClient: dynamicfake.NewSimpleDynamicClient(k8sruntime.NewScheme(), profile),
+			},
+			serviceConfig: &config.Config{
+				Service: &config.ServiceConfig{EvalInitImage: "eval-init-image"},
+			},
+		}
+		storage := &fakeStorage{providerConfigs: sampleProviders(providerID)}
+		if err := runtime.createBenchmarkResources(context.Background(), runtime.logger, evaluation, &evaluation.Benchmarks[0], 0, storage); err != nil {
+			t.Fatalf("createBenchmarkResources: %v", err)
+		}
+		jobs := listJobsByJobID(t, clientset, evaluation.Resource.ID)
+		if len(jobs) != 1 {
+			t.Fatalf("expected 1 job, got %d", len(jobs))
+		}
+		if jobs[0].Labels[labelKueueQueueNameKey] != "profile-queue" {
+			t.Fatalf("queue label = %q, want profile-queue", jobs[0].Labels[labelKueueQueueNameKey])
+		}
+	})
 }
 
 func adapterContainerFromJob(job *batchv1.Job) (*corev1.Container, error) {
@@ -964,7 +1332,7 @@ func sampleEvaluation(providerID string) *api.EvaluationJobResource {
 			Resource: api.Resource{ID: "job-1"},
 		},
 		EvaluationJobConfig: api.EvaluationJobConfig{
-			Model: api.ModelRef{
+			Model: &api.ModelRef{
 				URL:  "http://model.example",
 				Name: "model-1",
 			},
@@ -1270,10 +1638,21 @@ func TestModelAuthCombinations(t *testing.T) {
 			wantErrContains: "reading model auth secret",
 		},
 		{
-			// blank Model.URL must be caught at job-creation time, not silently misdirect traffic
-			name:            "empty model URL",
-			wantErr:         true,
-			wantErrContains: "model url and name are required",
+			// Empty Model.URL is valid for pre-recorded-data jobs; sidecar model proxy is
+			// simply not configured and the adapter runs without a live model endpoint.
+			name:    "empty model URL",
+			wantErr: false,
+		},
+		{
+			// Whitespace-only URL is normalized to empty; treated the same as empty.
+			name:    "whitespace-only model URL",
+			wantErr: false,
+		},
+		{
+			// Whitespace URL with auth secret: secret inspection is skipped because
+			// there is no model endpoint to authenticate with.
+			name:    "whitespace-only model URL with auth",
+			wantErr: false,
 		},
 		{
 			name: "api-key only",
@@ -1463,6 +1842,16 @@ func TestModelAuthCombinations(t *testing.T) {
 			if tc.name == "empty model URL" {
 				evaluation.Model.URL = ""
 				clientset = fake.NewClientset()
+			} else if tc.name == "whitespace-only model URL" {
+				evaluation.Model.URL = "   "
+				clientset = fake.NewClientset()
+			} else if tc.name == "whitespace-only model URL with auth" {
+				evaluation.Model.URL = "   "
+				evaluation.Model.Auth = &api.ModelAuth{SecretRef: secretName}
+				clientset = fake.NewClientset(&corev1.Secret{
+					ObjectMeta: metav1.ObjectMeta{Name: secretName, Namespace: "default"},
+					Data:       map[string][]byte{"api-key": []byte("sk-real")},
+				})
 			} else if tc.wantErr {
 				// secret_ref set but secret absent from fake store → error expected
 				evaluation.Model.Auth = &api.ModelAuth{SecretRef: secretName}
@@ -1504,23 +1893,30 @@ func TestModelAuthCombinations(t *testing.T) {
 			job := jobs[0]
 			adapterContainer := job.Spec.Template.Spec.Containers[0]
 
-			// adapter URL always routes through the sidecar
 			cmName := findConfigMapVolumeName(t, job.Spec.Template.Spec.Volumes)
 			cm, err := clientset.CoreV1().ConfigMaps("default").Get(context.Background(), cmName, metav1.GetOptions{})
 			if err != nil {
 				t.Fatalf("get configmap: %v", err)
 			}
-			if strings.Contains(cm.Data["job.json"], "model.example.com") {
-				t.Errorf("job.json must not contain direct model URL; adapter should talk to sidecar")
-			}
-			if !strings.Contains(cm.Data["job.json"], "localhost") {
-				t.Errorf("job.json model URL must point to sidecar (localhost), got: %s", cm.Data["job.json"])
-			}
 
-			// sidecar_config.json: real URL always present; auth_secret_mount_path conditional
 			sidecarCfg := cm.Data["sidecar_config.json"]
-			if !strings.Contains(sidecarCfg, "model.example.com") {
-				t.Errorf("sidecar_config.json must always contain the real model URL, got: %s", sidecarCfg)
+			if strings.TrimSpace(evaluation.Model.URL) != "" {
+				// adapter URL routes through the sidecar when a model URL is present
+				if strings.Contains(cm.Data["job.json"], "model.example.com") {
+					t.Errorf("job.json must not contain direct model URL; adapter should talk to sidecar")
+				}
+				if !strings.Contains(cm.Data["job.json"], "localhost") {
+					t.Errorf("job.json model URL must point to sidecar (localhost), got: %s", cm.Data["job.json"])
+				}
+				// sidecar_config.json: real URL present; auth_secret_mount_path conditional
+				if !strings.Contains(sidecarCfg, "model.example.com") {
+					t.Errorf("sidecar_config.json must contain the real model URL, got: %s", sidecarCfg)
+				}
+			} else {
+				// pre-recorded-data jobs: no sidecar model proxy configured
+				if strings.Contains(sidecarCfg, "model") {
+					t.Errorf("sidecar_config.json must not have model config when model URL is empty, got: %s", sidecarCfg)
+				}
 			}
 			if tc.wantAuthMountInSidecarCfg && !strings.Contains(sidecarCfg, "auth_secret_mount_path") {
 				t.Errorf("sidecar_config.json must have auth_secret_mount_path when secret is configured")
@@ -1661,7 +2057,7 @@ func TestModelAuthCombinations(t *testing.T) {
 			// model-auth (raw real secret) is mounted only in the sidecar; the adapter gets the
 			// synthetic model-auth-internal (ref tokens + optional passthrough) instead.
 			for _, m := range adapterContainer.VolumeMounts {
-				if m.Name == evalhubSATokenVolumeName {
+				if m.Name == evalhubSAVolumeName {
 					t.Errorf("adapter must never have the SA token volume mounted (name %q)", m.Name)
 				}
 				if m.Name == modelAuthVolumeName {
@@ -1683,7 +2079,7 @@ func TestModelAuthCombinations(t *testing.T) {
 			}
 			var sidecarHasSAToken bool
 			for _, m := range sidecarContainer.VolumeMounts {
-				if m.Name == evalhubSATokenVolumeName {
+				if m.Name == evalhubSAVolumeName {
 					sidecarHasSAToken = true
 				}
 			}

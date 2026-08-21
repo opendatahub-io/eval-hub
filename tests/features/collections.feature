@@ -471,7 +471,7 @@ Feature: Collections Endpoint
                 "parameters": {
                     "num_examples": 10,
                     "num_fewshot": 0,
-                    "tokenizer": "google/flan-t5-small"
+                    "tokenizer": "{{env:FVT_BENCHMARK_TOKENIZER|google/flan-t5-small}}"
                 }
             },
             {
@@ -487,7 +487,7 @@ Feature: Collections Endpoint
                 "parameters": {
                     "num_examples": 10,
                     "num_fewshot": 0,
-                    "tokenizer": "google/flan-t5-small"
+                    "tokenizer": "{{env:FVT_BENCHMARK_TOKENIZER|google/flan-t5-small}}"
                 }
             }
         ]
@@ -544,7 +544,7 @@ Feature: Collections Endpoint
             "parameters": {
               "num_examples": 10,
               "num_fewshot": 3,
-              "tokenizer": "google/flan-t5-small"
+              "tokenizer": "{{env:FVT_BENCHMARK_TOKENIZER|google/flan-t5-small}}"
             }
           },
           {
@@ -553,7 +553,7 @@ Feature: Collections Endpoint
             "weight": 2,
             "parameters": {
               "num_examples": 5,
-              "tokenizer": "google/flan-t5-small"
+              "tokenizer": "{{env:FVT_BENCHMARK_TOKENIZER|google/flan-t5-small}}"
             }
           }
         ]
@@ -580,7 +580,7 @@ Feature: Collections Endpoint
         "provider_id": "lm_evaluation_harness",
         "weight": 3,
         "parameters": {
-            "tokenizer": "google/flan-t5-small"
+            "tokenizer": "{{env:FVT_BENCHMARK_TOKENIZER|google/flan-t5-small}}"
           }
         }
        ]
@@ -669,7 +669,7 @@ Feature: Collections Endpoint
     And there is a system collection with id "safety-and-fairness-v1"
     When I send a GET request to "/api/v1/evaluations/collections/safety-and-fairness-v1"
     Then the response code should be 200
-    And the response should contain "name" with value "Safety & Fairness"
+    And the response should contain "name" with value "Safety and Fairness"
 
   Scenario: Verify out of box collection retrieval - category - safety-and-fairness-v1
     Given the service is running
