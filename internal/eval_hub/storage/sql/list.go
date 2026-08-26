@@ -173,6 +173,11 @@ func constructEvaluationResource(logger *slog.Logger, query *shared.EntityQuery,
 	statusObject.State = overAllState
 	statusObject.Message = evaluationEntity.Status.Message
 
+	// Backfill evaluation_phase for records created before the field was introduced.
+	if statusObject.EvaluationPhase == "" {
+		statusObject.EvaluationPhase = api.EvaluationPhaseFromOverallState(overAllState)
+	}
+
 	backfillMetricsSchema(evaluationEntity.Results)
 
 	return &api.EvaluationJobResource{

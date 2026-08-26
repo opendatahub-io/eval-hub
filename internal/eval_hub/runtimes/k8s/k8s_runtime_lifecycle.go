@@ -17,12 +17,12 @@ const (
 
 	// Evaluation phase label values — written to the trustyai.opendatahub.io/evaluation-phase
 	// label on the backing Kubernetes Job. Pending is stamped at creation; the rest are patched
-	// on each lifecycle transition via PatchJobPhaseLabel.
-	EvaluationPhasePending           = "Pending"
-	EvaluationPhaseRunning           = "Running"
-	EvaluationPhaseCompleted         = "Completed"
-	EvaluationPhaseFailed            = "Failed"
-	EvaluationPhaseThresholdViolated = "ThresholdViolated"
+	// on each lifecycle transition via PatchJobPhaseLabel. Values are sourced from api.EvaluationPhase*.
+	EvaluationPhasePending           = string(api.EvaluationPhasePending)
+	EvaluationPhaseRunning           = string(api.EvaluationPhaseRunning)
+	EvaluationPhaseCompleted         = string(api.EvaluationPhaseCompleted)
+	EvaluationPhaseFailed            = string(api.EvaluationPhaseFailed)
+	EvaluationPhaseThresholdViolated = string(api.EvaluationPhaseThresholdViolated)
 
 	// Kubernetes Event reasons emitted on lifecycle transitions.
 	eventReasonRunning           = "EvaluationRunning"
