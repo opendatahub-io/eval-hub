@@ -62,8 +62,14 @@ func NewMLFlowClient(config *config.Config, logger *slog.Logger) (*mlflowclient.
 			MaxVersion: tls.VersionTLS13,
 		}
 
-		// Load custom CA certificate if specified
-		if config.MLFlow.CACertPath != "" {
+		if config.MLFlow.InsecureSkipVerify {
+			tlsConfig.InsecureSkipVerify = true
+			logger.Warn("TLS certificate verification is disabled for MLflow")
+		} else if config.MLFlow.CACertPath != "" {
+			// Load custom CA certificate if specified.
+			// When InsecureSkipVerify is true, custom CA files are not read:
+			// verification is off, so loading a CA would not affect trust
+			// and skipping avoids failing on missing paths.
 			caCert, err := os.ReadFile(config.MLFlow.CACertPath)
 			if err != nil {
 				return nil, fmt.Errorf("failed to read MLflow CA certificate at %s: %w", config.MLFlow.CACertPath, err)

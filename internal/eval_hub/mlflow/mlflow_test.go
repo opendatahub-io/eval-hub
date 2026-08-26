@@ -1,15 +1,22 @@
 package mlflow
 
 import (
+	"crypto/rand"
+	"crypto/rsa"
+	"crypto/x509"
+	"crypto/x509/pkix"
 	"encoding/json"
+	"encoding/pem"
 	"errors"
 	"log/slog"
+	"math/big"
 	"net/http"
 	"net/http/httptest"
 	"os"
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/eval-hub/eval-hub/internal/eval_hub/config"
 	"github.com/eval-hub/eval-hub/internal/eval_hub/messages"
@@ -139,6 +146,66 @@ func TestNewMLFlowClient(t *testing.T) {
 		}
 		if !strings.Contains(err.Error(), "no valid PEM certificates") {
 			t.Fatalf("unexpected error: %v", err)
+		}
+	})
+
+	t.Run("insecure skip verify sets TLS InsecureSkipVerify", func(t *testing.T) {
+		t.Parallel()
+		cfg := mlflowServiceConfig(t, "http://127.0.0.1:1", func(m *config.MLFlowConfig) {
+			m.InsecureSkipVerify = true
+		})
+		client, err := NewMLFlowClient(cfg, logger)
+		if err != nil {
+			t.Fatalf("NewMLFlowClient() err = %v", err)
+		}
+		if client == nil {
+			t.Fatal("expected non-nil client")
+		}
+		// Verify that TLS config was set with InsecureSkipVerify
+		if !cfg.MLFlow.TLSConfig.InsecureSkipVerify {
+			t.Fatal("expected TLSConfig.InsecureSkipVerify to be true")
+		}
+	})
+
+	t.Run("insecure skip verify skips CA cert loading", func(t *testing.T) {
+		t.Parallel()
+		// When InsecureSkipVerify is true, a missing CA cert path should not cause an error
+		cfg := mlflowServiceConfig(t, "http://127.0.0.1:1", func(m *config.MLFlowConfig) {
+			m.InsecureSkipVerify = true
+			m.CACertPath = filepath.Join(t.TempDir(), "nonexistent-ca.pem")
+		})
+		client, err := NewMLFlowClient(cfg, logger)
+		if err != nil {
+			t.Fatalf("NewMLFlowClient() err = %v, want nil (insecure skip should bypass CA loading)", err)
+		}
+		if client == nil {
+			t.Fatal("expected non-nil client")
+		}
+		if cfg.MLFlow.TLSConfig.RootCAs != nil {
+			t.Fatal("expected nil RootCAs when InsecureSkipVerify is true")
+		}
+	})
+
+	t.Run("insecure skip verify false still loads CA cert", func(t *testing.T) {
+		t.Parallel()
+		// Write a valid self-signed CA cert
+		caPath := writeTestCACert(t)
+		cfg := mlflowServiceConfig(t, "http://127.0.0.1:1", func(m *config.MLFlowConfig) {
+			m.InsecureSkipVerify = false
+			m.CACertPath = caPath
+		})
+		client, err := NewMLFlowClient(cfg, logger)
+		if err != nil {
+			t.Fatalf("NewMLFlowClient() err = %v", err)
+		}
+		if client == nil {
+			t.Fatal("expected non-nil client")
+		}
+		if cfg.MLFlow.TLSConfig.InsecureSkipVerify {
+			t.Fatal("expected TLSConfig.InsecureSkipVerify to be false")
+		}
+		if cfg.MLFlow.TLSConfig.RootCAs == nil {
+			t.Fatal("expected RootCAs to be set when CA cert path is provided and InsecureSkipVerify is false")
 		}
 	})
 }
@@ -328,4 +395,37 @@ func assertServiceErrorCode(t *testing.T, err error, want *messages.MessageCode)
 	if se.MessageCode() != want {
 		t.Fatalf("message code = %v, want %v", se.MessageCode(), want)
 	}
+}
+
+// writeTestCACert generates a self-signed CA certificate in a temp directory
+// and returns the file path. The certificate is cleaned up when the test ends.
+func writeTestCACert(t *testing.T) string {
+	t.Helper()
+	key, err := rsa.GenerateKey(rand.Reader, 2048)
+	if err != nil {
+		t.Fatalf("GenerateKey: %v", err)
+	}
+	template := &x509.Certificate{
+		SerialNumber:          big.NewInt(1),
+		Subject:               pkix.Name{CommonName: "mlflow-test-ca"},
+		NotBefore:             time.Now().Add(-time.Hour),
+		NotAfter:              time.Now().Add(time.Hour),
+		KeyUsage:              x509.KeyUsageCertSign,
+		BasicConstraintsValid: true,
+		IsCA:                  true,
+	}
+	der, err := x509.CreateCertificate(rand.Reader, template, template, &key.PublicKey, key)
+	if err != nil {
+		t.Fatalf("CreateCertificate: %v", err)
+	}
+	path := filepath.Join(t.TempDir(), "ca.crt")
+	f, err := os.Create(path)
+	if err != nil {
+		t.Fatalf("Create: %v", err)
+	}
+	defer func() { _ = f.Close() }()
+	if err := pem.Encode(f, &pem.Block{Type: "CERTIFICATE", Bytes: der}); err != nil {
+		t.Fatalf("pem.Encode: %v", err)
+	}
+	return path
 }
