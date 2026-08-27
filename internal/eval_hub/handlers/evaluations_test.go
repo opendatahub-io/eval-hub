@@ -484,6 +484,23 @@ func TestHandleCreateEvaluationSucceedsWhenRuntimeOk(t *testing.T) {
 	}
 }
 
+type deleteRequest struct {
+	*MockRequest
+	queryValues map[string][]string
+	pathValues  map[string]string
+}
+
+func (r *deleteRequest) Query(key string) []string {
+	if values, ok := r.queryValues[key]; ok {
+		return values
+	}
+	return []string{}
+}
+
+func (r *deleteRequest) PathValue(name string) string {
+	return r.pathValues[name]
+}
+
 func TestHandleCancelEvaluationWithSoftDeleteDoesNotCleanupResources(t *testing.T) {
 	logger := slog.New(slog.NewTextHandler(io.Discard, nil))
 	jobID := "job-1"
@@ -559,6 +576,47 @@ func TestHandleDeleteEvaluationCleansUpResources(t *testing.T) {
 	}
 	if recorder.Code != 204 {
 		t.Fatalf("expected 204 response, got %d", recorder.Code)
+	}
+}
+
+func TestHandleCancelEvaluationInvalidHardDelete(t *testing.T) {
+	logger := slog.New(slog.NewTextHandler(io.Discard, nil))
+	jobID := "job-invalid-hd"
+	storage := &fakeStorage{
+		job: &api.EvaluationJobResource{
+			Resource: api.EvaluationResource{
+				Resource: api.Resource{ID: jobID},
+			},
+		},
+	}
+	runtime := &fakeRuntime{}
+	validate := validation.NewValidator()
+	h := handlers.New(storage, validate, runtime, nil, nil, nil)
+	ctx := executioncontext.NewExecutionContext(context.Background(), "req-invalid-hd", logger, "test-user", "test-tenant")
+
+	req := &deleteRequest{
+		MockRequest: createMockRequest("DELETE", "/api/v1/evaluations/jobs/"+jobID+"?hard_delete=foo"),
+		queryValues: map[string][]string{"hard_delete": {"foo"}},
+		pathValues:  map[string]string{constants.PathParameterJobID: jobID},
+	}
+	recorder := httptest.NewRecorder()
+	resp := MockResponseWrapper{recorder: recorder}
+
+	h.HandleCancelEvaluation(ctx, req, resp)
+
+	if recorder.Code != 400 {
+		t.Fatalf("expected 400 response for invalid hard_delete value, got %d", recorder.Code)
+	}
+
+	var errResp api.Error
+	if err := json.NewDecoder(recorder.Body).Decode(&errResp); err != nil {
+		t.Fatalf("failed to decode error response: %v", err)
+	}
+	if errResp.MessageCode != "query_parameter_invalid" {
+		t.Fatalf("expected message_code query_parameter_invalid, got %s", errResp.MessageCode)
+	}
+	if runtime.called {
+		t.Fatalf("expected runtime cleanup not to be invoked for invalid hard_delete")
 	}
 }
 

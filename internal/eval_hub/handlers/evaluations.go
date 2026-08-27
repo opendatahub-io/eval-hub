@@ -650,7 +650,19 @@ func (h *Handlers) HandleCancelEvaluation(ctx *executioncontext.ExecutionContext
 		return
 	}
 
-	err := h.withSpan(
+	// Validate query parameters before any side effects (runtime resource cleanup).
+	hardDelete, err := GetParam(r, "hard_delete", true, false)
+	if err != nil {
+		w.Error(err, ctx.RequestID)
+		return
+	}
+
+	operation := "cancel-evaluation-job"
+	if hardDelete {
+		operation = "delete-evaluation-job"
+	}
+
+	err = h.withSpan(
 		ctx,
 		func(runtimeCtx context.Context) error {
 			if h.runtime != nil {
@@ -680,16 +692,6 @@ func (h *Handlers) HandleCancelEvaluation(ctx *executioncontext.ExecutionContext
 	if err != nil {
 		w.Error(err, ctx.RequestID)
 		return
-	}
-
-	operation := "cancel-evaluation-job"
-	hardDelete, err := GetParam(r, "hard_delete", true, false)
-	if err != nil {
-		w.Error(err, ctx.RequestID)
-		return
-	}
-	if hardDelete {
-		operation = "delete-evaluation-job"
 	}
 
 	_ = h.withSpan(
