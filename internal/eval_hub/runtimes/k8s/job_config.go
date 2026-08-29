@@ -450,9 +450,10 @@ func resourceRequirementsFromConfig(cfg *config.ResourceRequirements) (corev1.Re
 	return out, nil
 }
 
-// resolveNodeSelector returns the node selector map from a GPUConfig, or nil when absent.
+// resolveNodeSelector returns the node selector map from a GPUConfig, or nil
+// when absent or when no GPUs are requested (Count <= 0).
 func resolveNodeSelector(gpu *api.GPUConfig) map[string]string {
-	if gpu == nil || len(gpu.NodeSelector) == 0 {
+	if gpu == nil || gpu.Count <= 0 || len(gpu.NodeSelector) == 0 {
 		return nil
 	}
 	out := make(map[string]string, len(gpu.NodeSelector))
