@@ -55,6 +55,37 @@ const (
 	JobPhaseCompleted           JobPhase = "completed"
 )
 
+// EvaluationPhase represents the lifecycle phase of an evaluation job. It mirrors the
+// trustyai.opendatahub.io/evaluation-phase label previously stored only on Kubernetes Jobs
+// and is now persisted in EvalHub storage so that it survives Job deletion.
+type EvaluationPhase string
+
+const (
+	EvaluationPhasePending           EvaluationPhase = "Pending"
+	EvaluationPhaseRunning           EvaluationPhase = "Running"
+	EvaluationPhaseCompleted         EvaluationPhase = "Completed"
+	EvaluationPhaseFailed            EvaluationPhase = "Failed"
+	EvaluationPhaseThresholdViolated EvaluationPhase = "ThresholdViolated"
+)
+
+// EvaluationPhaseFromOverallState derives the evaluation phase from the overall job state.
+// ThresholdViolated is not derivable from OverallState alone; callers must check
+// job-level test results separately and override with EvaluationPhaseThresholdViolated.
+func EvaluationPhaseFromOverallState(state OverallState) EvaluationPhase {
+	switch state {
+	case OverallStatePending:
+		return EvaluationPhasePending
+	case OverallStateRunning:
+		return EvaluationPhaseRunning
+	case OverallStateCompleted:
+		return EvaluationPhaseCompleted
+	case OverallStateFailed, OverallStatePartiallyFailed, OverallStateCancelled:
+		return EvaluationPhaseFailed
+	default:
+		return EvaluationPhasePending
+	}
+}
+
 type OverallState string
 
 const (
@@ -318,8 +349,9 @@ type BenchmarkStatusEvent struct {
 }
 
 type EvaluationJobState struct {
-	State   OverallState `json:"state" validate:"required,oneof=pending running completed failed cancelled partially_failed"`
-	Message *MessageInfo `json:"message" validate:"required"`
+	State           OverallState    `json:"state" validate:"required,oneof=pending running completed failed cancelled partially_failed"`
+	EvaluationPhase EvaluationPhase `json:"evaluation_phase,omitempty"`
+	Message         *MessageInfo    `json:"message" validate:"required"`
 }
 
 // StatusEvent is the body of POST /api/v1/evaluations/jobs/{id}/events.

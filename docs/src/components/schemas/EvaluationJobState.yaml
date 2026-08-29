@@ -6,5 +6,7 @@ required:
 properties:
   state:
     $ref: ./OverallState.yaml
+  evaluation_phase:
+    $ref: ./EvaluationPhase.yaml
   message:
     $ref: ./MessageInfo.yaml
