@@ -1,14 +1,42 @@
 package handlers
 
 import (
+	"bytes"
+	"context"
+	"encoding/json"
+	"io"
 	"log/slog"
 	"net/http"
 	"net/http/httptest"
+	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 
 	"github.com/eval-hub/eval-hub/internal/eval_hub/config"
+	"github.com/eval-hub/eval-hub/internal/eval_runtime_sidecar/proxy"
+	"github.com/eval-hub/eval-hub/pkg/api"
 )
+
+func TestNewModelProxy_UsesServiceAccountAuthFileDefault(t *testing.T) {
+	logger := slog.Default()
+	cfg := &config.Config{
+		Sidecar: &config.SidecarConfig{
+			Model: &config.SidecarModelConfig{
+				URL:                 "http://model.example:8080",
+				InsecureSkipVerify:  true,
+				AuthSecretMountPath: t.TempDir(),
+			},
+		},
+	}
+	rp, err := newModelProxy(cfg, logger)
+	if err != nil {
+		t.Fatalf("newModelProxy: %v", err)
+	}
+	if rp == nil {
+		t.Fatal("expected non-nil model proxy")
+	}
+}
 
 func TestNew(t *testing.T) {
 	logger := slog.Default()
@@ -21,7 +49,7 @@ func TestNew(t *testing.T) {
 				},
 			},
 		}
-		_, err := New(cfg, logger)
+		_, err := New(context.Background(), cfg, logger)
 		if err == nil {
 			t.Fatal("expected error when eval_hub.base_url is not set")
 		}
@@ -40,7 +68,7 @@ func TestNew(t *testing.T) {
 			},
 			MLFlow: &config.MLFlowConfig{TrackingURI: "http://localhost:5000"},
 		}
-		h, err := New(cfg, logger)
+		h, err := New(context.Background(), cfg, logger)
 		if err != nil {
 			t.Fatalf("unexpected error: %v", err)
 		}
@@ -70,6 +98,136 @@ func TestHandlers_HandleHealth(t *testing.T) {
 	}
 }
 
+func TestNew_LocalMode(t *testing.T) {
+	logger := slog.Default()
+	cfg := &config.Config{
+		Sidecar: &config.SidecarConfig{
+			BaseURL:   "http://localhost:8082",
+			LocalMode: true,
+			EvalHub: &config.EvalHubClientConfig{
+				BaseURL: "http://localhost:8080",
+			},
+		},
+	}
+	h, err := New(context.Background(), cfg, logger)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if !h.serviceConfig.Sidecar.LocalMode {
+		t.Error("expected LocalMode true")
+	}
+	if h.mlflowProxy != nil {
+		t.Error("expected mlflowProxy nil in local mode")
+	}
+	if h.ociProxy != nil {
+		t.Error("expected ociProxy nil in local mode")
+	}
+	if h.modelProxy == nil {
+		t.Error("expected modelProxy non-nil in local mode")
+	}
+}
+
+func TestHandleProxyCall_LocalMode_ModelRouting(t *testing.T) {
+	logger := slog.New(slog.NewTextHandler(io.Discard, nil))
+
+	var receivedPath, receivedAuth string
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		receivedPath = r.URL.Path
+		receivedAuth = r.Header.Get("Authorization")
+		w.WriteHeader(http.StatusOK)
+	}))
+	defer upstream.Close()
+
+	jobsDir := t.TempDir()
+	authDir := t.TempDir()
+	if err := os.WriteFile(filepath.Join(authDir, "api-key"), []byte("sk-test"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	jobID := "test-job-42"
+	jobDir := filepath.Join(jobsDir, jobID)
+	if err := os.MkdirAll(jobDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	jobInfo := `{"model": {"url": "` + upstream.URL + `", "auth_secret_mount_path": "file://` + authDir + `"}}`
+	if err := os.WriteFile(filepath.Join(jobDir, "sidecar-job-info.json"), []byte(jobInfo), 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	cfg := &config.Config{
+		Sidecar: &config.SidecarConfig{
+			BaseURL:   "http://localhost:8082",
+			LocalMode: true,
+			EvalHub: &config.EvalHubClientConfig{
+				BaseURL: "http://localhost:8080",
+			},
+		},
+	}
+	h, err := New(context.Background(), cfg, logger)
+	if err != nil {
+		t.Fatalf("New() error: %v", err)
+	}
+
+	// Override the local model proxy to point at our temp dir.
+	cache := proxy.NewJobInfoCache(jobsDir, proxy.DefaultJobCacheTTL, logger)
+	h.modelProxy = proxy.NewLocalModelReverseProxy(cache, logger)
+
+	t.Run("routes /model/<job-id>/path to upstream with prefix stripped", func(t *testing.T) {
+		receivedPath = ""
+		req := httptest.NewRequest(http.MethodPost, "/model/"+jobID+"/v1/chat/completions", nil)
+		rw := httptest.NewRecorder()
+		h.HandleProxyCall(rw, req)
+
+		if rw.Code != http.StatusOK {
+			t.Errorf("status = %d, want 200; body = %s", rw.Code, rw.Body.String())
+		}
+		if receivedPath != "/v1/chat/completions" {
+			t.Errorf("upstream path = %q, want /v1/chat/completions", receivedPath)
+		}
+	})
+
+	t.Run("forwards request without injecting auth when adapter sends none", func(t *testing.T) {
+		receivedAuth = ""
+		req := httptest.NewRequest(http.MethodGet, "/model/"+jobID+"/v1/models", nil)
+		rw := httptest.NewRecorder()
+		h.HandleProxyCall(rw, req)
+
+		if receivedAuth != "" {
+			t.Errorf("upstream auth = %q, want empty (sidecar must not inject credentials in local mode)", receivedAuth)
+		}
+	})
+
+	t.Run("unknown job returns 404", func(t *testing.T) {
+		req := httptest.NewRequest(http.MethodGet, "/model/nonexistent/v1/models", nil)
+		rw := httptest.NewRecorder()
+		h.HandleProxyCall(rw, req)
+
+		if rw.Code != http.StatusNotFound {
+			t.Errorf("status = %d, want 404", rw.Code)
+		}
+	})
+
+	t.Run("non-model path in local mode returns 400", func(t *testing.T) {
+		req := httptest.NewRequest(http.MethodGet, "/some/random/path", nil)
+		rw := httptest.NewRecorder()
+		h.HandleProxyCall(rw, req)
+
+		if rw.Code != http.StatusBadRequest {
+			t.Errorf("status = %d, want 400", rw.Code)
+		}
+	})
+
+	t.Run("eval-hub path still routes correctly in local mode", func(t *testing.T) {
+		req := httptest.NewRequest(http.MethodGet, "/api/v1/evaluations/jobs", nil)
+		rw := httptest.NewRecorder()
+		h.HandleProxyCall(rw, req)
+		// Should route to eval-hub proxy (will get connection error, not 400)
+		if rw.Code == http.StatusBadRequest && strings.Contains(rw.Body.String(), "unknown proxy call") {
+			t.Error("eval-hub path should not be treated as unknown proxy call in local mode")
+		}
+	})
+}
+
 func TestHandlers_HandleProxyCall(t *testing.T) {
 	logger := slog.Default()
 	cfg := &config.Config{
@@ -81,7 +239,7 @@ func TestHandlers_HandleProxyCall(t *testing.T) {
 		},
 		MLFlow: &config.MLFlowConfig{TrackingURI: "http://localhost:5000"},
 	}
-	h, err := New(cfg, logger)
+	h, err := New(context.Background(), cfg, logger)
 	if err != nil {
 		t.Fatalf("New() error: %v", err)
 	}
@@ -184,7 +342,7 @@ func TestHandlers_HandleProxyCall(t *testing.T) {
 				},
 			},
 		}
-		hNoMLFlow, err := New(cfgNoMLFlow, logger)
+		hNoMLFlow, err := New(context.Background(), cfgNoMLFlow, logger)
 		if err != nil {
 			t.Fatalf("New() error: %v", err)
 		}
@@ -208,6 +366,330 @@ func TestHandlers_HandleProxyCall(t *testing.T) {
 			t.Errorf("body = %q, want unknown proxy call (OCI not configured, no repository to match)", body)
 		}
 	})
+}
+
+func TestReadGitMetadata(t *testing.T) {
+	t.Run("returns SHA from file", func(t *testing.T) {
+		f, err := os.CreateTemp(t.TempDir(), "git-metadata-*")
+		if err != nil {
+			t.Fatal(err)
+		}
+		_, _ = f.WriteString("abc123def456\n")
+		_ = f.Close()
+		got, err := readGitMetadata(f.Name())
+		if err != nil {
+			t.Fatalf("unexpected error: %v", err)
+		}
+		if got != "abc123def456" {
+			t.Errorf("got %q, want %q", got, "abc123def456")
+		}
+	})
+	t.Run("returns error when file absent", func(t *testing.T) {
+		_, err := readGitMetadata(filepath.Join(t.TempDir(), "no-such-file"))
+		if err == nil {
+			t.Fatal("expected error for missing file")
+		}
+	})
+}
+
+func TestMaybeInjectGitSHA_InjectsBenchmarkStatusEvent(t *testing.T) {
+	// Write .git-metadata to a temp path; override the constant via the handler directly.
+	dir := t.TempDir()
+	metaPath := filepath.Join(dir, ".git-metadata")
+	if err := os.WriteFile(metaPath, []byte("cafebabe\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	h := &Handlers{
+		logger: slog.New(slog.NewTextHandler(io.Discard, nil)),
+		serviceConfig: &config.Config{
+			Sidecar: &config.SidecarConfig{
+				InitContainer: &config.InitContainerConfig{IsGitJob: true},
+			},
+		},
+		gitSHA: "cafebabe",
+	}
+
+	evt := api.StatusEvent{
+		BenchmarkStatusEvent: &api.BenchmarkStatusEvent{
+			ProviderID: "p1", ID: "b1", Status: "running",
+		},
+	}
+	body, _ := json.Marshal(evt)
+	req := httptest.NewRequest(http.MethodPost, "/api/v1/evaluations/jobs/job-1/events", bytes.NewReader(body))
+
+	newReq := h.maybeInjectResolvedSHA(req)
+
+	rawOut, _ := io.ReadAll(newReq.Body)
+	var out api.StatusEvent
+	if err := json.Unmarshal(rawOut, &out); err != nil {
+		t.Fatalf("unmarshal result: %v", err)
+	}
+	if out.BenchmarkStatusEvent == nil {
+		t.Fatal("BenchmarkStatusEvent is nil")
+	}
+	if out.BenchmarkStatusEvent.JobMeta == nil || out.BenchmarkStatusEvent.JobMeta.ResolvedSHA != "cafebabe" {
+		got := ""
+		if out.BenchmarkStatusEvent.JobMeta != nil {
+			got = out.BenchmarkStatusEvent.JobMeta.ResolvedSHA
+		}
+		t.Errorf("JobMeta.ResolvedSHA = %q, want %q", got, "cafebabe")
+	}
+}
+
+func TestMaybeInjectGitSHA_SkipsNonBenchmarkBody(t *testing.T) {
+	h := &Handlers{
+		logger: slog.New(slog.NewTextHandler(io.Discard, nil)),
+		gitSHA: "cafebabe",
+	}
+
+	// Body parses as a StatusEvent but has no BenchmarkStatusEvent — injection must be skipped.
+	body := []byte(`{"other_field":"value"}`)
+	req := httptest.NewRequest(http.MethodPost, "/api/v1/evaluations/jobs/job-1/events", bytes.NewReader(body))
+
+	newReq := h.maybeInjectResolvedSHA(req)
+
+	rawOut, _ := io.ReadAll(newReq.Body)
+	if !bytes.Equal(rawOut, body) {
+		t.Errorf("body changed for non-benchmark body: got %s", rawOut)
+	}
+}
+
+func TestMaybeInjectGitSHA_NoopWhenGitSHAEmpty(t *testing.T) {
+	// When gitSHA is empty and metadata is missing, a body without job_meta.resolved_sha is unchanged.
+	h := &Handlers{
+		logger:          slog.New(slog.NewTextHandler(io.Discard, nil)),
+		gitSHA:          "",
+		gitMetadataPath: filepath.Join(t.TempDir(), "missing-git-metadata"),
+	}
+
+	body := []byte(`{"benchmark_status_event":{"provider_id":"p","id":"b","status":"running"}}`)
+	req := httptest.NewRequest(http.MethodPost, "/api/v1/evaluations/jobs/job-1/events", bytes.NewReader(body))
+
+	newReq := h.maybeInjectResolvedSHA(req)
+
+	rawOut, _ := io.ReadAll(newReq.Body)
+	if !bytes.Equal(rawOut, body) {
+		t.Errorf("body changed when gitSHA empty: got %s", rawOut)
+	}
+}
+
+func TestMaybeInjectGitSHA_RetriesWhenMetadataAppears(t *testing.T) {
+	dir := t.TempDir()
+	metaPath := filepath.Join(dir, ".git-metadata")
+
+	h := &Handlers{
+		logger:          slog.New(slog.NewTextHandler(io.Discard, nil)),
+		gitSHA:          "",
+		gitMetadataPath: metaPath,
+	}
+
+	evt := api.StatusEvent{
+		BenchmarkStatusEvent: &api.BenchmarkStatusEvent{
+			ProviderID: "p1", ID: "b1", Status: "running",
+		},
+	}
+	body, _ := json.Marshal(evt)
+
+	// First call: file missing — no injection.
+	req1 := httptest.NewRequest(http.MethodPost, "/api/v1/evaluations/jobs/job-1/events", bytes.NewReader(body))
+	out1, _ := io.ReadAll(h.maybeInjectResolvedSHA(req1).Body)
+	var ev1 api.StatusEvent
+	_ = json.Unmarshal(out1, &ev1)
+	if ev1.BenchmarkStatusEvent != nil && ev1.BenchmarkStatusEvent.JobMeta != nil && ev1.BenchmarkStatusEvent.JobMeta.ResolvedSHA != "" {
+		t.Fatalf("first call: JobMeta.ResolvedSHA = %q, want empty", ev1.BenchmarkStatusEvent.JobMeta.ResolvedSHA)
+	}
+	if h.gitSHA != "" {
+		t.Fatalf("first call: gitSHA = %q, want empty", h.gitSHA)
+	}
+
+	// File appears — second call should load and inject.
+	if err := os.WriteFile(metaPath, []byte("retrydeadbeef\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	req2 := httptest.NewRequest(http.MethodPost, "/api/v1/evaluations/jobs/job-1/events", bytes.NewReader(body))
+	out2, _ := io.ReadAll(h.maybeInjectResolvedSHA(req2).Body)
+	var ev2 api.StatusEvent
+	if err := json.Unmarshal(out2, &ev2); err != nil {
+		t.Fatalf("unmarshal: %v", err)
+	}
+	if ev2.BenchmarkStatusEvent == nil || ev2.BenchmarkStatusEvent.JobMeta == nil || ev2.BenchmarkStatusEvent.JobMeta.ResolvedSHA != "retrydeadbeef" {
+		got := ""
+		if ev2.BenchmarkStatusEvent != nil && ev2.BenchmarkStatusEvent.JobMeta != nil {
+			got = ev2.BenchmarkStatusEvent.JobMeta.ResolvedSHA
+		}
+		t.Errorf("second call: JobMeta.ResolvedSHA = %q, want %q", got, "retrydeadbeef")
+	}
+	if h.gitSHA != "retrydeadbeef" {
+		t.Errorf("gitSHA = %q, want %q", h.gitSHA, "retrydeadbeef")
+	}
+}
+
+func TestMaybeInjectGitSHA_StripsClientSHAWhenStillEmpty(t *testing.T) {
+	h := &Handlers{
+		logger:          slog.New(slog.NewTextHandler(io.Discard, nil)),
+		gitSHA:          "",
+		gitMetadataPath: filepath.Join(t.TempDir(), "missing-git-metadata"),
+	}
+
+	evt := api.StatusEvent{
+		BenchmarkStatusEvent: &api.BenchmarkStatusEvent{
+			ProviderID: "p1", ID: "b1", Status: "running", JobMeta: &api.JobMeta{ResolvedSHA: "forged"},
+		},
+	}
+	body, _ := json.Marshal(evt)
+	req := httptest.NewRequest(http.MethodPost, "/api/v1/evaluations/jobs/job-1/events", bytes.NewReader(body))
+
+	out, _ := io.ReadAll(h.maybeInjectResolvedSHA(req).Body)
+	var got api.StatusEvent
+	if err := json.Unmarshal(out, &got); err != nil {
+		t.Fatalf("unmarshal: %v", err)
+	}
+	if got.BenchmarkStatusEvent == nil {
+		t.Fatal("BenchmarkStatusEvent is nil")
+	}
+	if got.BenchmarkStatusEvent.JobMeta != nil && got.BenchmarkStatusEvent.JobMeta.ResolvedSHA != "" {
+		t.Errorf("JobMeta.ResolvedSHA = %q, want stripped empty", got.BenchmarkStatusEvent.JobMeta.ResolvedSHA)
+	}
+}
+
+func TestMaybeInjectGitSHA_InjectsWithPreSeededSHA(t *testing.T) {
+	// Verifies injection when gitSHA is pre-populated (simulating the startup read).
+	// readGitMetadata is unit-tested separately; here we confirm maybeInjectResolvedSHA
+	// injects correctly given a SHA already set on the Handlers struct.
+	h := &Handlers{
+		logger: slog.New(slog.NewTextHandler(io.Discard, nil)),
+		serviceConfig: &config.Config{
+			Sidecar: &config.SidecarConfig{
+				InitContainer: &config.InitContainerConfig{IsGitJob: true},
+			},
+		},
+		gitSHA: "aabbccdd",
+	}
+
+	evt := api.StatusEvent{
+		BenchmarkStatusEvent: &api.BenchmarkStatusEvent{
+			ProviderID: "p1", ID: "b1", Status: "running",
+		},
+	}
+	body, _ := json.Marshal(evt)
+	req := httptest.NewRequest(http.MethodPost, "/api/v1/evaluations/jobs/job-once/events", bytes.NewReader(body))
+
+	newReq := h.maybeInjectResolvedSHA(req)
+
+	rawOut, _ := io.ReadAll(newReq.Body)
+	var out api.StatusEvent
+	if err := json.Unmarshal(rawOut, &out); err != nil {
+		t.Fatalf("unmarshal: %v", err)
+	}
+	if out.BenchmarkStatusEvent == nil || out.BenchmarkStatusEvent.JobMeta == nil || out.BenchmarkStatusEvent.JobMeta.ResolvedSHA != "aabbccdd" {
+		got := ""
+		if out.BenchmarkStatusEvent != nil && out.BenchmarkStatusEvent.JobMeta != nil {
+			got = out.BenchmarkStatusEvent.JobMeta.ResolvedSHA
+		}
+		t.Errorf("JobMeta.ResolvedSHA = %q, want %q", got, "aabbccdd")
+	}
+	// gitSHA must remain set for subsequent injections.
+	if h.gitSHA != "aabbccdd" {
+		t.Errorf("gitSHA should remain set after injection, got %q", h.gitSHA)
+	}
+}
+
+func TestMaybeInjectGitSHA_InjectsOnEveryCall(t *testing.T) {
+	// gitSHA is set at startup and injected on every BenchmarkStatusEvent so the server
+	// can idempotently persist it (server skips if already set).
+	h := &Handlers{
+		logger: slog.New(slog.NewTextHandler(io.Discard, nil)),
+		gitSHA: "firstsha",
+	}
+
+	body := func() []byte {
+		b, _ := json.Marshal(api.StatusEvent{
+			BenchmarkStatusEvent: &api.BenchmarkStatusEvent{
+				ProviderID: "p", ID: "b", Status: "running",
+			},
+		})
+		return b
+	}
+
+	for i, label := range []string{"first", "second", "third"} {
+		req := httptest.NewRequest(http.MethodPost, "/api/v1/evaluations/jobs/job-z/events", bytes.NewReader(body()))
+		out, _ := io.ReadAll(h.maybeInjectResolvedSHA(req).Body)
+		var ev api.StatusEvent
+		_ = json.Unmarshal(out, &ev)
+		if ev.BenchmarkStatusEvent == nil || ev.BenchmarkStatusEvent.JobMeta == nil || ev.BenchmarkStatusEvent.JobMeta.ResolvedSHA != "firstsha" {
+			t.Errorf("call %d (%s): JobMeta.ResolvedSHA = %q, want %q", i+1, label, ev.BenchmarkStatusEvent.JobMeta.ResolvedSHA, "firstsha")
+		}
+		if h.gitSHA != "firstsha" {
+			t.Errorf("call %d (%s): gitSHA must remain set, got %q", i+1, label, h.gitSHA)
+		}
+	}
+}
+
+func TestIsEventsPath(t *testing.T) {
+	tests := []struct {
+		uri  string
+		want bool
+	}{
+		{"/api/v1/evaluations/jobs/abc-123/events", true},
+		{"/api/v1/evaluations/jobs/abc-123/events?foo=bar", true},
+		{"/api/v1/evaluations/jobs/abc-123", false},
+		{"/api/v1/evaluations/jobs", false},
+		{"/api/v1/evaluations/", false},
+		{"/api/v1/evaluations/jobs/abc-123/sub/events", false}, // extra path segment must not match
+	}
+	for _, tt := range tests {
+		if got := isEventsPath(tt.uri); got != tt.want {
+			t.Errorf("isEventsPath(%q) = %v, want %v", tt.uri, got, tt.want)
+		}
+	}
+}
+
+func TestHandleProxyCall_GitSHAInjectedOnEventsPost(t *testing.T) {
+	// End-to-end: sidecar has GitTestData + pre-populated gitSHA; a POST to /events
+	// should arrive at the upstream with JobMeta.ResolvedSHA set in the body.
+	var receivedSHA string
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		body, _ := io.ReadAll(r.Body)
+		var evt api.StatusEvent
+		if json.Unmarshal(body, &evt) == nil && evt.BenchmarkStatusEvent != nil {
+			if evt.BenchmarkStatusEvent.JobMeta != nil {
+				receivedSHA = evt.BenchmarkStatusEvent.JobMeta.ResolvedSHA
+			}
+		}
+		w.WriteHeader(http.StatusNoContent)
+	}))
+	defer upstream.Close()
+
+	cfg := &config.Config{
+		Sidecar: &config.SidecarConfig{
+			EvalHub: &config.EvalHubClientConfig{
+				BaseURL:            upstream.URL,
+				InsecureSkipVerify: true,
+			},
+			InitContainer: &config.InitContainerConfig{IsGitJob: true},
+		},
+	}
+	h, err := New(context.Background(), cfg, slog.New(slog.NewTextHandler(io.Discard, nil)))
+	if err != nil {
+		t.Fatalf("New() error: %v", err)
+	}
+	// Pre-populate gitSHA to avoid filesystem dependency on .git-metadata path.
+	h.gitSHA = "deadbeef"
+
+	evt := api.StatusEvent{
+		BenchmarkStatusEvent: &api.BenchmarkStatusEvent{
+			ProviderID: "p1", ID: "b1", Status: "running",
+		},
+	}
+	body, _ := json.Marshal(evt)
+	req := httptest.NewRequest(http.MethodPost, "/api/v1/evaluations/jobs/job-7/events", bytes.NewReader(body))
+	rw := httptest.NewRecorder()
+	h.HandleProxyCall(rw, req)
+
+	if receivedSHA != "deadbeef" {
+		t.Errorf("upstream received SHA %q, want %q", receivedSHA, "deadbeef")
+	}
 }
 
 func TestOciRouteMatch(t *testing.T) {

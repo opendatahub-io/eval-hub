@@ -2,16 +2,36 @@
 
 # Local Python environment (uv). Isolated from the repo-root .venv used for FVT.
 VENV_DIR ?= .venv
-PYTHON ?= 3.14
+PYTHON ?= 3.12
 
 MLFLOW_OLD_VERSION ?= 3.8.1
-MLFLOW_LATEST_VERSION ?= 3.14.0
+
+# Fetch the latest stable MLflow version from GitHub Releases.
+# Falls back to a pinned version when the API is unreachable (offline, CI, rate-limited).
+MLFLOW_LATEST_VERSION_FALLBACK := 3.15.1
+ifndef MLFLOW_LATEST_VERSION
+MLFLOW_LATEST_VERSION := $(shell \
+  curl -sf --max-time 5 \
+    https://api.github.com/repos/mlflow/mlflow/releases/latest 2>/dev/null \
+  | grep -o '"tag_name": *"v[^"]*"' \
+  | grep -o '[0-9][0-9.]*')
+ifneq ($(MLFLOW_LATEST_VERSION),)
+$(info Fetched latest MLflow version from GitHub: $(MLFLOW_LATEST_VERSION))
+endif
+endif
+ifeq ($(MLFLOW_LATEST_VERSION),)
+MLFLOW_LATEST_VERSION := $(MLFLOW_LATEST_VERSION_FALLBACK)
+$(info GitHub API unavailable; using fallback MLflow version: $(MLFLOW_LATEST_VERSION))
+endif
+
 MLFLOW_VERSION ?= $(MLFLOW_LATEST_VERSION)
 
 MLFLOW_HOST ?= 127.0.0.1
 MLFLOW_PORT ?= 5000
 MLFLOW_BACKEND_STORE_URI ?= sqlite:///bin/mlflow_$(MLFLOW_PORT).db
 MLFLOW_DEFAULT_ARTIFACT_ROOT ?= ./bin/mlruns_$(MLFLOW_PORT)
+# Proxied artifact uploads (--serve-artifacts) land here, not under DEFAULT_ARTIFACT_ROOT.
+MLFLOW_ARTIFACTS_DESTINATION ?= ./bin/mlartifacts_$(MLFLOW_PORT)
 MLFLOW_TRACKING_URI ?= http://$(MLFLOW_HOST):$(MLFLOW_PORT)
 MLFLOW_ENABLE_WORKSPACES ?= false
 MLFLOW_DISABLE_SECURITY_MIDDLEWARE ?= false
@@ -20,16 +40,17 @@ MLFLOW_LOCK_FILE ?= bin/.mlflow.lock
 
 # Exported so _start-mlflow-locked / scripts see the same knobs as make.
 export MLFLOW_VERSION VENV_DIR MLFLOW_HOST MLFLOW_PORT
-export MLFLOW_BACKEND_STORE_URI MLFLOW_DEFAULT_ARTIFACT_ROOT
+export MLFLOW_BACKEND_STORE_URI MLFLOW_DEFAULT_ARTIFACT_ROOT MLFLOW_ARTIFACTS_DESTINATION
 export MLFLOW_ENABLE_WORKSPACES MLFLOW_DISABLE_SECURITY_MIDDLEWARE
 export MLFLOW_LOG_FILE MLFLOW_TRACKING_URI
 
 help: ## Show MLflow dev targets
 	@grep -E '^[a-zA-Z0-9_.-]+:.*?## .*$$' $(MAKEFILE_LIST) | sort | awk 'BEGIN {FS = ":.*?## "}; {printf "  \033[36m%-22s\033[0m %s\n", $$1, $$2}'
 
-clean: ## Remove bin/ artifacts (DB, logs, mlruns)
+clean: ## Remove bin/ artifacts (DB, logs, mlruns, mlartifacts)
 	@echo "🧹 Cleaning up MLflow server..."
 	@rm -fr bin
+	@rm -fr mlartifacts
 
 init-python: ## Create a local Python virtualenv with uv (required before install-mlflow)
 	@if ! command -v uv >/dev/null 2>&1; then \

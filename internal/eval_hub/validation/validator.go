@@ -21,8 +21,9 @@ var (
 		"resource_id": "required,min=1,max=36",
 	}
 
-	// RFC 1123 DNS label: lowercase alphanumeric, internal hyphens, no leading/trailing hyphen.
-	rfc1123DNSLabelRegex = regexp.MustCompile(`^[a-z0-9]([-a-z0-9]*[a-z0-9])?$`)
+	// RFC 1123 DNS label: lowercase alphanumeric, internal hyphens, no leading/trailing
+	// hyphen, max 63 characters (1 + up to 61 middle + 1, or a single alphanumeric).
+	rfc1123DNSLabelRegex = regexp.MustCompile(`^[a-z0-9]([-a-z0-9]{0,61}[a-z0-9])?$`)
 )
 
 func NewValidator() (*validator.Validate, error) {
@@ -56,15 +57,35 @@ func registerCustomValidators(instance *validator.Validate) error {
 	if err := instance.RegisterValidation("rfc1123_dns_label", validateRFC1123DNSLabel); err != nil {
 		return fmt.Errorf("register validator failed for rfc1123_dns_label: %w", err)
 	}
-	// Benchmarks min=1 only when Collection is not set (required_without handles presence; this enforces length)
-	instance.RegisterStructValidation(evaluationJobConfigBenchmarksMin, api.EvaluationJobConfig{})
-	// Exactly one of s3 or pvc must be set in TestDataRef.
-	instance.RegisterStructValidation(validateTestDataRefMutualExclusion, api.TestDataRef{})
+	if err := instance.RegisterValidation("git_clone_url", validateGitCloneURL); err != nil {
+		return fmt.Errorf("register validator failed for git_clone_url: %w", err)
+	}
+	instance.RegisterStructValidation(evaluationJobConfig, api.EvaluationJobConfig{})
+	instance.RegisterStructValidation(validateBenchmarkStatusEventMetricsSchema, api.BenchmarkStatusEvent{})
+	instance.RegisterStructValidation(validateGitTestDataRefAuth, api.GitTestDataRef{})
+	// hardware_profile_name is mutually exclusive with inline queue/cpu/memory/gpu.
+	instance.RegisterStructValidation(validateBenchmarkHardwareConfigExclusive, api.BenchmarkHardwareConfig{})
 	return nil
 }
 
 func validateRFC1123DNSLabel(fl validator.FieldLevel) bool {
 	return rfc1123DNSLabelRegex.MatchString(fl.Field().String())
+}
+
+func validateGitCloneURL(fl validator.FieldLevel) bool {
+	return api.ValidateGitCloneURL(fl.Field().String()) == nil
+}
+
+// validateGitTestDataRefAuth rejects http:// URLs when secret_ref is set so credentials
+// are not sent over cleartext.
+func validateGitTestDataRefAuth(sl validator.StructLevel) {
+	ref, ok := sl.Current().Interface().(api.GitTestDataRef)
+	if !ok {
+		return
+	}
+	if err := api.ValidateGitCloneURLAuth(ref.URL, strings.TrimSpace(ref.SecretRef) != ""); err != nil {
+		sl.ReportError(ref.URL, "url", "URL", "git_http_with_secret", err.Error())
+	}
 }
 
 // ValidateCollectionOverrides returns an error if any override references a
@@ -102,17 +123,70 @@ func ValidateCollectionOverrides(overrides []api.EvaluationBenchmarkConfig, coll
 	return nil
 }
 
-// validateTestDataRefMutualExclusion ensures exactly one of s3 or pvc is set.
-func validateTestDataRefMutualExclusion(sl validator.StructLevel) {
-	ref, ok := sl.Current().Interface().(api.TestDataRef)
+// validateBenchmarkHardwareConfigExclusive rejects combining a hardware profile name
+// with inline queue/cpu/memory/gpu overrides.
+func validateBenchmarkHardwareConfigExclusive(sl validator.StructLevel) {
+	hw, ok := sl.Current().Interface().(api.BenchmarkHardwareConfig)
 	if !ok {
 		return
 	}
-	if ref.S3 != nil && ref.PVC != nil {
-		sl.ReportError(ref.PVC, "pvc", "pvc", "test_data_ref_exclusive", "s3 and pvc are mutually exclusive")
+	if strings.TrimSpace(hw.HardwareProfileName) == "" {
+		return
 	}
-	if ref.S3 == nil && ref.PVC == nil {
-		sl.ReportError(ref.S3, "s3", "s3", "test_data_ref_required", "one of s3 or pvc must be set")
+	if hw.HasDirectFields() {
+		sl.ReportError(
+			hw.HardwareProfileName,
+			"hardware_profile_name",
+			"HardwareProfileName",
+			"hardware_config_exclusive",
+			"hardware_profile_name cannot be combined with queue, cpu, memory, or gpu",
+		)
+	}
+}
+
+func evaluationJobConfig(sl validator.StructLevel) {
+	evaluationJobConfigBenchmarksMin(sl)
+}
+
+// validateBenchmarkStatusEventMetricsSchema ensures metrics_schema names exist in
+// metrics and that schema names are not duplicated.
+func validateBenchmarkStatusEventMetricsSchema(sl validator.StructLevel) {
+	event, ok := sl.Current().Interface().(api.BenchmarkStatusEvent)
+	if !ok || len(event.MetricsSchema) == 0 {
+		return
+	}
+	seen := make(map[string]struct{}, len(event.MetricsSchema))
+	for i, schema := range event.MetricsSchema {
+		if _, dup := seen[schema.Name]; dup {
+			sl.ReportError(
+				event.MetricsSchema,
+				"metrics_schema",
+				"MetricsSchema",
+				"metrics_schema_duplicate_name",
+				schema.Name,
+			)
+		} else {
+			seen[schema.Name] = struct{}{}
+		}
+		if event.Metrics == nil {
+			sl.ReportError(
+				schema.Name,
+				fmt.Sprintf("metrics_schema[%d].name", i),
+				"Name",
+				"metrics_schema_name_not_in_metrics",
+				schema.Name,
+			)
+			continue
+		}
+		if _, ok := event.Metrics[schema.Name]; !ok {
+			sl.ReportError(
+				schema.Name,
+				fmt.Sprintf("metrics_schema[%d].name", i),
+				"Name",
+				"metrics_schema_name_not_in_metrics",
+				schema.Name,
+			)
+		}
 	}
 }
 

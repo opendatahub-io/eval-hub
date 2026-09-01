@@ -54,6 +54,16 @@ func (r *K8sRuntime) WithContext(ctx context.Context) abstractions.Runtime {
 	}
 }
 
+// Close stops the Kubernetes EventBroadcaster background goroutines started by NewKubernetesHelper.
+// WithLogger/WithContext copies share the same helper pointer, so Close must be called exactly once
+// on the root runtime returned by NewK8sRuntime.
+func (r *K8sRuntime) Close() error {
+	if r.helper == nil {
+		return nil
+	}
+	return r.helper.Close()
+}
+
 func (r *K8sRuntime) RunEvaluationJob(
 	evaluation *api.EvaluationJobResource,
 	benchmarks []api.EvaluationBenchmarkConfig,
@@ -179,11 +189,24 @@ func (r *K8sRuntime) createBenchmarkResources(ctx context.Context,
 		return err
 	}
 	var hardwareProfile *hardwareProfileResources
-	if benchmark.HardwareConfig != nil {
-		ref := benchmark.HardwareConfig.HardwareProfileRef
-		profileName := strings.TrimSpace(ref.Name)
+	effectiveHW := api.EffectiveHardwareConfig(benchmark, &evaluation.EvaluationJobConfig)
+	if effectiveHW != nil {
+		profileName := strings.TrimSpace(effectiveHW.HardwareProfileName)
 		if profileName != "" {
-			profileNamespace := resolveHardwareProfileNamespace(ref.Namespace, string(evaluation.Resource.Tenant))
+			// Create already validated existence/disabled via ValidateHardwareProfiles.
+			// Re-fetch here only to apply resources and scheduling to the Job.
+			profileNamespace, err := hardwareProfilesNamespace()
+			if err != nil {
+				logger.Error(
+					"hardware profiles namespace is not configured",
+					"error", err,
+					"env", hardwareProfilesNamespaceEnv,
+					"job_id", evaluation.Resource.ID,
+					"benchmark_id", benchmarkID,
+					"profile", profileName,
+				)
+				return fmt.Errorf("job %s benchmark %s: %w", evaluation.Resource.ID, benchmarkID, err)
+			}
 			profileCR, err := r.helper.GetHardwareProfile(ctx, profileNamespace, profileName)
 			if err != nil {
 				return fmt.Errorf("job %s benchmark %s: fetch hardware profile %q in namespace %q: %w",
@@ -205,42 +228,38 @@ func (r *K8sRuntime) createBenchmarkResources(ctx context.Context,
 		return fmt.Errorf("service config is required")
 	}
 	jobConfig.testDataInitImage = r.serviceConfig.Service.EvalInitImage
+	jobConfig.mlflowCABundleConfigMap = r.resolveMLFlowCABundleConfigMap(ctx, jobConfig, logger)
 	logger.Info(
 		"kubernetes job config",
 		"job_id", evaluation.Resource.ID,
 		"benchmark_id", benchmarkID,
 		"service_account", jobConfig.serviceAccountName,
 		"service_ca_configmap", jobConfig.serviceCAConfigMap,
+		"mlflow_ca_bundle_configmap", jobConfig.mlflowCABundleConfigMap,
 		"eval_hub_url", jobConfig.evalHubURL,
 	)
-	// The sidecar model proxy is always active for all jobs. When model.auth is set,
-	// the secret is inspected to determine if credential injection (ref-token resolution)
-	// is needed. Proxy-injectable keys (api-key, *_api-key, *_url) cause an ephemeral
-	// internalModelRef secret to be created; the adapter sends ref tokens that the sidecar
-	// resolves to real credentials.
-	// Always redirect the adapter through the sidecar model proxy so all model traffic
-	// (open and authenticated) flows through the sidecar. This gives a single forwarding
-	// path and allows SA token injection for models that need it.
-	// Redirect the adapter to the sidecar, preserving the full path from the user's model URL.
-	// The sidecar Rewrite function swaps only scheme+host from its configured target, so
-	// whatever path the adapter sends is forwarded verbatim to the real upstream model host.
-	rewrittenModelURL, err := rewriteModelURLForSidecar(jobConfig.sidecarBaseURL, jobConfig.modelTargetURL)
-	if err != nil {
-		return fmt.Errorf("job %s benchmark %s: rewriting model URL for sidecar: %w", evaluation.Resource.ID, benchmarkID, err)
-	}
-	jobConfig.jobSpec.Model.URL = rewrittenModelURL
-
+	// When a model URL is present, redirect the adapter through the sidecar model proxy so
+	// all model traffic (open and authenticated) flows through the sidecar. For pre-recorded-data
+	// jobs the model URL is empty and the entire model proxy / auth pipeline is skipped.
 	var secretInfo modelSecretInfo
-	if jobConfig.modelAuthSecretRef != "" {
-		secretInfo, err = inspectModelSecret(ctx, jobConfig.namespace, jobConfig.modelAuthSecretRef, r.helper)
+	if jobConfig.modelTargetURL != "" {
+		rewrittenModelURL, err := rewriteModelURLForSidecar(jobConfig.sidecarBaseURL, jobConfig.modelTargetURL)
 		if err != nil {
-			logger.Error("kubernetes model secret inspect error", "benchmark_id", benchmarkID, "error", err)
-			return fmt.Errorf("job %s benchmark %s: reading model auth secret: %w", evaluation.Resource.ID, benchmarkID, err)
+			return fmt.Errorf("job %s benchmark %s: rewriting model URL for sidecar: %w", evaluation.Resource.ID, benchmarkID, err)
 		}
-		if secretInfo.hasCredentialKeys {
-			jobConfig.modelInternalRefSecretName = buildK8sName(jobConfig.jobID, jobConfig.resourceGUID, "-model-ref")
-		} else {
-			logger.Info("model credential secret has no proxy-injectable keys; sidecar proxy active for SA token")
+		jobConfig.jobSpec.Model.URL = rewrittenModelURL
+
+		if jobConfig.modelAuthSecretRef != "" {
+			secretInfo, err = inspectModelSecret(ctx, jobConfig.namespace, jobConfig.modelAuthSecretRef, r.helper)
+			if err != nil {
+				logger.Error("kubernetes model secret inspect error", "benchmark_id", benchmarkID, "error", err)
+				return fmt.Errorf("job %s benchmark %s: reading model auth secret: %w", evaluation.Resource.ID, benchmarkID, err)
+			}
+			if secretInfo.hasCredentialKeys {
+				jobConfig.modelInternalRefSecretName = buildK8sName(jobConfig.jobID, jobConfig.resourceGUID, "-model-ref")
+			} else {
+				logger.Info("model credential secret has no proxy-injectable keys; sidecar proxy active for SA token")
+			}
 		}
 	}
 	// Build sidecar config after inspecting the model secret so modelInternalRefSecretName is set.
@@ -255,7 +274,7 @@ func (r *K8sRuntime) createBenchmarkResources(ctx context.Context,
 		logger.Error("kubernetes configmap build error", "benchmark_id", benchmarkID, "error", err)
 		return fmt.Errorf("job %s benchmark %s: %w", evaluation.Resource.ID, benchmarkID, err)
 	}
-	job, err := buildJob(jobConfig)
+	job, err := buildJob(jobConfig, r.serviceConfig)
 	if err != nil {
 		logger.Error("kubernetes job build error", "benchmark_id", benchmarkID, "error", err)
 		return fmt.Errorf("job %s benchmark %s: %w", evaluation.Resource.ID, benchmarkID, err)
@@ -372,7 +391,7 @@ func buildBenchmarkFailureStatus(benchmark *api.EvaluationBenchmarkConfig, bench
 			Status:         api.StateFailed,
 			ErrorMessage: api.WithMessageOrigin(&api.MessageInfo{
 				Message:     runErr.Error(),
-				MessageCode: constants.MESSAGE_CODE_EVALUATION_JOB_FAILED,
+				MessageCode: constants.MessageCodeEvaluationJobFailed,
 			}, api.MessageOriginServer),
 		},
 	}
@@ -380,6 +399,59 @@ func buildBenchmarkFailureStatus(benchmark *api.EvaluationBenchmarkConfig, bench
 
 func (r *K8sRuntime) Name() string {
 	return "kubernetes"
+}
+
+// ValidateHardwareProfiles ensures referenced HardwareProfiles exist, are enabled,
+// and can be parsed. Called from the create handler before the job is persisted.
+func (r *K8sRuntime) ValidateHardwareProfiles(benchmarks []api.EvaluationBenchmarkConfig) error {
+	ctx := r.ctx
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	logger := r.logger
+	for _, benchmark := range benchmarks {
+		if benchmark.HardwareConfig == nil {
+			continue
+		}
+		profileName := strings.TrimSpace(benchmark.HardwareConfig.HardwareProfileName)
+		if profileName == "" {
+			continue
+		}
+		profileNamespace, err := hardwareProfilesNamespace()
+		if err != nil {
+			if logger != nil {
+				logger.Error(
+					"hardware profiles namespace is not configured",
+					"error", err,
+					"env", hardwareProfilesNamespaceEnv,
+					"profile", profileName,
+				)
+			}
+			return serviceerrors.NewServiceError(messages.HardwareProfileFetchFailed, "Name", profileName)
+		}
+		profileCR, err := r.helper.GetHardwareProfile(ctx, profileNamespace, profileName)
+		if err != nil {
+			if apierrors.IsNotFound(err) {
+				return serviceerrors.NewServiceError(messages.HardwareProfileNotFound, "Name", profileName)
+			}
+			if logger != nil {
+				logger.Error(
+					"failed to fetch hardware profile",
+					"error", err,
+					"namespace", profileNamespace,
+					"profile", profileName,
+				)
+			}
+			return serviceerrors.NewServiceError(messages.HardwareProfileFetchFailed, "Name", profileName)
+		}
+		if isHardwareProfileDisabled(profileCR) {
+			return serviceerrors.NewServiceError(messages.HardwareProfileDisabled, "Name", profileName)
+		}
+		if _, err := parseHardwareProfileResources(profileCR); err != nil {
+			return serviceerrors.NewServiceError(messages.HardwareProfileInvalid, "Name", profileName, "Error", err.Error())
+		}
+	}
+	return nil
 }
 
 // rewriteModelURLForSidecar returns a URL with the scheme and host of sidecarBaseURL
@@ -408,4 +480,42 @@ func rewriteModelURLForSidecar(sidecarBaseURL, modelURL string) (string, error) 
 		Fragment: model.Fragment,
 	}
 	return out.String(), nil
+}
+
+// resolveMLFlowCABundleConfigMap enables mounting {instance}-mlflow-ca-bundle only when
+// that ConfigMap already exists in the job namespace with a non-empty ca-bundle.crt entry.
+// The job-pod mount path is independent of the EvalHub API's MLFLOW_CA_CERT_PATH.
+func (r *K8sRuntime) resolveMLFlowCABundleConfigMap(ctx context.Context, cfg *jobConfig, logger *slog.Logger) string {
+	if cfg == nil || cfg.evalHubInstanceName == "" || cfg.mlflowTrackingURI == "" {
+		return ""
+	}
+	cmName := mlflowCABundleConfigMapName(cfg.evalHubInstanceName)
+	cm, err := r.helper.GetConfigMap(ctx, cfg.namespace, cmName)
+	if err != nil {
+		if apierrors.IsNotFound(err) {
+			logger.Info(
+				"MLflow CA bundle ConfigMap not found; falling back to service CA / configured CA path",
+				"configmap", cmName,
+				"namespace", cfg.namespace,
+			)
+			return ""
+		}
+		logger.Warn(
+			"failed to check MLflow CA bundle ConfigMap; falling back to service CA / configured CA path",
+			"configmap", cmName,
+			"namespace", cfg.namespace,
+			"error", err,
+		)
+		return ""
+	}
+	if strings.TrimSpace(cm.Data[mlflowCABundleFile]) == "" {
+		logger.Info(
+			"MLflow CA bundle ConfigMap missing or empty ca-bundle.crt; falling back to service CA / configured CA path",
+			"configmap", cmName,
+			"namespace", cfg.namespace,
+			"key", mlflowCABundleFile,
+		)
+		return ""
+	}
+	return cmName
 }

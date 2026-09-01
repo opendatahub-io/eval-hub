@@ -18,9 +18,7 @@ func sidecarForJobPod(cfg *config.Config, jc *jobConfig) (*config.SidecarConfig,
 	} else {
 		export = &config.SidecarConfig{}
 	}
-	if export.Port == 0 {
-		export.Port = int(defaultSidecarPort)
-	}
+	export.BaseURL = export.EffectiveBaseURL()
 
 	if jc != nil {
 		if jc.evalHubURL != "" {
@@ -33,24 +31,20 @@ func sidecarForJobPod(cfg *config.Config, jc *jobConfig) (*config.SidecarConfig,
 				export.EvalHub.InsecureSkipVerify = false
 			}
 		}
+		if hasGitTestData(jc) {
+			export.InitContainer = &config.InitContainerConfig{IsGitJob: true}
+		}
 		if jc.mlflowTrackingURI != "" {
 			if export.MLFlow == nil {
 				export.MLFlow = &config.SidecarMLFlowConfig{}
 			}
 			export.MLFlow.TrackingURI = jc.mlflowTrackingURI
-			export.MLFlow.TokenPath = mlflowTokenMountPath + "/" + mlflowTokenFile
+			export.MLFlow.TokenPath = mlflowAuthMountPath + "/" + mlflowTokenFile
 			export.MLFlow.Workspace = jc.mlflowWorkspace
 			if cfg != nil && cfg.MLFlow != nil {
 				export.MLFlow.HTTPTimeout = cfg.MLFlow.HTTPTimeout
-				export.MLFlow.InsecureSkipVerify = cfg.MLFlow.InsecureSkipVerify
-				if jc.serviceCAConfigMap != "" {
-					export.MLFlow.CACertPath = serviceCAMountPath + "/" + serviceCABundleFile
-				} else {
-					export.MLFlow.CACertPath = cfg.MLFlow.CACertPath
-				}
-			} else if jc.serviceCAConfigMap != "" {
-				export.MLFlow.CACertPath = serviceCAMountPath + "/" + serviceCABundleFile
 			}
+			export.MLFlow.CACertPath = mlflowCACertPathForJob(jc, cfg)
 		}
 		if jc.modelTargetURL != "" {
 			mc := &config.SidecarModelConfig{URL: jc.modelTargetURL}
@@ -70,6 +64,24 @@ func sidecarForJobPod(cfg *config.Config, jc *jobConfig) (*config.SidecarConfig,
 	return export, nil
 }
 
+// mlflowCACertPathForJob returns the PEM CA path job containers should use for MLflow TLS.
+// Preference order:
+//  1. Operator-merged MLflow CA bundle mounted on the job pod
+//  2. Top-level mlflow.ca_cert_path / MLFLOW_CA_CERT_PATH from the API process
+//  3. OpenShift service-serving CA (legacy / EvalHub-only trust)
+func mlflowCACertPathForJob(jc *jobConfig, cfg *config.Config) string {
+	if jc != nil && jc.mlflowCABundleConfigMap != "" {
+		return mlflowCABundleMountPath + "/" + mlflowCABundleFile
+	}
+	if cfg != nil && cfg.MLFlow != nil && cfg.MLFlow.CACertPath != "" {
+		return cfg.MLFlow.CACertPath
+	}
+	if jc != nil && jc.serviceCAConfigMap != "" {
+		return serviceCAMountPath + "/" + serviceCABundleFile
+	}
+	return ""
+}
+
 func otelConfigForJobPod(cfg *config.Config) *config.OTELConfig {
 	if cfg == nil || cfg.OTEL == nil || !cfg.OTEL.Enabled {
 		return nil
@@ -86,7 +98,7 @@ func cloneSidecarConfig(sc *config.SidecarConfig) *config.SidecarConfig {
 	if sc == nil {
 		return nil
 	}
-	out := &config.SidecarConfig{Port: sc.Port, BaseURL: sc.BaseURL}
+	out := &config.SidecarConfig{LocalMode: sc.LocalMode, BaseURL: sc.BaseURL, Port: sc.Port}
 	if sc.EvalHub != nil {
 		eh := *sc.EvalHub
 		out.EvalHub = &eh
@@ -102,6 +114,10 @@ func cloneSidecarConfig(sc *config.SidecarConfig) *config.SidecarConfig {
 	if sc.Model != nil {
 		m := *sc.Model
 		out.Model = &m
+	}
+	if sc.InitContainer != nil {
+		ic := *sc.InitContainer
+		out.InitContainer = &ic
 	}
 	if sc.OTEL != nil {
 		o := *sc.OTEL

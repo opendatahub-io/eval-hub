@@ -12,7 +12,7 @@ type JobSpec struct {
 	ProviderID     string              `json:"provider_id"`
 	BenchmarkID    string              `json:"benchmark_id"`
 	BenchmarkIndex int                 `json:"benchmark_index"`
-	Model          api.ModelRef        `json:"model"`
+	Model          *api.ModelRef       `json:"model,omitempty"`
 	NumExamples    *int                `json:"num_examples,omitempty"`
 	Parameters     map[string]any      `json:"parameters"`
 	ExperimentName string              `json:"experiment_name,omitempty"`
@@ -51,7 +51,7 @@ func BuildJobSpec(
 		ProviderID:     providerID,
 		BenchmarkID:    benchmarkConfig.ID,
 		BenchmarkIndex: benchmarkIndex,
-		Model:          evaluation.Model,
+		Model:          cloneModelRef(evaluation.Model),
 		NumExamples:    numExamples,
 		Parameters:     benchmarkParams,
 		CallbackURL:    callbackURL,
@@ -69,6 +69,24 @@ func BuildJobSpec(
 	}
 
 	return &spec, nil
+}
+
+// cloneModelRef returns a copy isolated from evaluation.Model so runtime code can
+// rewrite jobSpec.Model.URL (sidecar localhost) without mutating the job's model URL
+// used when creating later benchmarks in the same evaluation.
+func cloneModelRef(m *api.ModelRef) *api.ModelRef {
+	if m == nil {
+		return nil
+	}
+	out := *m
+	if m.Auth != nil {
+		auth := *m.Auth
+		out.Auth = &auth
+	}
+	if len(m.Parameters) > 0 {
+		out.Parameters = CopyParams(m.Parameters)
+	}
+	return &out
 }
 
 // CopyParams creates a shallow copy of a parameters map.

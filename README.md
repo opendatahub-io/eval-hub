@@ -4,9 +4,10 @@
 [![Go Reference](https://pkg.go.dev/badge/github.com/eval-hub/eval-hub.svg)](https://pkg.go.dev/github.com/eval-hub/eval-hub)
 [![golangci-lint](https://github.com/eval-hub/eval-hub/actions/workflows/golangci-lint.yml/badge.svg)](https://github.com/eval-hub/eval-hub/actions/workflows/golangci-lint.yml)
 [![codecov](https://codecov.io/github/eval-hub/eval-hub/graph/badge.svg?token=LHJACCNC9A)](https://codecov.io/github/eval-hub/eval-hub)
-[![OpenSSF Scorecard](https://api.scorecard.dev/projects/github.com/eval-hub/eval-hub/badge)](https://scorecard.dev/viewer/?uri=github.com/eval-hub/eval-hub)
 [![TrustyAI Operator ConfigMap Sync](https://github.com/eval-hub/eval-hub/actions/workflows/check-trustyai-service-operator-configmap-sync.yml/badge.svg)](https://github.com/eval-hub/eval-hub/actions/workflows/check-trustyai-service-operator-configmap-sync.yml)
 [![license](https://img.shields.io/badge/License-Apache2.0-blue.svg?plastic)](https://github.com/eval-hub/eval-hub/blob/main/LICENSE)
+[![Signed release](https://github.com/eval-hub/eval-hub/actions/workflows/signed-release.yml/badge.svg)](https://github.com/eval-hub/eval-hub/actions/workflows/signed-release.yml)
+[![OpenSSF Scorecard](https://api.scorecard.dev/projects/github.com/eval-hub/eval-hub/badge)](https://scorecard.dev/viewer/?uri=github.com/eval-hub/eval-hub)
 [![OpenSSF Best Practices](https://www.bestpractices.dev/projects/13751/badge)](https://www.bestpractices.dev/projects/13751)
 
 A lightweight REST API service for orchestrating LLM evaluations across multiple backends. Written in Go, it routes evaluation requests to frameworks like lm-evaluation-harness, RAGAS, Garak, and GuideLLM orchestrated via a [complementary SDK](https://github.com/eval-hub/eval-hub-sdk), tracks experiments via MLflow, and runs natively on OpenShift.
@@ -75,6 +76,8 @@ spec:
   env:
     - name: MLFLOW_TRACKING_URI
       value: "http://mlflow:5000"
+    - name: EVALHUB_HARDWARE_PROFILES_NAMESPACE
+      value: "opendatahub"  # or redhat-ods-applications on RHOAI
 ```
 
 Apply the CR to your cluster:
@@ -118,17 +121,73 @@ Create a file called `export_test.go` in the package under test and re-export sy
 
 ### Database
 
-SQLite in-memory is the default. For PostgreSQL, use the targets in `tests/postgres/Makefile`:
+SQLite in-memory is the default (`database.driver: sqlite` in `config/config.yaml`). To use PostgreSQL locally there are two approaches: a container or a native install. Both use targets in `tests/postgres/Makefile`.
+
+> **Note:** The credentials and auth settings below are for local development and testing only. For production deployments, use strong passwords, TLS, and appropriate authentication mechanisms.
+
+#### Option 1: Container (Podman/Docker)
+
+No system-level install required. The container creates the database, user, and permissions automatically.
 
 ```bash
-make -C tests/postgres install-postgres && make -C tests/postgres start-postgres
-make -C tests/postgres create-database && make -C tests/postgres create-user && make -C tests/postgres grant-permissions
+cd tests/postgres
+POSTGRES_PASSWORD=<your-password> make start-postgres-container
 ```
 
-Then set `DB_URL` to a PostgreSQL connection string:
+To stop and remove:
 
 ```bash
-export DB_URL="postgres://user@localhost:5432/eval_hub"
+cd tests/postgres
+make stop-postgres-container
+make delete-postgres-container
+```
+
+Configure EvalHub in `config/config.yaml`:
+
+```yaml
+database:
+  driver: pgx
+  url: postgres://eval_hub:<your-password>@localhost:5432/eval_hub
+```
+
+Or override via environment variables:
+
+```bash
+export DB_DRIVER=pgx
+export DB_URL="postgres://eval_hub:<your-password>@localhost:5432/eval_hub"
+```
+
+#### Option 2: Native install (Homebrew on macOS, apt on Linux)
+
+```bash
+cd tests/postgres
+make install-postgres
+make start-postgres
+make create-user
+make create-database
+make grant-permissions
+```
+
+To stop:
+
+```bash
+cd tests/postgres
+make stop-postgres
+```
+
+Configure EvalHub in `config/config.yaml` (no password needed with trust/peer auth):
+
+```yaml
+database:
+  driver: pgx
+  url: postgres://eval_hub@localhost:5432/eval_hub
+```
+
+Or override via environment variables:
+
+```bash
+export DB_DRIVER=pgx
+export DB_URL="postgres://eval_hub@localhost:5432/eval_hub"
 ```
 
 ## Configuration
@@ -138,10 +197,12 @@ Configuration is loaded from `config/config.yaml`, overridden by environment var
 | Variable | Purpose | Default |
 | --- | --- | --- |
 | `PORT` | API listen port | `8080` |
+| `DB_DRIVER` | Database driver (`sqlite` or `pgx`) | `sqlite` |
 | `DB_URL` | Database connection string | SQLite in-memory |
 | `MLFLOW_TRACKING_URI` | MLflow tracking server | `http://localhost:5000` |
-| `MLFLOW_INSECURE_SKIP_VERIFY` | Skip TLS verification for MLflow | `false` |
+| `MLFLOW_CA_CERT_PATH` | PEM CA bundle for MLflow TLS verification | (system roots) |
 | `LOG_LEVEL` | Logging level | `INFO` |
+| `EVALHUB_HARDWARE_PROFILES_NAMESPACE` | Platform namespace where OpenDataHub `HardwareProfile` CRs are fetched (Kubernetes runtime). Required for `hardware_config.hardware_profile_name` evaluations; typically `opendatahub` or `redhat-ods-applications`. Set by the TrustyAI Service Operator deployment. | _(unset — hardware profile lookups fail)_ |
 
 Provider configurations live in `config/providers/` as YAML files. The default set includes lm-evaluation-harness (167 benchmarks), RAGAS, Garak, GuideLLM, LightEval, and MTEB.
 

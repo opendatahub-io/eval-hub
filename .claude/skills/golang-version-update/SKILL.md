@@ -9,25 +9,29 @@ description: >
 allowed-tools:
   - Read
   - Edit
-  - Write
-  - WebFetch
   - Bash(grep *)
-  - Bash(find *)
   - Bash(git *)
   - Bash(gh *)
   - Bash(go *)
   - Bash(make *)
-  - Bash(curl *)
-  - Bash(jq *)
-  - Bash(sort *)
-  - Bash(skopeo *)
-  - Bash(sed *)
+  - Bash(*/golang-version-update/fetch-go-toolset-tags.sh*)
 ---
 
 # Go Version Update Skill
 
 Update the Go toolchain version across the repository, gated on availability
 in the Red Hat UBI9 go-toolset container image.
+
+Policy (go-toolset gate, Containerfile, CI) lives in `CLAUDE.md`.
+
+## How to invoke
+
+**Cursor:** In Agent chat, ask e.g. “Bump the Go version using the golang-version-update skill”
+(or “Check whether we can update Go / go-toolset”). Optionally attach
+`@.claude/skills/golang-version-update/SKILL.md`.
+
+**Claude Code terminal:** From the repo root run `claude`, then `/golang-version-update`
+(or ask naturally; type `/` to list skills).
 
 ## Procedure
 
@@ -50,24 +54,12 @@ If an open PR already bumps the Go version, report its number and **stop**.
 
 ### Step 3 — Query the go-toolset registry for available tags
 
-Use the Red Hat container catalog API to list available go-toolset tags:
+**You MUST use the provided script below. Do NOT craft your own curl, wget,
+python, or any other command to query the registry. The script handles
+pagination, timeouts, cycle detection, origin validation, and tag filtering.**
 
 ```bash
-skopeo list-tags docker://registry.access.redhat.com/ubi9/go-toolset 2>/dev/null \
-  | jq -r '.Tags[]' \
-  | grep -E '^[0-9]+\.[0-9]+(\.[0-9]+)?(-[0-9]+)?$' \
-  | sort -t. -k1,1n -k2,2n -k3,3n \
-  | tail -20
-```
-
-If `skopeo` is not available, fall back to the Red Hat catalog API:
-
-```bash
-curl -s "https://catalog.redhat.com/api/containers/v1/repositories/registry/registry.access.redhat.com/repository/ubi9/go-toolset/tags?page_size=100&page=0" \
-  | jq -r '.data[].name' \
-  | grep -E '^[0-9]+\.[0-9]+(\.[0-9]+)?(-[0-9]+)?$' \
-  | sort -t. -k1,1n -k2,2n -k3,3n \
-  | tail -20
+.claude/skills/golang-version-update/fetch-go-toolset-tags.sh
 ```
 
 Identify:

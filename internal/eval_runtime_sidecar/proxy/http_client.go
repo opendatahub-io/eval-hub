@@ -6,10 +6,13 @@ import (
 	"fmt"
 	"log/slog"
 	"net/http"
+	"net/url"
 	"os"
+	"path/filepath"
 	"time"
 
 	"github.com/eval-hub/eval-hub/internal/eval_hub/config"
+	"github.com/eval-hub/eval-hub/internal/safefile"
 	"go.opentelemetry.io/contrib/instrumentation/net/http/otelhttp"
 )
 
@@ -44,14 +47,14 @@ func newHTTPClient(timeout time.Duration, tlsConfig *tls.Config, isOTELEnabled b
 // When insecureSkipVerify is true, custom CA files are not read: verification is off, so loading a CA
 // would not affect trust and skipping avoids failing on missing paths in local/test environments.
 // When caCertPath is empty and insecureSkipVerify is false, system roots are used (default *tls.Config).
-// OCI callers always pass insecureSkipVerify=false; skip-verify is not supported for registry TLS.
+// MLflow and OCI callers always pass insecureSkipVerify=false; skip-verify is not supported for those TLS paths.
 func buildTLSConfig(caCertPath string, insecureSkipVerify bool, logger *slog.Logger, certLabel string) (*tls.Config, error) {
 	tlsConfig := &tls.Config{
 		MinVersion: tls.VersionTLS12,
 		MaxVersion: tls.VersionTLS13,
 	}
 	if caCertPath != "" && !insecureSkipVerify {
-		caCert, err := os.ReadFile(caCertPath) // #nosec G304 -- CA bundle path from sidecar configuration
+		caCert, err := safefile.ReadFile(filepath.Dir(caCertPath), filepath.Base(caCertPath))
 		if err != nil {
 			return nil, fmt.Errorf("failed to read %s CA certificate at %s: %w", certLabel, caCertPath, err)
 		}
@@ -67,6 +70,19 @@ func buildTLSConfig(caCertPath string, insecureSkipVerify bool, logger *slog.Log
 		logger.Warn("TLS certificate verification is disabled", "label", certLabel)
 	}
 	return tlsConfig, nil
+}
+
+// schemeRequiresTLS returns false only for an explicit "http" scheme;
+// all other cases default to TLS. BaseURL scheme is validated by ResolvePort.
+func schemeRequiresTLS(rawURL string) bool {
+	if rawURL == "" {
+		return true
+	}
+	u, err := url.Parse(rawURL)
+	if err != nil {
+		return true
+	}
+	return u.Scheme != "http"
 }
 
 // NewHTTPClient creates an HTTP client for the eval-hub service from config.
@@ -93,7 +109,7 @@ func NewEvalHubHTTPClient(config *config.Config, isOTELEnabled bool, logger *slo
 
 	var tlsConfig *tls.Config
 	var err error
-	if cfg != nil {
+	if cfg != nil && schemeRequiresTLS(cfg.BaseURL) {
 		tlsConfig, err = buildTLSConfig(caCertPath, insecureSkipVerify, logger, "EvalHub")
 		if err != nil {
 			return nil, err
@@ -119,9 +135,14 @@ func NewMLFlowHTTPClient(serviceConfig *config.Config, isOTELEnabled bool, logge
 		timeout = mlflowConfig.HTTPTimeout
 	}
 
-	tlsConfig, err := buildTLSConfig(mlflowConfig.CACertPath, mlflowConfig.InsecureSkipVerify, logger, "MLflow")
-	if err != nil {
-		return nil, err
+	// TLS verification is always enabled for MLflow; use CACertPath for custom CAs.
+	var tlsConfig *tls.Config
+	if schemeRequiresTLS(mlflowConfig.TrackingURI) {
+		var err error
+		tlsConfig, err = buildTLSConfig(mlflowConfig.CACertPath, false, logger, "MLflow")
+		if err != nil {
+			return nil, err
+		}
 	}
 
 	client := newHTTPClient(timeout, tlsConfig, isOTELEnabled, logger, "MLflow")
@@ -155,9 +176,17 @@ func NewModelHTTPClient(serviceConfig *config.Config, isOTELEnabled bool, logger
 	if mc != nil && mc.InsecureSkipVerify {
 		insecureSkipVerify = mc.InsecureSkipVerify
 	}
-	tlsConfig, err := buildTLSConfig(caCertPath, insecureSkipVerify, logger, "Model")
-	if err != nil {
-		return nil, err
+	targetURL := ""
+	if mc != nil {
+		targetURL = mc.URL
+	}
+	var tlsConfig *tls.Config
+	if schemeRequiresTLS(targetURL) {
+		var err error
+		tlsConfig, err = buildTLSConfig(caCertPath, insecureSkipVerify, logger, "Model")
+		if err != nil {
+			return nil, err
+		}
 	}
 	client := newHTTPClient(timeout, tlsConfig, isOTELEnabled, logger, "Model")
 	return client, nil

@@ -2,6 +2,41 @@
 
 @AGENTS.md
 
+## Release notes
+
+Each GitHub release must include human-readable release notes (OpenSSF): a summary
+of major changes and upgrade impact — **not** raw `git log` or unedited
+`--generate-notes` output.
+
+OpenSSF allows several delivery mechanisms (e.g. `NEWS` / `CHANGELOG` files, or
+version-control release UIs). This project uses the **GitHub Releases** workflow
+as the primary channel.
+
+Use the project skill [`.claude/skills/release-notes/SKILL.md`](.claude/skills/release-notes/SKILL.md)
+to draft and (after confirmation) apply notes for a given tag/version.
+
+### Run release notes from Cursor
+
+In Agent chat, ask for example:
+
+- “Generate release notes for v1.0.0 using the release-notes skill”
+- “Draft OpenSSF-compliant release notes for the next release”
+
+Optionally attach `@.claude/skills/release-notes/SKILL.md`.
+
+### Run release notes from Claude Code terminal
+
+```text
+/release-notes
+```
+
+Or ask naturally (e.g. “Draft release notes for v1.0.0”).
+
+### After the release notes skill runs
+
+Expect a curated markdown body with Summary and Upgrade impact. The skill must
+not publish or overwrite a GitHub release body without explicit confirmation.
+
 ## CVE fixing
 
 ### Instructions for CVE fixing
@@ -20,6 +55,42 @@ The go.mod must not be updated until the same version exists in go-toolset.
 
 If there are other files in the repository that require updating due to new golang version then mention them in the PR.
 Use `go-version-file: "go.mod"` in the github actions where possible.
+
+Use the project skill [`.claude/skills/golang-version-update/SKILL.md`](.claude/skills/golang-version-update/SKILL.md)
+for the full procedure (registry check, file updates, `go mod tidy`, tests, and PR).
+
+##### Run golang update from Cursor
+
+In Agent chat, ask in natural language, for example:
+
+- “Bump the Go version using the golang-version-update skill”
+- “Check whether we can update Go / go-toolset”
+
+Cursor loads the skill from `.claude/skills/golang-version-update/` and follows it.
+Optionally attach `@.claude/skills/golang-version-update/SKILL.md` to force the procedure into context.
+
+##### Run golang update from Claude Code terminal
+
+From the repo root, start Claude Code (`claude`), then invoke the skill by name:
+
+```text
+/golang-version-update
+```
+
+Or ask naturally (the skill auto-matches on its description), for example:
+
+```text
+Bump Go to the latest version supported by ubi9/go-toolset
+```
+
+Type `/` in Claude Code to list available skills if needed.
+
+##### After the golang update skill runs
+
+Expect a summary (previous/new Go version, files touched, test results).
+
+- **CVE-driven Go upgrades:** Follow the CVE-fix flow above — check for an existing open PR that provides the fix; if one exists, report its number and skip the rest; otherwise create a PR with the fix.
+- **Non-CVE Go upgrades:** Create a PR only if requested; still skip if an open Go bump PR already exists.
 
 #### npm devDependencies
 
