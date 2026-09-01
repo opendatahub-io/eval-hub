@@ -22,5 +22,5 @@ properties:
       The evaluation job tags.
   model:
     $ref: ./ModelRef.yaml
-    description: >
-      The model to evaluate.
+    description: |
+      The model to evaluate, or the model that was used to generate the pre-recorded data.

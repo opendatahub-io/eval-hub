@@ -471,7 +471,7 @@ Feature: Collections Endpoint
                 "parameters": {
                     "num_examples": 10,
                     "num_fewshot": 0,
-                    "tokenizer": "google/flan-t5-small"
+                    "tokenizer": "{{env:FVT_BENCHMARK_TOKENIZER|google/flan-t5-small}}"
                 }
             },
             {
@@ -487,7 +487,7 @@ Feature: Collections Endpoint
                 "parameters": {
                     "num_examples": 10,
                     "num_fewshot": 0,
-                    "tokenizer": "google/flan-t5-small"
+                    "tokenizer": "{{env:FVT_BENCHMARK_TOKENIZER|google/flan-t5-small}}"
                 }
             }
         ]
@@ -544,7 +544,7 @@ Feature: Collections Endpoint
             "parameters": {
               "num_examples": 10,
               "num_fewshot": 3,
-              "tokenizer": "google/flan-t5-small"
+              "tokenizer": "{{env:FVT_BENCHMARK_TOKENIZER|google/flan-t5-small}}"
             }
           },
           {
@@ -553,7 +553,7 @@ Feature: Collections Endpoint
             "weight": 2,
             "parameters": {
               "num_examples": 5,
-              "tokenizer": "google/flan-t5-small"
+              "tokenizer": "{{env:FVT_BENCHMARK_TOKENIZER|google/flan-t5-small}}"
             }
           }
         ]
@@ -580,7 +580,7 @@ Feature: Collections Endpoint
         "provider_id": "lm_evaluation_harness",
         "weight": 3,
         "parameters": {
-            "tokenizer": "google/flan-t5-small"
+            "tokenizer": "{{env:FVT_BENCHMARK_TOKENIZER|google/flan-t5-small}}"
           }
         }
        ]
@@ -669,7 +669,7 @@ Feature: Collections Endpoint
     And there is a system collection with id "safety-and-fairness-v1"
     When I send a GET request to "/api/v1/evaluations/collections/safety-and-fairness-v1"
     Then the response code should be 200
-    And the response should contain "name" with value "Safety & Fairness"
+    And the response should contain "name" with value "Safety and Fairness"
 
   Scenario: Verify out of box collection retrieval - category - safety-and-fairness-v1
     Given the service is running
@@ -957,3 +957,82 @@ Feature: Collections Endpoint
       """
     Then the response code should be 400
     And the response should contain the value "request_validation_failed" at path "$.message_code"
+
+  Scenario: Verify out of box collection retrieval - name - open-telco-v1
+    Given the service is running
+    And there is a system collection with id "open-telco-v1"
+    When I send a GET request to "/api/v1/evaluations/collections/open-telco-v1"
+    Then the response code should be 200
+    And the response should contain "name" with value "Open-Telco v1"
+
+  Scenario: Verify out of box collection retrieval - category - open-telco-v1
+    Given the service is running
+    And there is a system collection with id "open-telco-v1"
+    When I send a GET request to "/api/v1/evaluations/collections/open-telco-v1"
+    Then the response code should be 200
+    And the response should contain "category" with value "telecom"
+
+  Scenario: Verify out of box collection retrieval - threshold - open-telco-v1
+    Given the service is running
+    And there is a system collection with id "open-telco-v1"
+    When I send a GET request to "/api/v1/evaluations/collections/open-telco-v1"
+    Then the response code should be 200
+    And the response should equal the value "0.475" at path "$.pass_criteria.threshold"
+
+  Scenario: Verify out of box collection retrieval - benchmarks - open-telco-v1
+    Given the service is running
+    And there is a system collection with id "open-telco-v1"
+    When I send a GET request to "/api/v1/evaluations/collections/open-telco-v1"
+    Then the response code should be 200
+    And the response should contain "benchmarks"
+    And the array at path "benchmarks" in the response should have length 4
+    And the response should contain the value "inspect/telemath" at path "$.benchmarks[0].id"
+    And the response should contain the value "inspect/teleqna" at path "$.benchmarks[1].id"
+    And the response should contain the value "inspect/telelogs" at path "$.benchmarks[2].id"
+    And the response should contain the value "inspect/3gpp-tsg" at path "$.benchmarks[3].id"
+    And the response should contain the value "inspect" at path "$.benchmarks[0].provider_id"
+    And the response should contain the value "inspect" at path "$.benchmarks[1].provider_id"
+    And the response should contain the value "inspect" at path "$.benchmarks[2].provider_id"
+    And the response should contain the value "inspect" at path "$.benchmarks[3].provider_id"
+
+  Scenario: Verify out of box collection retrieval - benchmarks thresholds - open-telco-v1
+    Given the service is running
+    And there is a system collection with id "open-telco-v1"
+    When I send a GET request to "/api/v1/evaluations/collections/open-telco-v1"
+    Then the response code should be 200
+    And the response should contain "benchmarks"
+    And the array at path "benchmarks" in the response should have length 4
+    And the response should equal the value "0.50" at path "$.benchmarks[0].pass_criteria.threshold"
+    And the response should equal the value "0.70" at path "$.benchmarks[1].pass_criteria.threshold"
+    And the response should equal the value "0.25" at path "$.benchmarks[2].pass_criteria.threshold"
+    And the response should equal the value "0.45" at path "$.benchmarks[3].pass_criteria.threshold"
+
+  Scenario: Verify out of box collection retrieval - weights - open-telco-v1
+    Given the service is running
+    And there is a system collection with id "open-telco-v1"
+    When I send a GET request to "/api/v1/evaluations/collections/open-telco-v1"
+    Then the response code should be 200
+    And the response should equal the value "1" at path "$.benchmarks[0].weight"
+    And the response should equal the value "1" at path "$.benchmarks[1].weight"
+    And the response should equal the value "1" at path "$.benchmarks[2].weight"
+    And the response should equal the value "1" at path "$.benchmarks[3].weight"
+
+  Scenario: Verify out of box collection retrieval - description - open-telco-v1
+    Given the service is running
+    And there is a system collection with id "open-telco-v1"
+    When I send a GET request to "/api/v1/evaluations/collections/open-telco-v1"
+    Then the response code should be 200
+    And the response should contain "description"
+    And the response should contain the value "GSMA Open-Telco suite" at path "$.description"
+
+  Scenario: Verify out of box collection retrieval - tags - open-telco-v1
+    Given the service is running
+    And there is a system collection with id "open-telco-v1"
+    When I send a GET request to "/api/v1/evaluations/collections/open-telco-v1"
+    Then the response code should be 200
+    And the response should contain "tags"
+    And the array at path "tags" in the response should have length 9
+    And the response should contain the value "telecom" at path "$.tags[*]"
+    And the response should contain the value "open-telco" at path "$.tags[*]"
+    And the response should contain the value "inspect" at path "$.tags[*]"
+    And the response should contain the value "vllm" at path "$.tags[*]"

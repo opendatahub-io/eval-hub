@@ -35,12 +35,16 @@ func newEvaluationCardMetadata(job *api.EvaluationJobResource) EvaluationCardMet
 }
 
 func newEvaluationCardContext(job *api.EvaluationJobResource) EvaluationCardContext {
-	context := EvaluationCardContext{
-		Model: CardModelRef{
+	var model *CardModelRef
+	if job.Model != nil {
+		model = &CardModelRef{
 			URL:          job.Model.URL,
 			Name:         job.Model.Name,
 			ModelCardURL: job.Model.CardURL,
-		},
+		}
+	}
+	context := EvaluationCardContext{
+		Model: model,
 	}
 
 	if job.Collection != nil && job.Collection.ID != "" {
@@ -135,6 +139,7 @@ func buildCardBenchmarkResults(job *api.EvaluationJobResource) []CardBenchmarkRe
 		if ok {
 			cardResult.Contacts = result.Contacts
 			cardResult.Metrics = result.Metrics
+			cardResult.MetricsSchema = result.MetricsSchema
 			cardResult.AdditionalInfo = result.AdditionalInfo
 			cardResult.Artifacts = result.Artifacts
 			cardResult.MLFlowRunID = result.MLFlowRunID
@@ -154,6 +159,7 @@ func toCardBenchmarkResult(result api.BenchmarkResult, status api.State) CardBen
 		Contacts:       result.Contacts,
 		Status:         status,
 		Metrics:        result.Metrics,
+		MetricsSchema:  result.MetricsSchema,
 		AdditionalInfo: result.AdditionalInfo,
 		Artifacts:      result.Artifacts,
 		MLFlowRunID:    result.MLFlowRunID,

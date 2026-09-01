@@ -78,6 +78,22 @@ func TestUpdateEvaluationJob_ConcurrentBenchmarkCompletions(t *testing.T) {
 	testUpdateEvaluationJob_ConcurrentBenchmarkCompletions(t, drivers[0], getDBName())
 }
 
+func TestUpdateEvaluationJobResolvedSHA_DirectJob(t *testing.T) {
+	testUpdateEvaluationJobResolvedSHA_DirectJob(t, drivers[0], getDBName())
+}
+
+func TestUpdateEvaluationJobResolvedSHA_CollectionOverride(t *testing.T) {
+	testUpdateEvaluationJobResolvedSHA_CollectionOverride(t, drivers[0], getDBName())
+}
+
+func TestUpdateEvaluationJobResolvedSHA_CollectionLocal(t *testing.T) {
+	testUpdateEvaluationJobResolvedSHA_CollectionLocal(t, drivers[0], getDBName())
+}
+
+func TestUpdateEvaluationJobResolvedSHA_EdgeCases(t *testing.T) {
+	testUpdateEvaluationJobResolvedSHA_EdgeCases(t, drivers[0], getDBName())
+}
+
 func testUpdateBenchmarkStatus_RejectsTerminalDowngrade(t *testing.T, driver string, databaseName string) {
 	store, err := getTestStorage(t, driver, databaseName)
 	if err != nil {
@@ -87,7 +103,7 @@ func testUpdateBenchmarkStatus_RejectsTerminalDowngrade(t *testing.T, driver str
 	jobID := common.GUID()
 	now := time.Now()
 	config := &api.EvaluationJobConfig{
-		Model: api.ModelRef{URL: "http://test.com", Name: "test"},
+		Model: &api.ModelRef{URL: "http://test.com", Name: "test"},
 		Benchmarks: []api.EvaluationBenchmarkConfig{
 			{Ref: api.Ref{ID: "b1"}, ProviderID: "prov1"},
 			{Ref: api.Ref{ID: "b2"}, ProviderID: "prov2"},
@@ -156,7 +172,7 @@ func testUpdateEvaluationJob_ConcurrentBenchmarkCompletions(t *testing.T, driver
 	jobID := common.GUID()
 	now := time.Now()
 	config := &api.EvaluationJobConfig{
-		Model: api.ModelRef{URL: "http://test.com", Name: "test"},
+		Model: &api.ModelRef{URL: "http://test.com", Name: "test"},
 		Benchmarks: []api.EvaluationBenchmarkConfig{
 			{Ref: api.Ref{ID: "toxigen"}, ProviderID: "garak"},
 			{Ref: api.Ref{ID: "truthfulqa_mc1"}, ProviderID: "garak"},
@@ -297,7 +313,7 @@ func testGetEvaluationJobs_TenantFilter(t *testing.T, driver string, databaseNam
 				EvaluationJobState: api.EvaluationJobState{State: api.OverallStatePending},
 			},
 			EvaluationJobConfig: api.EvaluationJobConfig{
-				Model:      api.ModelRef{URL: "http://model", Name: "m"},
+				Model:      &api.ModelRef{URL: "http://model", Name: "m"},
 				Benchmarks: []api.EvaluationBenchmarkConfig{{Ref: api.Ref{ID: "b"}, ProviderID: "p"}},
 			},
 		}
@@ -375,7 +391,7 @@ func testUpdateEvaluationJob_PreservesProviderID(t *testing.T, driver string, da
 	// Create job without initializing benchmark statuses
 	// (simulating old behavior before initialization was added)
 	config := &api.EvaluationJobConfig{
-		Model: api.ModelRef{
+		Model: &api.ModelRef{
 			URL:  "http://test-model:8000",
 			Name: "test-model",
 		},
@@ -516,7 +532,7 @@ func testUpdateEvaluationJob_PersistsPhase(t *testing.T, driver string, database
 			},
 		},
 		EvaluationJobConfig: api.EvaluationJobConfig{
-			Model: api.ModelRef{URL: "http://test-model:8000", Name: "test-model"},
+			Model: &api.ModelRef{URL: "http://test-model:8000", Name: "test-model"},
 			Benchmarks: []api.EvaluationBenchmarkConfig{
 				{Ref: api.Ref{ID: "arc_easy"}, ProviderID: "lm_evaluation_harness"},
 			},
@@ -603,7 +619,7 @@ func testUpdateEvaluationJob_PersistsAdditionalInfo(t *testing.T, driver string,
 			},
 		},
 		EvaluationJobConfig: api.EvaluationJobConfig{
-			Model: api.ModelRef{URL: "http://test-model:8000", Name: "test-model"},
+			Model: &api.ModelRef{URL: "http://test-model:8000", Name: "test-model"},
 			Benchmarks: []api.EvaluationBenchmarkConfig{
 				{Ref: api.Ref{ID: "arc_easy"}, ProviderID: "lm_evaluation_harness"},
 			},
@@ -694,7 +710,7 @@ func testEvaluationsStorage(t *testing.T, driver string, databaseName string) {
 
 	t.Run("CreateEvaluationJob creates a new evaluation job", func(t *testing.T) {
 		config := &api.EvaluationJobConfig{
-			Model: api.ModelRef{
+			Model: &api.ModelRef{
 				URL:  "http://test.com",
 				Name: "test",
 			},
@@ -827,7 +843,7 @@ func testEvaluationsStorage(t *testing.T, driver string, databaseName string) {
 		}
 		additionalInfo := map[string]any{
 			"runtime": "local",
-			"version": "1.0.0",
+			"version": "1.0.X", // this is just a test so it can be anything
 		}
 		now := time.Now()
 		status := &api.StatusEvent{
@@ -892,6 +908,81 @@ func testEvaluationsStorage(t *testing.T, driver string, databaseName string) {
 		}
 	})
 
+	t.Run("UpdateEvaluationJob persists metrics_schema and backfills numeric defaults on read", func(t *testing.T) {
+		jobID := common.GUID()
+		now := time.Now()
+		job := &api.EvaluationJobResource{
+			Resource: api.EvaluationResource{
+				Resource: api.Resource{
+					ID:        jobID,
+					Tenant:    api.Tenant(tenant),
+					CreatedAt: now,
+					UpdatedAt: now,
+				},
+				MLFlowExperimentID: "experiment-1",
+			},
+			Status: &api.EvaluationJobStatus{
+				EvaluationJobState: api.EvaluationJobState{
+					State: api.OverallStateRunning,
+					Message: &api.MessageInfo{
+						Message:     "Job is running",
+						MessageCode: "JOB_RUNNING",
+					},
+				},
+			},
+			EvaluationJobConfig: api.EvaluationJobConfig{
+				Model:      &api.ModelRef{URL: "http://test.com", Name: "test"},
+				Benchmarks: []api.EvaluationBenchmarkConfig{benchmarkConfig},
+			},
+		}
+		if err := store.CreateEvaluationJob(job); err != nil {
+			t.Fatalf("CreateEvaluationJob: %v", err)
+		}
+
+		explicitSchema := []api.MetricSchema{
+			{Name: "labels", Type: api.ResultTypeArrayUnordered},
+		}
+		status := &api.StatusEvent{
+			BenchmarkStatusEvent: &api.BenchmarkStatusEvent{
+				ID:             benchmarkConfig.ID,
+				ProviderID:     benchmarkConfig.ProviderID,
+				BenchmarkIndex: 0,
+				Status:         api.StateCompleted,
+				Metrics: map[string]any{
+					"acc":    0.85,
+					"labels": []string{"A", "B"},
+				},
+				MetricsSchema: explicitSchema,
+			},
+		}
+		status.BenchmarkStatusEvent.StampRuntimeMessageOrigins()
+		if err := store.UpdateEvaluationJob(jobID, status); err != nil {
+			t.Fatalf("UpdateEvaluationJob: %v", err)
+		}
+
+		got, err := store.GetEvaluationJob(jobID)
+		if err != nil {
+			t.Fatalf("GetEvaluationJob: %v", err)
+		}
+		if len(got.Results.Benchmarks) != 1 {
+			t.Fatalf("benchmark results len = %d, want 1", len(got.Results.Benchmarks))
+		}
+		schema := got.Results.Benchmarks[0].MetricsSchema
+		if len(schema) != 2 {
+			t.Fatalf("metrics_schema len = %d, want 2 after backfill", len(schema))
+		}
+		byName := make(map[string]api.ResultType, len(schema))
+		for _, entry := range schema {
+			byName[entry.Name] = entry.Type
+		}
+		if byName["labels"] != api.ResultTypeArrayUnordered {
+			t.Fatalf("labels type = %q, want array_unordered", byName["labels"])
+		}
+		if byName["acc"] != api.ResultTypeNumeric {
+			t.Fatalf("acc type = %q, want numeric backfill", byName["acc"])
+		}
+	})
+
 	t.Run("UpdateEvaluationJob persists endpoint HTTP error detail without truncation", func(t *testing.T) {
 		jobID := common.GUID()
 		now := time.Now()
@@ -915,7 +1006,7 @@ func testEvaluationsStorage(t *testing.T, driver string, databaseName string) {
 				},
 			},
 			EvaluationJobConfig: api.EvaluationJobConfig{
-				Model:      api.ModelRef{URL: "http://test.com", Name: "test"},
+				Model:      &api.ModelRef{URL: "http://test.com", Name: "test"},
 				Benchmarks: []api.EvaluationBenchmarkConfig{benchmarkConfig},
 			},
 		}
@@ -979,7 +1070,7 @@ func testEvaluationsStorage(t *testing.T, driver string, databaseName string) {
 				},
 			},
 			EvaluationJobConfig: api.EvaluationJobConfig{
-				Model:      api.ModelRef{URL: "http://test.com", Name: "test"},
+				Model:      &api.ModelRef{URL: "http://test.com", Name: "test"},
 				Benchmarks: []api.EvaluationBenchmarkConfig{benchmarkConfig},
 			},
 		}
@@ -1042,7 +1133,7 @@ func testEvaluationsStorage(t *testing.T, driver string, databaseName string) {
 				},
 			},
 			EvaluationJobConfig: api.EvaluationJobConfig{
-				Model:      api.ModelRef{URL: "http://test.com", Name: "test"},
+				Model:      &api.ModelRef{URL: "http://test.com", Name: "test"},
 				Benchmarks: []api.EvaluationBenchmarkConfig{benchmarkConfig},
 			},
 		}
@@ -1103,7 +1194,7 @@ func testEvaluationsStorage(t *testing.T, driver string, databaseName string) {
 				},
 			},
 			EvaluationJobConfig: api.EvaluationJobConfig{
-				Model:      api.ModelRef{URL: "http://test.com", Name: "test"},
+				Model:      &api.ModelRef{URL: "http://test.com", Name: "test"},
 				Benchmarks: []api.EvaluationBenchmarkConfig{benchmarkConfig},
 			},
 		}
@@ -1166,7 +1257,7 @@ func testEvaluationsStorage(t *testing.T, driver string, databaseName string) {
 				},
 			},
 			EvaluationJobConfig: api.EvaluationJobConfig{
-				Model:      api.ModelRef{URL: "http://test.com", Name: "test"},
+				Model:      &api.ModelRef{URL: "http://test.com", Name: "test"},
 				Benchmarks: []api.EvaluationBenchmarkConfig{benchmarkConfig},
 			},
 		}
@@ -1212,7 +1303,7 @@ func testEvaluationsStorage(t *testing.T, driver string, databaseName string) {
 				},
 			},
 			EvaluationJobConfig: api.EvaluationJobConfig{
-				Model:      api.ModelRef{URL: "http://test.com", Name: "test"},
+				Model:      &api.ModelRef{URL: "http://test.com", Name: "test"},
 				Benchmarks: []api.EvaluationBenchmarkConfig{{Ref: api.Ref{ID: "b"}, ProviderID: "p"}},
 			},
 		}
@@ -1255,7 +1346,7 @@ func testEvaluationsStorage(t *testing.T, driver string, databaseName string) {
 				},
 			},
 			EvaluationJobConfig: api.EvaluationJobConfig{
-				Model:      api.ModelRef{URL: "http://test.com", Name: "test"},
+				Model:      &api.ModelRef{URL: "http://test.com", Name: "test"},
 				Benchmarks: []api.EvaluationBenchmarkConfig{{Ref: api.Ref{ID: "b"}, ProviderID: "p"}},
 			},
 		}
@@ -1304,7 +1395,7 @@ func testEvaluationsStorage(t *testing.T, driver string, databaseName string) {
 				},
 			},
 			EvaluationJobConfig: api.EvaluationJobConfig{
-				Model:      api.ModelRef{URL: "http://test.com", Name: "test"},
+				Model:      &api.ModelRef{URL: "http://test.com", Name: "test"},
 				Benchmarks: []api.EvaluationBenchmarkConfig{{Ref: api.Ref{ID: "b"}, ProviderID: "p"}},
 			},
 		}
@@ -1347,7 +1438,7 @@ func testEvaluationsStorage(t *testing.T, driver string, databaseName string) {
 				},
 			},
 			EvaluationJobConfig: api.EvaluationJobConfig{
-				Model:      api.ModelRef{URL: "http://test.com", Name: "test"},
+				Model:      &api.ModelRef{URL: "http://test.com", Name: "test"},
 				Benchmarks: []api.EvaluationBenchmarkConfig{{Ref: api.Ref{ID: "b"}, ProviderID: "p"}},
 			},
 		}
@@ -1376,7 +1467,7 @@ func testEvaluationsStorage(t *testing.T, driver string, databaseName string) {
 		for _, terminalState := range terminalStates {
 			jobID := common.GUID()
 			config := &api.EvaluationJobConfig{
-				Model: api.ModelRef{URL: "http://test.com", Name: "test"},
+				Model: &api.ModelRef{URL: "http://test.com", Name: "test"},
 				Benchmarks: []api.EvaluationBenchmarkConfig{
 					{Ref: api.Ref{ID: "b1"}, ProviderID: "p1"},
 				},
@@ -1473,7 +1564,7 @@ func testEvaluationsStorage(t *testing.T, driver string, databaseName string) {
 	t.Run("UpdateEvaluationJobStatus allows non-terminal transition and preserves Results/Benchmarks", func(t *testing.T) {
 		jobID := common.GUID()
 		config := &api.EvaluationJobConfig{
-			Model: api.ModelRef{URL: "http://test.com", Name: "test"},
+			Model: &api.ModelRef{URL: "http://test.com", Name: "test"},
 			Benchmarks: []api.EvaluationBenchmarkConfig{
 				{Ref: api.Ref{ID: "bx"}, ProviderID: "garak"},
 			},
@@ -1591,7 +1682,7 @@ func testEvaluationsStorage(t *testing.T, driver string, databaseName string) {
 	t.Run("CancelEvaluationJob cascades only to non-terminal benchmarks", func(t *testing.T) {
 		jobID := common.GUID()
 		config := &api.EvaluationJobConfig{
-			Model: api.ModelRef{URL: "http://test.com", Name: "test"},
+			Model: &api.ModelRef{URL: "http://test.com", Name: "test"},
 			Benchmarks: []api.EvaluationBenchmarkConfig{
 				{Ref: api.Ref{ID: "b1"}, ProviderID: "prov1"},
 				{Ref: api.Ref{ID: "b2"}, ProviderID: "prov2"},
@@ -1647,7 +1738,7 @@ func testEvaluationsStorage(t *testing.T, driver string, databaseName string) {
 
 		cancelMsg := &api.MessageInfo{
 			Message:     "Evaluation job cancelled",
-			MessageCode: constants.MESSAGE_CODE_EVALUATION_JOB_CANCELLED,
+			MessageCode: constants.MessageCodeEvaluationJobCancelled,
 		}
 		if err := store.UpdateEvaluationJobStatus(jobID, api.OverallStateCancelled, cancelMsg); err != nil {
 			t.Fatalf("UpdateEvaluationJobStatus running->cancelled: %v", err)
@@ -1663,7 +1754,7 @@ func testEvaluationsStorage(t *testing.T, driver string, databaseName string) {
 		if final.Status.Benchmarks[0].Status != api.StateCancelled {
 			t.Errorf("b1 should be cancelled, got %s", final.Status.Benchmarks[0].Status)
 		}
-		if final.Status.Benchmarks[0].ErrorMessage == nil || final.Status.Benchmarks[0].ErrorMessage.MessageCode != constants.MESSAGE_CODE_EVALUATION_JOB_CANCELLED {
+		if final.Status.Benchmarks[0].ErrorMessage == nil || final.Status.Benchmarks[0].ErrorMessage.MessageCode != constants.MessageCodeEvaluationJobCancelled {
 			t.Errorf("b1 should have cancellation error message")
 		}
 		// b2 was completed → should remain completed
@@ -1677,7 +1768,7 @@ func testEvaluationsStorage(t *testing.T, driver string, databaseName string) {
 		if final.Status.Benchmarks[2].Status != api.StateCancelled {
 			t.Errorf("b3 should be cancelled, got %s", final.Status.Benchmarks[2].Status)
 		}
-		if final.Status.Benchmarks[2].ErrorMessage == nil || final.Status.Benchmarks[2].ErrorMessage.MessageCode != constants.MESSAGE_CODE_EVALUATION_JOB_CANCELLED {
+		if final.Status.Benchmarks[2].ErrorMessage == nil || final.Status.Benchmarks[2].ErrorMessage.MessageCode != constants.MessageCodeEvaluationJobCancelled {
 			t.Errorf("b3 should have cancellation error message")
 		}
 	})
@@ -1685,7 +1776,7 @@ func testEvaluationsStorage(t *testing.T, driver string, databaseName string) {
 	t.Run("DeleteEvaluationJob deletes the evaluation job", func(t *testing.T) {
 		err := store.UpdateEvaluationJobStatus(evaluationId, api.OverallStateCancelled, &api.MessageInfo{
 			Message:     "Evaluation job cancelled",
-			MessageCode: constants.MESSAGE_CODE_EVALUATION_JOB_CANCELLED,
+			MessageCode: constants.MessageCodeEvaluationJobCancelled,
 		})
 		if err == nil {
 			t.Fatalf("Failed to get error when cancelling a deleted evaluation job")
@@ -1758,9 +1849,297 @@ func TestGetEvaluationJobs_PassCriteria(t *testing.T) {
 	}
 }
 
+func makeGitJob(id string, gitRef string) *api.EvaluationJobResource {
+	return &api.EvaluationJobResource{
+		Resource: api.EvaluationResource{
+			Resource: api.Resource{
+				ID:        id,
+				Tenant:    api.Tenant("tenant-1"),
+				CreatedAt: time.Now(),
+				UpdatedAt: time.Now(),
+			},
+		},
+		Status: &api.EvaluationJobStatus{
+			EvaluationJobState: api.EvaluationJobState{
+				State: api.OverallStateRunning,
+			},
+		},
+		EvaluationJobConfig: api.EvaluationJobConfig{
+			Name:  "git-job",
+			Model: &api.ModelRef{URL: "http://model:8000", Name: "m"},
+			Benchmarks: []api.EvaluationBenchmarkConfig{
+				{
+					Ref:        api.Ref{ID: "bench-1"},
+					ProviderID: "prov",
+					TestDataRef: &api.TestDataRef{
+						Git: &api.GitTestDataRef{URL: "https://git.example.com/repo.git", Ref: gitRef},
+					},
+				},
+			},
+		},
+	}
+}
+
+func testUpdateEvaluationJobResolvedSHA_DirectJob(t *testing.T, driver string, databaseName string) {
+	store, err := getTestStorage(t, driver, databaseName)
+	if err != nil {
+		t.Fatalf("getTestStorage: %v", err)
+	}
+
+	job := makeGitJob(common.GUID(), "main")
+	if err := store.CreateEvaluationJob(job); err != nil {
+		t.Fatalf("CreateEvaluationJob: %v", err)
+	}
+
+	const sha = "aabbccdd1122334455667788"
+	if err := store.WithTenant(job.Resource.Tenant).UpdateEvaluationJobResolvedSHA(job.Resource.ID, 0, sha); err != nil {
+		t.Fatalf("UpdateEvaluationJobResolvedSHA: %v", err)
+	}
+
+	got, err := store.WithTenant(job.Resource.Tenant).GetEvaluationJob(job.Resource.ID)
+	if err != nil {
+		t.Fatalf("GetEvaluationJob: %v", err)
+	}
+	if len(got.Benchmarks) == 0 {
+		t.Fatal("expected at least one benchmark")
+	}
+	b := got.Benchmarks[0]
+	if b.TestDataRef == nil || b.TestDataRef.Git == nil {
+		t.Fatal("TestDataRef.Git is nil after update")
+	}
+	if b.TestDataRef.ResolvedSHA != sha {
+		t.Errorf("ResolvedSHA = %q, want %q", b.TestDataRef.ResolvedSHA, sha)
+	}
+}
+
+// testUpdateEvaluationJobResolvedSHA_CollectionOverride verifies that the SHA is persisted when
+// the git ref lives in a collection benchmark override (job.Collection.Benchmarks), not in
+// job.Benchmarks (which is empty for collection-based jobs).
+func testUpdateEvaluationJobResolvedSHA_CollectionOverride(t *testing.T, driver string, databaseName string) {
+	store, err := getTestStorage(t, driver, databaseName)
+	if err != nil {
+		t.Fatalf("getTestStorage: %v", err)
+	}
+
+	tenant := api.Tenant("tenant-1")
+	collID := common.GUID()
+	coll := &api.CollectionResource{
+		Resource: api.Resource{
+			ID:        collID,
+			Tenant:    tenant,
+			CreatedAt: time.Now(),
+			UpdatedAt: time.Now(),
+		},
+		CollectionConfig: api.CollectionConfig{
+			Name: "git-collection",
+			Benchmarks: []api.CollectionBenchmarkConfig{
+				{Ref: api.Ref{ID: "bench-override"}, ProviderID: "prov"},
+			},
+		},
+	}
+	if err := store.CreateCollection(coll); err != nil {
+		t.Fatalf("CreateCollection: %v", err)
+	}
+
+	jobID := common.GUID()
+	job := &api.EvaluationJobResource{
+		Resource: api.EvaluationResource{
+			Resource: api.Resource{
+				ID:        jobID,
+				Tenant:    tenant,
+				CreatedAt: time.Now(),
+				UpdatedAt: time.Now(),
+			},
+		},
+		Status: &api.EvaluationJobStatus{
+			EvaluationJobState: api.EvaluationJobState{
+				State: api.OverallStateRunning,
+			},
+		},
+		EvaluationJobConfig: api.EvaluationJobConfig{
+			Name:  "git-collection-job",
+			Model: &api.ModelRef{URL: "http://model:8000", Name: "m"},
+			// Benchmarks is intentionally empty — this is a collection-based job.
+			Collection: &api.CollectionRef{
+				ID: collID,
+				Benchmarks: []api.EvaluationBenchmarkConfig{
+					{
+						Ref:        api.Ref{ID: "bench-override"},
+						ProviderID: "prov",
+						TestDataRef: &api.TestDataRef{
+							Git: &api.GitTestDataRef{URL: "https://git.example.com/repo.git", Ref: "main"},
+						},
+					},
+				},
+			},
+		},
+	}
+	if err := store.CreateEvaluationJob(job); err != nil {
+		t.Fatalf("CreateEvaluationJob: %v", err)
+	}
+
+	const sha = "deadbeef11223344556677"
+	if err := store.WithTenant(tenant).UpdateEvaluationJobResolvedSHA(jobID, 0, sha); err != nil {
+		t.Fatalf("UpdateEvaluationJobResolvedSHA: %v", err)
+	}
+
+	got, err := store.WithTenant(tenant).GetEvaluationJob(jobID)
+	if err != nil {
+		t.Fatalf("GetEvaluationJob: %v", err)
+	}
+	if got.Collection == nil || len(got.Collection.Benchmarks) == 0 {
+		t.Fatal("Collection.Benchmarks is empty after update")
+	}
+	b := got.Collection.Benchmarks[0]
+	if b.TestDataRef == nil || b.TestDataRef.Git == nil {
+		t.Fatal("Collection.Benchmarks[0].TestDataRef.Git is nil after update")
+	}
+	if b.TestDataRef.ResolvedSHA != sha {
+		t.Errorf("ResolvedSHA = %q, want %q", b.TestDataRef.ResolvedSHA, sha)
+	}
+}
+
+// testUpdateEvaluationJobResolvedSHA_CollectionLocal covers a collection job whose git ref lives
+// only on the collection definition (no job-level benchmark override). The SHA must still
+// be materialized onto the job.
+func testUpdateEvaluationJobResolvedSHA_CollectionLocal(t *testing.T, driver string, databaseName string) {
+	store, err := getTestStorage(t, driver, databaseName)
+	if err != nil {
+		t.Fatalf("getTestStorage: %v", err)
+	}
+
+	tenant := api.Tenant("tenant-1")
+	collID := common.GUID()
+	coll := &api.CollectionResource{
+		Resource: api.Resource{
+			ID:        collID,
+			Tenant:    tenant,
+			CreatedAt: time.Now(),
+			UpdatedAt: time.Now(),
+		},
+		CollectionConfig: api.CollectionConfig{
+			Name: "git-collection-local",
+			Benchmarks: []api.CollectionBenchmarkConfig{
+				{
+					Ref:        api.Ref{ID: "bench-local"},
+					ProviderID: "prov",
+					TestDataRef: &api.TestDataRef{
+						Git: &api.GitTestDataRef{URL: "https://git.example.com/local.git", Ref: "main"},
+					},
+				},
+			},
+		},
+	}
+	if err := store.CreateCollection(coll); err != nil {
+		t.Fatalf("CreateCollection: %v", err)
+	}
+
+	jobID := common.GUID()
+	job := &api.EvaluationJobResource{
+		Resource: api.EvaluationResource{
+			Resource: api.Resource{
+				ID:        jobID,
+				Tenant:    tenant,
+				CreatedAt: time.Now(),
+				UpdatedAt: time.Now(),
+			},
+		},
+		Status: &api.EvaluationJobStatus{
+			EvaluationJobState: api.EvaluationJobState{
+				State: api.OverallStateRunning,
+			},
+		},
+		EvaluationJobConfig: api.EvaluationJobConfig{
+			Name:  "git-collection-local-job",
+			Model: &api.ModelRef{URL: "http://model:8000", Name: "m"},
+			Collection: &api.CollectionRef{
+				ID: collID,
+				// No benchmark overrides — git comes only from the collection.
+			},
+		},
+	}
+	if err := store.CreateEvaluationJob(job); err != nil {
+		t.Fatalf("CreateEvaluationJob: %v", err)
+	}
+
+	const sha = "cafebabefeedface00112233"
+	if err := store.WithTenant(tenant).UpdateEvaluationJobResolvedSHA(jobID, 0, sha); err != nil {
+		t.Fatalf("UpdateEvaluationJobResolvedSHA: %v", err)
+	}
+
+	got, err := store.WithTenant(tenant).GetEvaluationJob(jobID)
+	if err != nil {
+		t.Fatalf("GetEvaluationJob: %v", err)
+	}
+	if got.Collection == nil || len(got.Collection.Benchmarks) == 0 {
+		t.Fatal("Collection.Benchmarks empty after update; expected materialized git SHA")
+	}
+	b := got.Collection.Benchmarks[0]
+	if b.TestDataRef == nil || b.TestDataRef.Git == nil {
+		t.Fatal("Collection.Benchmarks[0].TestDataRef.Git is nil after update")
+	}
+	if b.TestDataRef.ResolvedSHA != sha {
+		t.Errorf("ResolvedSHA = %q, want %q", b.TestDataRef.ResolvedSHA, sha)
+	}
+}
+
+func testUpdateEvaluationJobResolvedSHA_EdgeCases(t *testing.T, driver string, databaseName string) {
+	store, err := getTestStorage(t, driver, databaseName)
+	if err != nil {
+		t.Fatalf("getTestStorage: %v", err)
+	}
+
+	job := makeGitJob(common.GUID(), "main")
+	if err := store.CreateEvaluationJob(job); err != nil {
+		t.Fatalf("CreateEvaluationJob: %v", err)
+	}
+	tenantStore := store.WithTenant(job.Resource.Tenant)
+
+	// Empty SHA is a no-op.
+	if err := tenantStore.UpdateEvaluationJobResolvedSHA(job.Resource.ID, 0, ""); err != nil {
+		t.Fatalf("empty sha: %v", err)
+	}
+
+	// Out-of-range index is a no-op (no error).
+	if err := tenantStore.UpdateEvaluationJobResolvedSHA(job.Resource.ID, 99, "aabbccd"); err != nil {
+		t.Fatalf("bad index: %v", err)
+	}
+
+	const sha = "aabbccdd112233445566778899001122"
+	if err := tenantStore.UpdateEvaluationJobResolvedSHA(job.Resource.ID, 0, sha); err != nil {
+		t.Fatalf("first stamp: %v", err)
+	}
+	// Idempotent: second stamp with different SHA must not overwrite.
+	if err := tenantStore.UpdateEvaluationJobResolvedSHA(job.Resource.ID, 0, "ffffffffffffffffffffffffffffff00"); err != nil {
+		t.Fatalf("second stamp: %v", err)
+	}
+	got, err := tenantStore.GetEvaluationJob(job.Resource.ID)
+	if err != nil {
+		t.Fatalf("GetEvaluationJob: %v", err)
+	}
+	if got.Benchmarks[0].TestDataRef.ResolvedSHA != sha {
+		t.Errorf("ResolvedSHA = %q, want %q", got.Benchmarks[0].TestDataRef.ResolvedSHA, sha)
+	}
+
+	// Invalid SHA format is rejected.
+	if err := tenantStore.UpdateEvaluationJobResolvedSHA(job.Resource.ID, 0, "not-a-sha"); err == nil {
+		t.Fatal("expected error for non-hex resolved_sha")
+	}
+
+	// Benchmark without TestDataRef: no-op.
+	noRefJob := makeGitJob(common.GUID(), "main")
+	noRefJob.Benchmarks[0].TestDataRef = nil
+	if err := store.CreateEvaluationJob(noRefJob); err != nil {
+		t.Fatalf("CreateEvaluationJob noRef: %v", err)
+	}
+	if err := store.WithTenant(noRefJob.Resource.Tenant).UpdateEvaluationJobResolvedSHA(noRefJob.Resource.ID, 0, "aabbccddeeff00"); err != nil {
+		t.Fatalf("no TestDataRef: %v", err)
+	}
+}
+
 func testGetEvaluationJobs_PassCriteria(jobThreshold *float32, collectionThreshold *float32, result float32) error {
 	config := api.EvaluationJobConfig{
-		Model: api.ModelRef{URL: "http://test.com", Name: "test"},
+		Model: &api.ModelRef{URL: "http://test.com", Name: "test"},
 		Benchmarks: []api.EvaluationBenchmarkConfig{
 			{
 				Ref:        api.Ref{ID: "b1"},

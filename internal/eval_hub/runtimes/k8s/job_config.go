@@ -30,35 +30,43 @@ const (
 	inClusterNamespaceFile      = "/var/run/secrets/kubernetes.io/serviceaccount/namespace"
 	serviceAccountNameSuffix    = "-job"
 	serviceCAConfigMapSuffix    = "-service-ca"
+	mlflowCABundleCMSuffix      = "-mlflow-ca-bundle"
 	defaultTestDataInitCmd      = "/app/eval-runtime-init"
 	defaultEvalHubPort          = "8443"
 )
 
 type jobConfig struct {
-	jobID               string
-	resourceGUID        string
-	namespace           string
-	providerID          string
-	benchmarkID         string
-	benchmarkIndex      int
-	adapterImage        string
-	adapterPullPolicy   corev1.PullPolicy
-	sidecarImage        string
-	entrypoint          []string
-	defaultEnv          []api.EnvVar
-	cpuRequest          string
-	memoryRequest       string
-	cpuLimit            string
-	memoryLimit         string
-	gpuResource         string            // Kubernetes extended resource name (e.g. "nvidia.com/gpu")
-	gpuCount            int               // number of GPU units to request (0 = CPU-only)
-	nodeSelector        map[string]string // pod nodeSelector from GPU config; nil when queue is set
-	jobSpec             shared.JobSpec
-	serviceAccountName  string
-	serviceCAConfigMap  string
-	evalHubURL          string // in-cluster URL for sidecar to call eval-hub
-	sidecarBaseURL      string // base URL for adapter/runtime to call sidecar's proxy (config.Sidecar.BaseURL)
-	evalHubInstanceName string
+	jobID              string
+	resourceGUID       string
+	namespace          string
+	providerID         string
+	benchmarkID        string
+	benchmarkIndex     int
+	adapterImage       string
+	adapterPullPolicy  corev1.PullPolicy
+	sidecarImage       string
+	entrypoint         []string
+	defaultEnv         []api.EnvVar
+	cpuRequest         string
+	memoryRequest      string
+	cpuLimit           string
+	memoryLimit        string
+	gpuResource        string            // Kubernetes extended resource name (e.g. "nvidia.com/gpu")
+	gpuCount           int               // number of GPU units to request (0 = CPU-only)
+	nodeSelector       map[string]string // pod nodeSelector; nil when a queue is set (HardwareProfile or hardware_config.queue)
+	tolerations        []corev1.Toleration
+	priorityClassName  string // pod PriorityClassName and/or Kueue priority-class label
+	jobSpec            shared.JobSpec
+	serviceAccountName string
+	serviceCAConfigMap string
+	// mlflowCABundleConfigMap is the operator-managed merged CA bundle
+	// ({instance}-mlflow-ca-bundle) in the job namespace. Set only after a
+	// Get confirms the ConfigMap exists; otherwise jobs fall back to service CA
+	// / configured CA path and do not mount a missing ConfigMap.
+	mlflowCABundleConfigMap string
+	evalHubURL              string // in-cluster URL for sidecar to call eval-hub
+	sidecarBaseURL          string // base URL for adapter/runtime to call sidecar's proxy (config.Sidecar.BaseURL)
+	evalHubInstanceName     string
 	// evalHubCRNamespace is the namespace of the EvalHub CR (control plane); used for Job labels.
 	evalHubCRNamespace         string
 	mlflowTrackingURI          string
@@ -66,13 +74,16 @@ type jobConfig struct {
 	ociCredentialsSecret       string
 	modelAuthSecretRef         string // user's real credentials secret mounted only in sidecar
 	modelInternalRefSecretName string // ephemeral internalModelRef secret mounted in adapter; empty when credential injection is not active
-	modelTargetURL             string // real model URL forwarded by the sidecar model proxy; always set for all jobs
+	modelTargetURL             string // real model URL forwarded by the sidecar model proxy; empty for pre-recorded-data jobs
 	sidecarResources           corev1.ResourceRequirements
 	testDataS3                 s3TestDataConfig
 	testDataPVC                pvcTestDataConfig
+	testDataGit                gitTestDataConfig
 	testDataInitImage          string
 	sidecarConfig              *config.SidecarConfig
-	// queueKind and queueName come from evaluation.Queue when set (API layer normalizes empty kind to kueue).
+	// queueKind and queueName come from a queue-backed HardwareProfile when set,
+	// otherwise from effective hardware_config.queue, else deprecated evaluation.queue
+	// (API layer normalizes empty kind to kueue).
 	queueKind string
 	queueName string
 }
@@ -86,6 +97,13 @@ type s3TestDataConfig struct {
 type pvcTestDataConfig struct {
 	claimName string
 	subPath   string
+}
+
+type gitTestDataConfig struct {
+	url       string
+	ref       string
+	subPath   string
+	secretRef string
 }
 
 func buildJobConfig(evaluation *api.EvaluationJobResource, provider *api.ProviderResource, benchmarkConfig *api.EvaluationBenchmarkConfig, benchmarkIndex int, serviceConfig *config.Config, hardwareProfile *hardwareProfileResources) (*jobConfig, error) {
@@ -102,32 +120,21 @@ func buildJobConfig(evaluation *api.EvaluationJobResource, provider *api.Provide
 	if runtime.K8s.Image == "" {
 		return nil, fmt.Errorf("runtime adapter image is required")
 	}
-	if evaluation.Model.URL == "" || evaluation.Model.Name == "" {
-		return nil, fmt.Errorf("model url and name are required")
+	// evaluation.Model.URL is optional (for pre-recorded datasets) and will have
+	// been checked by the API layer but evaluation.Model.Name is required
+	if evaluation.Model.Name == "" {
+		return nil, fmt.Errorf("model name is required")
 	}
 
-	port := defaultSidecarPort
-	sidecarBaseURL := ""
+	sidecarBaseURL := config.DefaultSidecarBaseURL
 	if serviceConfig != nil && serviceConfig.Sidecar != nil {
-		if serviceConfig.Sidecar.Port != 0 {
-			p, err := sidecarPortFromInt(serviceConfig.Sidecar.Port)
-			if err != nil {
-				return nil, fmt.Errorf("sidecar port: %w", err)
-			}
-			port = p
-		}
-		sidecarBaseURL = strings.TrimSpace(serviceConfig.Sidecar.BaseURL)
+		sidecarBaseURL = serviceConfig.Sidecar.EffectiveBaseURL()
 	}
-	if sidecarBaseURL == "" {
-		sidecarBaseURL = fmt.Sprintf("http://localhost:%d", port)
-	}
-
 	namespace := resolveNamespace(string(evaluation.Resource.Tenant))
 	spec, err := shared.BuildJobSpec(evaluation, provider.Resource.ID, benchmarkConfig, benchmarkIndex, &sidecarBaseURL)
 	if err != nil {
 		return nil, err
 	}
-
 	// Get EvalHub instance name from environment (set by operator in deployment)
 	evalHubInstanceName := strings.TrimSpace(os.Getenv(evalHubInstanceNameEnv))
 
@@ -156,6 +163,8 @@ func buildJobConfig(evaluation *api.EvaluationJobResource, provider *api.Provide
 		evalHubCRNamespace = saNamespace
 		serviceAccountName = evalHubInstanceName + "-" + saNamespace + serviceAccountNameSuffix
 		serviceCAConfigMap = evalHubInstanceName + serviceCAConfigMapSuffix
+		// mlflowCABundleConfigMap is resolved later once we confirm
+		// {instance}-mlflow-ca-bundle exists in the job namespace.
 		// EvalHub URL points to the kube-rbac-proxy HTTPS endpoint in the instance namespace.
 		// Use saNamespace (which falls back to namespace when not in-cluster) to avoid a malformed host
 		// when instanceNamespace is empty.
@@ -171,19 +180,19 @@ func buildJobConfig(evaluation *api.EvaluationJobResource, provider *api.Provide
 		ociCredentialsSecret = evaluation.Exports.OCI.K8s.Connection
 	}
 
+	// modelTargetURL is set when the user supplies a model URL; it remains empty for
+	// pre-recorded-data jobs where no live model endpoint is needed.
+	modelTargetURL := strings.TrimSpace(evaluation.Model.URL)
+
+	// Model auth is only relevant when there is a model URL to authenticate with.
 	modelAuthSecretRef := ""
-	if evaluation.Model.Auth != nil {
+	if modelTargetURL != "" && evaluation.Model.Auth != nil {
 		modelAuthSecretRef = strings.TrimSpace(evaluation.Model.Auth.SecretRef)
 	}
 
 	// modelInternalRefSecretName is set in createBenchmarkResources after inspectModelSecret
-	// confirms proxy-injectable keys. modelTargetURL is always set so the sidecar model proxy
-	// is active for all jobs — open and authenticated alike.
+	// confirms proxy-injectable keys.
 	modelInternalRefSecretName := ""
-	modelTargetURL := strings.TrimSpace(evaluation.Model.URL)
-	if modelTargetURL == "" {
-		return nil, fmt.Errorf("model URL must not be empty")
-	}
 
 	sidecarImage, sidecarResources, err := sidecarImageAndResources(serviceConfig)
 	if err != nil {
@@ -203,21 +212,20 @@ func buildJobConfig(evaluation *api.EvaluationJobResource, provider *api.Provide
 		testDataPVCSubPath = strings.TrimSpace(benchmarkConfig.TestDataRef.PVC.SubPath)
 	}
 
-	var queueKind, queueName string
-	if evaluation.Queue != nil {
-		queueName = strings.TrimSpace(evaluation.Queue.Name)
-		queueKind = strings.TrimSpace(evaluation.Queue.Kind)
+	var testDataGitURL, testDataGitRef, testDataGitSubPath, testDataGitSecretRef string
+	if benchmarkConfig.TestDataRef != nil && benchmarkConfig.TestDataRef.Git != nil {
+		testDataGitURL = strings.TrimSpace(benchmarkConfig.TestDataRef.Git.URL)
+		testDataGitRef = strings.TrimSpace(benchmarkConfig.TestDataRef.Git.Ref)
+		testDataGitSubPath = strings.TrimSpace(benchmarkConfig.TestDataRef.Git.SubPath)
+		testDataGitSecretRef = strings.TrimSpace(benchmarkConfig.TestDataRef.Git.SecretRef)
 	}
 
 	// GPU resource requests/limits are always propagated to the pod spec so that Kueue can
-	// account for GPU quota. When a queue is specified, nodeSelector is omitted — Kueue's
-	// admission controller selects the appropriate ResourceFlavor (which encodes node labels)
-	// and mutates the pod at admission time.
+	// account for GPU quota. Provider nodeSelector is the default; a HardwareProfile with
+	// Node scheduling overrides it, and a Queue-backed profile (or hardware_config.queue /
+	// deprecated evaluation.queue) clears it so Kueue ResourceFlavors govern placement.
 	gpuResource, gpuCount := resolveGPUConfig(runtime.K8s.GPU)
-	var nodeSelector map[string]string
-	if queueName == "" {
-		nodeSelector = resolveNodeSelector(runtime.K8s.GPU)
-	}
+	nodeSelector := resolveNodeSelector(runtime.K8s.GPU)
 
 	adapterPullPolicy := resolveImagePullPolicy(runtime.K8s.ImagePullPolicy)
 
@@ -256,8 +264,6 @@ func buildJobConfig(evaluation *api.EvaluationJobResource, provider *api.Provide
 		sidecarResources:           sidecarResources,
 		sidecarBaseURL:             sidecarBaseURL,
 		evalHubURL:                 evalHubURL,
-		queueKind:                  queueKind,
-		queueName:                  queueName,
 		testDataS3: s3TestDataConfig{
 			bucket:    testDataS3Bucket,
 			key:       testDataS3Key,
@@ -267,9 +273,96 @@ func buildJobConfig(evaluation *api.EvaluationJobResource, provider *api.Provide
 			claimName: testDataPVCClaimName,
 			subPath:   testDataPVCSubPath,
 		},
+		testDataGit: gitTestDataConfig{
+			url:       testDataGitURL,
+			ref:       testDataGitRef,
+			subPath:   testDataGitSubPath,
+			secretRef: testDataGitSecretRef,
+		},
 	}
 	applyHardwareProfileResources(out, hardwareProfile)
+	effectiveHW := api.EffectiveHardwareConfig(benchmarkConfig, &evaluation.EvaluationJobConfig)
+	if err := applyDirectHardwareConfig(out, effectiveHW); err != nil {
+		return nil, err
+	}
+	// Deprecated evaluation.queue: only when neither hardware_config supplied a queue.
+	applyQueueIfUnset(out, evaluation.Queue)
 	return out, nil
+}
+
+// applyDirectHardwareConfig applies inline hardware_config fields (queue/cpu/memory/gpu)
+// when no hardware_profile_name is set. Profile mode is handled separately via
+// applyHardwareProfileResources.
+func applyDirectHardwareConfig(cfg *jobConfig, hw *api.BenchmarkHardwareConfig) error {
+	if cfg == nil || hw == nil {
+		return nil
+	}
+	if strings.TrimSpace(hw.HardwareProfileName) != "" {
+		return nil
+	}
+	if hw.CPU != nil {
+		if request := strings.TrimSpace(hw.CPU.Request); request != "" {
+			if _, err := resource.ParseQuantity(request); err != nil {
+				return fmt.Errorf("hardware_config.cpu.request: %w", err)
+			}
+			cfg.cpuRequest = request
+		}
+		if limit := strings.TrimSpace(hw.CPU.Limit); limit != "" {
+			if _, err := resource.ParseQuantity(limit); err != nil {
+				return fmt.Errorf("hardware_config.cpu.limit: %w", err)
+			}
+			cfg.cpuLimit = limit
+		}
+	}
+	if hw.Memory != nil {
+		if request := strings.TrimSpace(hw.Memory.Request); request != "" {
+			if _, err := resource.ParseQuantity(request); err != nil {
+				return fmt.Errorf("hardware_config.memory.request: %w", err)
+			}
+			cfg.memoryRequest = request
+		}
+		if limit := strings.TrimSpace(hw.Memory.Limit); limit != "" {
+			if _, err := resource.ParseQuantity(limit); err != nil {
+				return fmt.Errorf("hardware_config.memory.limit: %w", err)
+			}
+			cfg.memoryLimit = limit
+		}
+	}
+	if hw.GPU != nil {
+		if name := strings.TrimSpace(hw.GPU.Name); name != "" {
+			cfg.gpuResource = name
+		}
+		if hw.GPU.Count < 0 {
+			return fmt.Errorf("hardware_config.gpu.count must be at least 1")
+		}
+		if hw.GPU.Count > 0 {
+			cfg.gpuCount = hw.GPU.Count
+		}
+	}
+	if hw.Queue != nil {
+		applyQueueIfUnset(cfg, hw.Queue)
+	}
+	return nil
+}
+
+// applyQueueIfUnset sets queue from hardware_config.queue or deprecated evaluation.queue
+// when a HardwareProfile did not already provide a LocalQueue name. Clears
+// nodeSelector/tolerations so Kueue ResourceFlavors govern placement.
+func applyQueueIfUnset(cfg *jobConfig, queue *api.QueueConfig) {
+	if cfg == nil || queue == nil || cfg.queueName != "" {
+		return
+	}
+	queueName := strings.TrimSpace(queue.Name)
+	if queueName == "" {
+		return
+	}
+	cfg.queueName = queueName
+	cfg.queueKind = strings.TrimSpace(queue.Kind)
+	if cfg.queueKind == "" {
+		cfg.queueKind = "kueue"
+	}
+	cfg.nodeSelector = nil
+	cfg.tolerations = nil
 }
 
 // sidecarImageAndResources returns image and resources for the sidecar container from
@@ -385,6 +478,10 @@ func defaultIfEmpty(value string, fallback string) string {
 		return fallback
 	}
 	return value
+}
+
+func mlflowCABundleConfigMapName(instanceName string) string {
+	return instanceName + mlflowCABundleCMSuffix
 }
 
 func resolveNamespace(configured string) string {

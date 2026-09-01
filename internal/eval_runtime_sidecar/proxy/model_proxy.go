@@ -2,7 +2,7 @@ package proxy
 
 import (
 	"fmt"
-	"io"
+	"io/fs"
 	"log/slog"
 	"net/http"
 	"net/http/httputil"
@@ -31,10 +31,10 @@ const (
 	modelURLSuffix     = "_url"
 )
 
-// xModelCredError is an internal sentinel header set by Rewrite when ref resolution fails.
+// xModelAuthError is an internal sentinel header set by Rewrite when ref resolution fails.
 // The modelRoundTripper checks for it and returns 400 to the eval container instead of
 // forwarding a request with a literal ref token.
-const xModelCredError = "X-Model-Cred-Error" // #nosec G101 -- internal HTTP header name, not a credential
+const xModelAuthError = "X-Model-Cred-Error"
 
 const globalTransactionIDHeader = "X-Global-Transaction-Id"
 
@@ -96,7 +96,7 @@ func NewModelReverseProxy(defaultTarget *url.URL, client *http.Client, logger *s
 			resolvedTarget, realToken, err := resolveModelCredential(reqLog, authHeader, secretCache, defaultTarget, saTokenPath)
 			if err != nil {
 				// Signal the RoundTripper to return 400 without forwarding.
-				pr.Out.Header.Set(xModelCredError, err.Error())
+				pr.Out.Header.Set(xModelAuthError, err.Error())
 				pr.Out.URL.Scheme = defaultTarget.Scheme
 				pr.Out.URL.Host = defaultTarget.Host
 				pr.Out.Host = defaultTarget.Host
@@ -132,45 +132,26 @@ func NewModelReverseProxy(defaultTarget *url.URL, client *http.Client, logger *s
 		reqLog.Info("Proxying model request", "method", pr.Out.Method, "url", pr.Out.URL.String())
 	}
 
-	rp.ModifyResponse = func(resp *http.Response) error {
-		if resp.Request != nil {
-			loggerForRequest(logger, resp.Request).Info("Response from model proxy", "method", resp.Request.Method, "url", resp.Request.URL.String(), "status", resp.StatusCode)
-		}
-		return nil
-	}
+	rp.ModifyResponse = proxyModifyResponse(logger, "Response from model proxy")
 
-	rp.ErrorHandler = func(w http.ResponseWriter, req *http.Request, err error) {
-		loggerForRequest(logger, req).Error("Error proxying model request", "method", req.Method, "url", req.URL.String(), "error", err)
-		http.Error(w, err.Error(), http.StatusBadGateway)
-	}
+	rp.ErrorHandler = proxyErrorHandler(logger, "Error proxying model request")
 
 	return rp
 }
 
 // modelRoundTripper wraps an inner RoundTripper and intercepts requests marked with the
-// xModelCredError sentinel header, returning 400 Bad Request without forwarding.
+// xModelAuthError sentinel header, returning 400 Bad Request without forwarding.
 type modelRoundTripper struct {
 	inner  http.RoundTripper
 	logger *slog.Logger
 }
 
 func (t *modelRoundTripper) RoundTrip(req *http.Request) (*http.Response, error) {
-	if errMsg := req.Header.Get(xModelCredError); errMsg != "" {
-		req.Header.Del(xModelCredError)
-		reqID := getOrCreateRequestID(req)
-		t.logger.Error("model credential resolution failed, returning 400", "request_id", reqID, "error", errMsg)
-		respHeader := make(http.Header)
-		respHeader.Set(globalTransactionIDHeader, reqID)
-		return &http.Response{
-			StatusCode: http.StatusBadRequest,
-			Status:     "400 Bad Request",
-			Body:       io.NopCloser(strings.NewReader(errMsg + "\n")),
-			Header:     respHeader,
-			Request:    req,
-			Proto:      "HTTP/1.1",
-			ProtoMajor: 1,
-			ProtoMinor: 1,
-		}, nil
+	if errMsg := req.Header.Get(xModelAuthError); errMsg != "" {
+		req.Header.Del(xModelAuthError)
+		t.logger.Error("model credential resolution failed, returning 400",
+			"request_id", getOrCreateRequestID(req), "error", errMsg)
+		return newSyntheticResponse(req, http.StatusBadRequest, strings.NewReader(errMsg+"\n")), nil
 	}
 	return t.inner.RoundTrip(req)
 }
@@ -206,7 +187,13 @@ func loadSecretCache(mountPath string, logger *slog.Logger) map[string]string {
 	if mountPath == "" {
 		return cache
 	}
-	entries, err := os.ReadDir(mountPath)
+	root, err := os.OpenRoot(mountPath)
+	if err != nil {
+		logger.Warn("model secret mount unreadable; credential resolution will fail for ref tokens", "path", mountPath, "error", err)
+		return cache
+	}
+	defer func() { _ = root.Close() }()
+	entries, err := fs.ReadDir(root.FS(), ".")
 	if err != nil {
 		logger.Warn("model secret mount unreadable; credential resolution will fail for ref tokens", "path", mountPath, "error", err)
 		return cache
@@ -216,7 +203,7 @@ func loadSecretCache(mountPath string, logger *slog.Logger) map[string]string {
 		if e.IsDir() || strings.HasPrefix(e.Name(), "..") || strings.Contains(e.Name(), string(filepath.Separator)) {
 			continue
 		}
-		data, err := os.ReadFile(filepath.Join(mountPath, e.Name())) // #nosec G304 -- entry name validated above
+		data, err := root.ReadFile(e.Name())
 		if err != nil {
 			logger.Warn("skipping unreadable secret file", "file", e.Name(), "error", err)
 			continue

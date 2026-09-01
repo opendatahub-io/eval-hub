@@ -8,6 +8,101 @@ import (
 	"github.com/eval-hub/eval-hub/internal/otel"
 )
 
+func TestSidecarForJobPodSetsMLFlowTokenPath(t *testing.T) {
+	cfg := &config.Config{
+		Sidecar: &config.SidecarConfig{BaseURL: config.DefaultSidecarBaseURL},
+	}
+	jc := &jobConfig{
+		evalHubURL:        "http://eval-hub:8080",
+		mlflowTrackingURI: "http://mlflow:5000",
+		mlflowWorkspace:   "ws-1",
+	}
+	export, err := sidecarForJobPod(cfg, jc)
+	if err != nil {
+		t.Fatalf("sidecarForJobPod: %v", err)
+	}
+	if export.MLFlow == nil {
+		t.Fatal("expected MLFlow in sidecar export")
+	}
+	want := mlflowAuthMountPath + "/" + mlflowTokenFile
+	if export.MLFlow.TokenPath != want {
+		t.Fatalf("TokenPath = %q, want %q", export.MLFlow.TokenPath, want)
+	}
+	if export.MLFlow.TrackingURI != "http://mlflow:5000" {
+		t.Fatalf("TrackingURI = %q", export.MLFlow.TrackingURI)
+	}
+}
+
+func TestSidecarForJobPodSetsMLFlowCACertPath(t *testing.T) {
+	cfg := &config.Config{
+		Sidecar: &config.SidecarConfig{BaseURL: config.DefaultSidecarBaseURL},
+		MLFlow:  &config.MLFlowConfig{CACertPath: "/custom/mlflow-ca.pem"},
+	}
+
+	t.Run("prefers operator-merged MLflow CA bundle", func(t *testing.T) {
+		jc := &jobConfig{
+			mlflowTrackingURI:       "https://mlflow.example:443",
+			mlflowCABundleConfigMap: "evalhub-mlflow-ca-bundle",
+			serviceCAConfigMap:      "evalhub-service-ca",
+		}
+		export, err := sidecarForJobPod(cfg, jc)
+		if err != nil {
+			t.Fatalf("sidecarForJobPod: %v", err)
+		}
+		want := mlflowCABundleMountPath + "/" + mlflowCABundleFile
+		if export.MLFlow.CACertPath != want {
+			t.Fatalf("CACertPath = %q, want %q", export.MLFlow.CACertPath, want)
+		}
+	})
+
+	t.Run("falls back to MLFLOW_CA_CERT_PATH when bundle unset", func(t *testing.T) {
+		jc := &jobConfig{mlflowTrackingURI: "https://mlflow.example:443"}
+		export, err := sidecarForJobPod(cfg, jc)
+		if err != nil {
+			t.Fatalf("sidecarForJobPod: %v", err)
+		}
+		if export.MLFlow.CACertPath != "/custom/mlflow-ca.pem" {
+			t.Fatalf("CACertPath = %q, want custom path", export.MLFlow.CACertPath)
+		}
+	})
+
+	t.Run("falls back to service CA when no bundle or custom path", func(t *testing.T) {
+		jc := &jobConfig{
+			mlflowTrackingURI:  "https://mlflow.example:443",
+			serviceCAConfigMap: "evalhub-service-ca",
+		}
+		export, err := sidecarForJobPod(&config.Config{Sidecar: &config.SidecarConfig{}}, jc)
+		if err != nil {
+			t.Fatalf("sidecarForJobPod: %v", err)
+		}
+		want := serviceCAMountPath + "/" + serviceCABundleFile
+		if export.MLFlow.CACertPath != want {
+			t.Fatalf("CACertPath = %q, want %q", export.MLFlow.CACertPath, want)
+		}
+	})
+
+	t.Run("keeps EvalHub API TLS on service CA", func(t *testing.T) {
+		jc := &jobConfig{
+			evalHubURL:              "https://evalhub.svc:8443",
+			mlflowTrackingURI:       "https://mlflow.example:443",
+			mlflowCABundleConfigMap: "evalhub-mlflow-ca-bundle",
+			serviceCAConfigMap:      "evalhub-service-ca",
+		}
+		export, err := sidecarForJobPod(cfg, jc)
+		if err != nil {
+			t.Fatalf("sidecarForJobPod: %v", err)
+		}
+		wantEvalHub := serviceCAMountPath + "/" + serviceCABundleFile
+		if export.EvalHub.CACertPath != wantEvalHub {
+			t.Fatalf("EvalHub.CACertPath = %q, want %q", export.EvalHub.CACertPath, wantEvalHub)
+		}
+		wantMLFlow := mlflowCABundleMountPath + "/" + mlflowCABundleFile
+		if export.MLFlow.CACertPath != wantMLFlow {
+			t.Fatalf("MLFlow.CACertPath = %q, want %q", export.MLFlow.CACertPath, wantMLFlow)
+		}
+	})
+}
+
 func TestOtelConfigForJobPod(t *testing.T) {
 	t.Run("nil when OTEL disabled", func(t *testing.T) {
 		cfg := &config.Config{OTEL: &config.OTELConfig{Enabled: false}}
@@ -39,6 +134,73 @@ func TestOtelConfigForJobPod(t *testing.T) {
 	})
 }
 
+func TestSidecarForJobPodSetsIsGitJob(t *testing.T) {
+	cfg := &config.Config{
+		Sidecar: &config.SidecarConfig{BaseURL: config.DefaultSidecarBaseURL},
+	}
+	jc := &jobConfig{
+		jobID:      "my-job-id",
+		evalHubURL: "http://eval-hub:8080",
+		testDataGit: gitTestDataConfig{
+			url: "https://github.com/org/repo.git",
+			ref: "main",
+		},
+	}
+
+	export, err := sidecarForJobPod(cfg, jc)
+	if err != nil {
+		t.Fatalf("sidecarForJobPod: %v", err)
+	}
+	if export.InitContainer == nil || !export.InitContainer.IsGitJob {
+		t.Fatal("expected InitContainer.IsGitJob=true in sidecar config for git source job")
+	}
+}
+
+func TestSidecarForJobPodIsGitJobFalseForNonGitJob(t *testing.T) {
+	cfg := &config.Config{
+		Sidecar: &config.SidecarConfig{BaseURL: config.DefaultSidecarBaseURL},
+	}
+	jc := &jobConfig{
+		jobID:      "s3-job",
+		evalHubURL: "http://eval-hub:8080",
+		// no testDataGit fields
+	}
+
+	export, err := sidecarForJobPod(cfg, jc)
+	if err != nil {
+		t.Fatalf("sidecarForJobPod: %v", err)
+	}
+	if export.InitContainer != nil && export.InitContainer.IsGitJob {
+		t.Fatal("expected IsGitJob=false for non-git job")
+	}
+}
+
+func TestSidecarForJobPod_UsesEffectiveBaseURL(t *testing.T) {
+	t.Run("preserves explicit BaseURL from sidecar config", func(t *testing.T) {
+		cfg := &config.Config{
+			Sidecar: &config.SidecarConfig{BaseURL: "https://sidecar.example:9443"},
+		}
+		export, err := sidecarForJobPod(cfg, &jobConfig{evalHubURL: "http://eval-hub:8080"})
+		if err != nil {
+			t.Fatalf("sidecarForJobPod: %v", err)
+		}
+		if export.BaseURL != "https://sidecar.example:9443" {
+			t.Fatalf("BaseURL = %q, want %q", export.BaseURL, "https://sidecar.example:9443")
+		}
+	})
+
+	t.Run("falls back to default when BaseURL empty", func(t *testing.T) {
+		cfg := &config.Config{Sidecar: &config.SidecarConfig{}}
+		export, err := sidecarForJobPod(cfg, &jobConfig{evalHubURL: "http://eval-hub:8080"})
+		if err != nil {
+			t.Fatalf("sidecarForJobPod: %v", err)
+		}
+		if export.BaseURL != config.DefaultSidecarBaseURL {
+			t.Fatalf("BaseURL = %q, want default %q", export.BaseURL, config.DefaultSidecarBaseURL)
+		}
+	})
+}
+
 func TestSidecarForJobPodIncludesOTEL(t *testing.T) {
 	cfg := &config.Config{
 		OTEL: &config.OTELConfig{
@@ -47,7 +209,6 @@ func TestSidecarForJobPodIncludesOTEL(t *testing.T) {
 			ExporterType:     otel.ExporterTypeStdout,
 			ExporterInsecure: true,
 		},
-		Sidecar: &config.SidecarConfig{Port: 8080},
 	}
 	jc := &jobConfig{evalHubURL: "http://eval-hub:8080"}
 

@@ -2,12 +2,14 @@ package handlers
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"strconv"
 
+	"github.com/eval-hub/eval-hub/internal/eval_hub/config"
 	"github.com/eval-hub/eval-hub/internal/eval_hub/constants"
 	"github.com/eval-hub/eval-hub/internal/eval_hub/executioncontext"
-	"github.com/eval-hub/eval-hub/internal/eval_hub/http_wrappers"
+	"github.com/eval-hub/eval-hub/internal/eval_hub/httpwrappers"
 	"github.com/eval-hub/eval-hub/internal/eval_hub/messages"
 	"github.com/eval-hub/eval-hub/internal/eval_hub/serviceerrors"
 	"github.com/eval-hub/eval-hub/internal/logging"
@@ -15,20 +17,20 @@ import (
 )
 
 // HandleGetEvaluationJobLogs handles GET /api/v1/evaluations/jobs/{id}/logs
-func (h *Handlers) HandleGetEvaluationJobLogs(ctx *executioncontext.ExecutionContext, req http_wrappers.RequestWrapper, w http_wrappers.ResponseWrapper) {
+func (h *Handlers) HandleGetEvaluationJobLogs(ctx *executioncontext.ExecutionContext, req httpwrappers.RequestWrapper, w httpwrappers.ResponseWrapper) {
 	h.handleGetEvaluationLogs(ctx, req, w, nil)
 }
 
 // HandleGetEvaluationBenchmarkLogs handles GET /api/v1/evaluations/jobs/{id}/benchmarks/{benchmark_index}/logs
-func (h *Handlers) HandleGetEvaluationBenchmarkLogs(ctx *executioncontext.ExecutionContext, req http_wrappers.RequestWrapper, w http_wrappers.ResponseWrapper) {
-	rawIndex := req.PathValue(constants.PATH_PARAMETER_BENCHMARK_INDEX)
+func (h *Handlers) HandleGetEvaluationBenchmarkLogs(ctx *executioncontext.ExecutionContext, req httpwrappers.RequestWrapper, w httpwrappers.ResponseWrapper) {
+	rawIndex := req.PathValue(constants.PathParameterBenchmarkIndex)
 	if rawIndex == "" {
-		w.Error(serviceerrors.NewServiceError(messages.MissingPathParameter, "ParameterName", constants.PATH_PARAMETER_BENCHMARK_INDEX), ctx.RequestID)
+		w.Error(serviceerrors.NewServiceError(messages.MissingPathParameter, "ParameterName", constants.PathParameterBenchmarkIndex), ctx.RequestID)
 		return
 	}
 	benchmarkIndex, err := strconv.Atoi(rawIndex)
 	if err != nil || benchmarkIndex < 0 {
-		w.Error(serviceerrors.NewServiceError(messages.QueryParameterInvalid, "ParameterName", constants.PATH_PARAMETER_BENCHMARK_INDEX, "Type", "non-negative integer", "Value", rawIndex), ctx.RequestID)
+		w.Error(serviceerrors.NewServiceError(messages.QueryParameterInvalid, "ParameterName", constants.PathParameterBenchmarkIndex, "Type", "non-negative integer", "Value", rawIndex), ctx.RequestID)
 		return
 	}
 	h.handleGetEvaluationLogs(ctx, req, w, &benchmarkIndex)
@@ -36,16 +38,16 @@ func (h *Handlers) HandleGetEvaluationBenchmarkLogs(ctx *executioncontext.Execut
 
 func (h *Handlers) handleGetEvaluationLogs(
 	ctx *executioncontext.ExecutionContext,
-	req http_wrappers.RequestWrapper,
-	w http_wrappers.ResponseWrapper,
+	req httpwrappers.RequestWrapper,
+	w httpwrappers.ResponseWrapper,
 	benchmarkIndex *int,
 ) {
 	storage := h.getStorage(ctx)
 	logging.LogRequestStarted(ctx)
 
-	evaluationJobID := req.PathValue(constants.PATH_PARAMETER_JOB_ID)
+	evaluationJobID := req.PathValue(constants.PathParameterJobID)
 	if evaluationJobID == "" {
-		w.Error(serviceerrors.NewServiceError(messages.MissingPathParameter, "ParameterName", constants.PATH_PARAMETER_JOB_ID), ctx.RequestID)
+		w.Error(serviceerrors.NewServiceError(messages.MissingPathParameter, "ParameterName", constants.PathParameterJobID), ctx.RequestID)
 		return
 	}
 
@@ -75,13 +77,35 @@ func (h *Handlers) handleGetEvaluationLogs(
 				return err
 			}
 
-			logs, err := h.runtime.WithLogger(ctx.Logger).WithContext(runtimeCtx).GetEvaluationLogs(job, benchmarks, benchmarkIndex, logOpts)
+			w.SetHeader("Content-Type", "text/plain; charset=utf-8")
+			if ctx.RequestID != "" {
+				w.SetHeader("X-Global-Transaction-Id", ctx.RequestID)
+			}
+			w.SetHeader("Trailer", "X-Log-Truncated")
+			w.SetStatusCode(200)
+
+			limit := config.DefaultMaxLogResponseBytes
+			streamTimeout := config.DefaultLogStreamTimeout
+			if h.serviceConfig != nil && h.serviceConfig.Service != nil {
+				limit = h.serviceConfig.Service.EffectiveMaxLogResponseBytes()
+				streamTimeout = h.serviceConfig.Service.EffectiveLogStreamTimeout()
+			}
+			lw := &LimitedWriter{W: responseWriterAdapter{w}, Limit: limit}
+
+			streamCtx, cancel := context.WithTimeout(runtimeCtx, streamTimeout)
+			defer cancel()
+
+			err = h.runtime.WithLogger(ctx.Logger).WithContext(streamCtx).StreamEvaluationLogs(job, benchmarks, benchmarkIndex, logOpts, lw)
 			if err != nil {
-				w.Error(err, ctx.RequestID)
-				return err
+				if errors.Is(err, ErrLogResponseTruncated) {
+					w.SetHeader("X-Log-Truncated", "true")
+				} else {
+					ctx.Logger.Error("error streaming evaluation logs", "error", err)
+					return err
+				}
 			}
 
-			writePlainText(w, ctx, 200, logs)
+			logging.LogRequestSuccess(ctx, 200, nil)
 			return nil
 		},
 		"runtime",
@@ -104,16 +128,25 @@ func (h *Handlers) resolveJobBenchmarks(storage interface {
 	return GetJobBenchmarks(job, collection)
 }
 
-func parseEvaluationLogOptions(req http_wrappers.RequestWrapper) (api.EvaluationLogOptions, error) {
+// responseWriterAdapter adapts httpwrappers.ResponseWrapper to io.Writer.
+type responseWriterAdapter struct {
+	w httpwrappers.ResponseWrapper
+}
+
+func (a responseWriterAdapter) Write(p []byte) (int, error) {
+	return a.w.Write(p)
+}
+
+func parseEvaluationLogOptions(req httpwrappers.RequestWrapper) (api.EvaluationLogOptions, error) {
 	tailLines, err := GetParam(req, "tail_lines", true, api.DefaultLogTailLines)
 	if err != nil {
 		return api.EvaluationLogOptions{}, err
 	}
-	if tailLines < 1 || tailLines > api.MaxLogTailLines {
+	if tailLines != api.AllLogLines && (tailLines < 1 || tailLines > api.MaxLogTailLines) {
 		return api.EvaluationLogOptions{}, serviceerrors.NewServiceError(
 			messages.QueryParameterInvalid,
 			"ParameterName", "tail_lines",
-			"Type", fmt.Sprintf("integer between 1 and %d", api.MaxLogTailLines),
+			"Type", fmt.Sprintf("integer between 1 and %d, or -1 for all lines", api.MaxLogTailLines),
 			"Value", strconv.Itoa(tailLines),
 		)
 	}
@@ -146,16 +179,4 @@ func parseEvaluationLogOptions(req http_wrappers.RequestWrapper) (api.Evaluation
 	}
 
 	return opts, nil
-}
-
-func writePlainText(w http_wrappers.ResponseWrapper, ctx *executioncontext.ExecutionContext, code int, body string) {
-	w.SetHeader("Content-Type", "text/plain; charset=utf-8")
-	if ctx.RequestID != "" {
-		w.SetHeader("X-Global-Transaction-Id", ctx.RequestID)
-	}
-	w.SetStatusCode(code)
-	if body != "" {
-		_, _ = w.Write([]byte(body))
-	}
-	logging.LogRequestSuccess(ctx, code, nil)
 }

@@ -18,9 +18,9 @@ import (
 
 // These should be shared with the eval-hub server
 const (
-	TRANSACTION_ID_HEADER = "X-Global-Transaction-Id"
-	USER_HEADER           = "X-User"
-	TENANT_HEADER         = "X-Tenant"
+	TransactionIDHeader = "X-Global-Transaction-Id"
+	UserHeader          = "X-User"
+	TenantHeader        = "X-Tenant"
 )
 
 type ServerInfo struct {
@@ -44,7 +44,6 @@ func New(info *ServerInfo, logger *slog.Logger, serverOption *ServerOption) *mcp
 	serverOpts := &mcp.ServerOptions{
 		Logger: logger,
 		Capabilities: &mcp.ServerCapabilities{
-			Logging:   &mcp.LoggingCapabilities{},
 			Tools:     &mcp.ToolCapabilities{ListChanged: true},
 			Resources: &mcp.ResourceCapabilities{ListChanged: true},
 			Prompts:   &mcp.PromptCapabilities{ListChanged: true},
@@ -87,9 +86,6 @@ func NewEvalHubClient(cfg *config.Config, logger *slog.Logger) *evalhubclient.Cl
 	if cfg.Tenant != "" {
 		client = client.WithTenant(cfg.Tenant)
 	}
-	if cfg.Insecure {
-		client = client.WithInsecureSkipVerify()
-	}
 	if cfg.CACertPath != "" {
 		pemData, err := os.ReadFile(cfg.CACertPath)
 		if err != nil {
@@ -103,7 +99,7 @@ func NewEvalHubClient(cfg *config.Config, logger *slog.Logger) *evalhubclient.Cl
 			}
 		}
 	}
-	logger.Info("EvalHub client created", "baseURL", cfg.BaseURL, "tenant", cfg.Tenant, "insecure", cfg.Insecure, "caCertPath", cfg.CACertPath)
+	logger.Info("EvalHub client created", "baseURL", cfg.BaseURL, "tenant", cfg.Tenant, "caCertPath", cfg.CACertPath)
 	return client
 }
 
@@ -177,7 +173,7 @@ func wrapRequest(cfg *config.Config, logger *slog.Logger, next http.Handler) htt
 	switch cfg.AuthType {
 	case config.AuthTypeRBACProxy:
 		// if we have the kube-rbac-proxy then we need to check the HTTP headers for the tenant and user headers
-		required := []string{TENANT_HEADER, USER_HEADER}
+		required := []string{TenantHeader, UserHeader}
 		h = http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 			for _, name := range required {
 				if strings.TrimSpace(r.Header.Get(name)) == "" {

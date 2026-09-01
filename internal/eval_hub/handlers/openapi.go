@@ -7,8 +7,9 @@ import (
 	"strings"
 
 	"github.com/eval-hub/eval-hub/internal/eval_hub/executioncontext"
-	"github.com/eval-hub/eval-hub/internal/eval_hub/http_wrappers"
+	"github.com/eval-hub/eval-hub/internal/eval_hub/httpwrappers"
 	"github.com/eval-hub/eval-hub/internal/eval_hub/messages"
+	"github.com/eval-hub/eval-hub/internal/safefile"
 )
 
 var (
@@ -19,7 +20,7 @@ var (
 	}
 )
 
-func (h *Handlers) HandleOpenAPI(ctx *executioncontext.ExecutionContext, r http_wrappers.RequestWrapper, w http_wrappers.ResponseWrapper, dirs ...string) {
+func (h *Handlers) HandleOpenAPI(ctx *executioncontext.ExecutionContext, r httpwrappers.RequestWrapper, w httpwrappers.ResponseWrapper, dirs ...string) {
 	found := func(contents []byte, contentType string) {
 		w.SetHeader("Content-Type", contentType)
 		for key, value := range noCacheHeaders {
@@ -40,8 +41,8 @@ func (h *Handlers) HandleOpenAPI(ctx *executioncontext.ExecutionContext, r http_
 	exePath, _ := os.Executable()
 	if exePath != "" {
 		exeDir := filepath.Dir(exePath)
-		specPath := filepath.Join(exeDir, "docs", file)
-		contents, err := os.ReadFile(specPath) // #nosec G304 -- bundled OpenAPI spec beside executable
+		docsDir := filepath.Join(exeDir, "docs")
+		contents, err := safefile.ReadFile(docsDir, file)
 		if err == nil {
 			found(contents, contentType)
 			return
@@ -60,13 +61,14 @@ func (h *Handlers) HandleOpenAPI(ctx *executioncontext.ExecutionContext, r http_
 	// Find the OpenAPI spec file relative to the working directory
 	var paths []string
 	for _, dir := range dirs {
-		absPath, aerr := filepath.Abs(filepath.Join(dir, file))
+		absDir, aerr := filepath.Abs(dir)
 		if aerr != nil {
-			ctx.Logger.Error("Failed to get absolute path for OpenAPI spec", "path", absPath, "error", aerr.Error())
+			ctx.Logger.Error("Failed to get absolute path for OpenAPI spec", "path", dir, "error", aerr.Error())
 			continue
 		}
+		absPath := filepath.Join(absDir, file)
 		paths = append(paths, absPath)
-		contents, err := os.ReadFile(absPath) // #nosec G304 -- OpenAPI spec from configured docs paths
+		contents, err := safefile.ReadFile(absDir, file)
 		if err == nil {
 			found(contents, contentType)
 			return
@@ -77,7 +79,7 @@ func (h *Handlers) HandleOpenAPI(ctx *executioncontext.ExecutionContext, r http_
 	w.ErrorWithMessageCode(ctx.RequestID, messages.InternalServerError, "Error", "Failed to read OpenAPI spec")
 }
 
-func (h *Handlers) HandleDocs(ctx *executioncontext.ExecutionContext, r http_wrappers.RequestWrapper, w http_wrappers.ResponseWrapper) {
+func (h *Handlers) HandleDocs(ctx *executioncontext.ExecutionContext, r httpwrappers.RequestWrapper, w httpwrappers.ResponseWrapper) {
 	// Get the base URL for the OpenAPI spec (so without the "/docs" path)
 	baseURL := strings.TrimSuffix(r.URI(), r.Path())
 	// be safe against XSS attacks

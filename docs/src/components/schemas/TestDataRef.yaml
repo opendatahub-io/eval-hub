@@ -1,6 +1,6 @@
 type: object
 description: |
-  Reference to external test data for a benchmark. Exactly one of `s3` or `pvc` must be set.
+  Reference to external test data for a benchmark. Exactly one of `s3`, `pvc`, or `git` must be set.
 
   **`s3`** — When the evaluation runs as a **Kubernetes Job**, Eval Hub schedules an
   **init container** on the evaluation job pod before the adapter runs. That init container:
@@ -17,18 +17,46 @@ description: |
   container at **`/test_data`**. No init container is used; the PVC must already contain the
   data and must exist in the same namespace as the evaluation job.
 
+  **`git`** — The specified repository is cloned and checked out at the given ref into
+  **`/test_data`** before the adapter runs. The resolved commit SHA is recorded as
+  **`resolved_sha`** on this object on the evaluation job for reproducibility.
+
   Do not put credentials in the Eval Hub API request body; only reference an existing
-  Secret via **`secret_ref`** (for S3).
-additionalProperties: false
-properties:
-  s3:
-    $ref: ./TestDataRefS3.yaml
-  pvc:
-    $ref: ./TestDataRefPVC.yaml
-minProperties: 1
-maxProperties: 1
+  Secret via **`secret_ref`** (for S3 or git).
 oneOf:
-  - required:
+  - type: object
+    properties:
+      s3:
+        $ref: ./TestDataRefS3.yaml
+      resolved_sha:
+        $ref: ./TestDataRefResolvedSHA.yaml
+      type:
+        $ref: ./TestDataRefType.yaml
+    additionalProperties: false
+    required:
       - s3
-  - required:
+    title: S3
+  - type: object
+    properties:
+      pvc:
+        $ref: ./TestDataRefPVC.yaml
+      resolved_sha:
+        $ref: ./TestDataRefResolvedSHA.yaml
+      type:
+        $ref: ./TestDataRefType.yaml
+    additionalProperties: false
+    required:
       - pvc
+    title: PVC
+  - type: object
+    properties:
+      git:
+        $ref: ./TestDataRefGit.yaml
+      resolved_sha:
+        $ref: ./TestDataRefResolvedSHA.yaml
+      type:
+        $ref: ./TestDataRefType.yaml
+    additionalProperties: false
+    required:
+      - git
+    title: Git

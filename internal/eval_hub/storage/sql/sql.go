@@ -8,6 +8,7 @@ import (
 	"log/slog"
 	"os"
 	"strings"
+	"sync"
 	"time"
 
 	// import the postgres driver - "pgx"
@@ -32,8 +33,8 @@ import (
 
 const (
 	// These are the only drivers currently supported
-	SQLITE_DRIVER   = "sqlite"
-	POSTGRES_DRIVER = "pgx"
+	SQLiteDriver   = "sqlite"
+	PostgresDriver = "pgx"
 )
 
 type sqlStorage struct {
@@ -46,6 +47,9 @@ type sqlStorage struct {
 	owner             api.User
 	maxArgLength      int
 	isolationLevel    sql.IsolationLevel
+	// systemResourcesMu serializes LoadSystemResources across With* clones that
+	// share the same DB pool (pointer is copied, not the mutex value).
+	systemResourcesMu *sync.Mutex
 }
 
 func NewStorage(
@@ -70,9 +74,9 @@ func NewStorage(
 
 	// check that the driver is supported
 	switch sqlConfig.Driver {
-	case SQLITE_DRIVER:
+	case SQLiteDriver:
 		break
-	case POSTGRES_DRIVER:
+	case PostgresDriver:
 		break
 	default:
 		return nil, fmt.Errorf("unsupported driver: %s", (sqlConfig.Driver))
@@ -92,9 +96,9 @@ func NewStorage(
 	if useOTELOSQL {
 		var attrs []attribute.KeyValue
 		switch sqlConfig.Driver {
-		case SQLITE_DRIVER:
+		case SQLiteDriver:
 			attrs = append(attrs, semconv.DBSystemSqlite)
-		case POSTGRES_DRIVER:
+		case PostgresDriver:
 			attrs = append(attrs, semconv.DBSystemPostgreSQL)
 		}
 		if databaseName != "" {
@@ -133,12 +137,12 @@ func NewStorage(
 
 	var statementsFactory shared.SQLStatementsFactory
 	switch sqlConfig.Driver {
-	case SQLITE_DRIVER:
+	case SQLiteDriver:
 		statementsFactory, err = sqlite.Setup(logger, pool, &sqlConfig)
 		if err != nil {
 			return nil, err
 		}
-	case POSTGRES_DRIVER:
+	case PostgresDriver:
 		statementsFactory, err = postgres.Setup(logger, pool, &sqlConfig)
 		if err != nil {
 			return nil, err
@@ -158,6 +162,7 @@ func NewStorage(
 		ctx:               context.Background(),
 		maxArgLength:      512,
 		isolationLevel:    isolationLevel,
+		systemResourcesMu: &sync.Mutex{},
 	}
 
 	// ping the database to verify the DSN provided by the user is valid and the server is accessible
@@ -206,9 +211,9 @@ func getIsolationLevel(isolationLevel string, config *shared.SQLDatabaseConfig, 
 	}
 
 	switch config.Driver {
-	case SQLITE_DRIVER:
+	case SQLiteDriver:
 		return sql.LevelDefault, nil
-	case POSTGRES_DRIVER:
+	case PostgresDriver:
 		// Read Committed matches PostgreSQL's default and avoids Serializable
 		// snapshot conflicts (SQLSTATE 40001) under concurrent job updates.
 		// Override with DEBUG_SQL_ISOLATION_LEVEL=Serializable when needed.
@@ -359,6 +364,7 @@ func (s *sqlStorage) WithLogger(logger *slog.Logger) abstractions.Storage {
 		owner:             s.owner,
 		maxArgLength:      s.maxArgLength,
 		isolationLevel:    s.isolationLevel,
+		systemResourcesMu: s.systemResourcesMu,
 	}
 }
 
@@ -373,6 +379,7 @@ func (s *sqlStorage) WithContext(ctx context.Context) abstractions.Storage {
 		owner:             s.owner,
 		maxArgLength:      s.maxArgLength,
 		isolationLevel:    s.isolationLevel,
+		systemResourcesMu: s.systemResourcesMu,
 	}
 }
 
@@ -387,6 +394,7 @@ func (s *sqlStorage) WithTenant(tenant api.Tenant) abstractions.Storage {
 		owner:             s.owner,
 		maxArgLength:      s.maxArgLength,
 		isolationLevel:    s.isolationLevel,
+		systemResourcesMu: s.systemResourcesMu,
 	}
 }
 
@@ -401,5 +409,6 @@ func (s *sqlStorage) WithOwner(owner api.User) abstractions.Storage {
 		owner:             owner,
 		maxArgLength:      s.maxArgLength,
 		isolationLevel:    s.isolationLevel,
+		systemResourcesMu: s.systemResourcesMu,
 	}
 }

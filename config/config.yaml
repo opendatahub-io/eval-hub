@@ -19,17 +19,16 @@ env_mappings:
   API_HOST: service.host
   TLS_CERT_FILE: service.tls_cert_file
   TLS_KEY_FILE: service.tls_key_file
+  DB_DRIVER: database.driver
   DB_URL: database.url
   MLFLOW_TRACKING_URI: mlflow.tracking_uri
   MLFLOW_CA_CERT_PATH: mlflow.ca_cert_path
-  MLFLOW_INSECURE_SKIP_VERIFY: mlflow.insecure_skip_verify
   MLFLOW_TOKEN_PATH: mlflow.token_path
   MLFLOW_WORKSPACE: mlflow.workspace
   EVALHUB_CA_CERT_PATH: sidecar.eval_hub.ca_cert_path
   EVALHUB_INSECURE_SKIP_VERIFY: sidecar.eval_hub.insecure_skip_verify
   EVALHUB_TOKEN_CACHE_TIMEOUT: sidecar.eval_hub.token_cache_timeout
   MLFLOW_TOKEN_CACHE_TIMEOUT: sidecar.mlflow.token_cache_timeout
-  SIDECAR_PORT: sidecar.port
   METRICS_PORT: prometheus.port
   METRICS_HOST: prometheus.host
   OTEL_METRIC_EXPORT_INTERVAL: otel.metric_export_interval
@@ -64,7 +63,6 @@ prometheus:
 
 sidecar:
   base_url: http://localhost:8080  # URL for adapter/runtime to call sidecar proxy (cluster mode)
-  port: 8080
   eval_hub:
     # TLS for outbound calls to eval-hub (sidecar -> eval-hub API).
     # On cluster: job pods inject EVALHUB_CA_CERT_PATH and EVALHUB_INSECURE_SKIP_VERIFY; sidecar reads
@@ -83,7 +81,6 @@ sidecar:
   #   ca_cert_path: /etc/pki/ca-trust/source/anchors/registry-ca.crt  # optional
   #   insecure_skip_verify: false
   sidecar_container:
-    image: quay.io/rh-ee-nbs/nbs-dev:eval-hub_v27
     resources:
       requests:
         cpu: 100m

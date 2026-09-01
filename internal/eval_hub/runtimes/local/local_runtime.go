@@ -5,9 +5,11 @@ import (
 	"encoding/json"
 	"fmt"
 	"log/slog"
+	"net/url"
 	"os"
 	"os/exec"
 	"path/filepath"
+	"strings"
 	"sync"
 
 	"github.com/eval-hub/eval-hub/internal/eval_hub/abstractions"
@@ -17,6 +19,7 @@ import (
 	"github.com/eval-hub/eval-hub/internal/eval_hub/metrics"
 	"github.com/eval-hub/eval-hub/internal/eval_hub/runtimes/shared"
 	"github.com/eval-hub/eval-hub/internal/eval_hub/serviceerrors"
+	"github.com/eval-hub/eval-hub/internal/safefile"
 	"github.com/eval-hub/eval-hub/pkg/api"
 )
 
@@ -76,19 +79,29 @@ func (jr *pidTracker) isCancelled(jobID string) bool {
 }
 
 type LocalRuntime struct {
-	logger      *slog.Logger
-	ctx         context.Context
-	tracker     jobTracker
-	callbackURL *string
+	logger               *slog.Logger
+	ctx                  context.Context
+	tracker              jobTracker
+	callbackURL          *string
+	sidecarBaseURL       string                     // non-empty when local sidecar mode is active
+	sidecarModelDefaults *config.SidecarModelConfig // model proxy defaults from config; may be nil
 }
 
 func NewLocalRuntime(
 	logger *slog.Logger,
 	serviceConfig *config.Config,
 ) (abstractions.Runtime, error) {
+	var sidecarBaseURL string
+	var sidecarModelDefaults *config.SidecarModelConfig
+	if serviceConfig != nil && serviceConfig.Sidecar != nil && serviceConfig.Sidecar.LocalMode && serviceConfig.Sidecar.BaseURL != "" {
+		sidecarBaseURL = serviceConfig.Sidecar.BaseURL
+		sidecarModelDefaults = serviceConfig.Sidecar.Model
+	}
 	return &LocalRuntime{
-		logger:      logger,
-		callbackURL: buildCallbackURL(serviceConfig),
+		logger:               logger,
+		callbackURL:          buildCallbackURL(serviceConfig),
+		sidecarBaseURL:       sidecarBaseURL,
+		sidecarModelDefaults: sidecarModelDefaults,
 		tracker: &pidTracker{
 			pids:      make(map[string][]int),
 			cancelled: make(map[string]bool),
@@ -114,19 +127,23 @@ func buildCallbackURL(serviceConfig *config.Config) *string {
 
 func (r *LocalRuntime) WithLogger(logger *slog.Logger) abstractions.Runtime {
 	return &LocalRuntime{
-		logger:      logger,
-		ctx:         r.ctx,
-		tracker:     r.tracker,
-		callbackURL: r.callbackURL,
+		logger:               logger,
+		ctx:                  r.ctx,
+		tracker:              r.tracker,
+		callbackURL:          r.callbackURL,
+		sidecarBaseURL:       r.sidecarBaseURL,
+		sidecarModelDefaults: r.sidecarModelDefaults,
 	}
 }
 
 func (r *LocalRuntime) WithContext(ctx context.Context) abstractions.Runtime {
 	return &LocalRuntime{
-		logger:      r.logger,
-		ctx:         ctx,
-		tracker:     r.tracker,
-		callbackURL: r.callbackURL,
+		logger:               r.logger,
+		ctx:                  ctx,
+		tracker:              r.tracker,
+		callbackURL:          r.callbackURL,
+		sidecarBaseURL:       r.sidecarBaseURL,
+		sidecarModelDefaults: r.sidecarModelDefaults,
 	}
 }
 
@@ -150,9 +167,28 @@ func (r *LocalRuntime) RunEvaluationJob(
 
 	r.tracker.registerJob(jobID)
 
+	callbackURL := r.callbackURL
+	if r.sidecarEnabled() {
+		if evaluation.Model != nil && evaluation.Model.Auth != nil && evaluation.Model.Auth.SecretRef != "" {
+			parsed, err := url.Parse(evaluation.Model.Auth.SecretRef)
+			if err != nil {
+				return serviceerrors.NewServiceError(messages.InvalidSecretRefURIParse,
+					"SecretRef", evaluation.Model.Auth.SecretRef, "Detail", err.Error())
+			}
+			// Only the file:/// form (empty authority, non-empty path) is accepted.
+			if parsed.Scheme != "file" || parsed.Host != "" || parsed.Opaque != "" || parsed.Path == "" || parsed.OmitHost {
+				return serviceerrors.NewServiceError(messages.InvalidSecretRefURI, "SecretRef", evaluation.Model.Auth.SecretRef)
+			}
+		}
+		if err := r.writeSidecarJobInfo(evaluation); err != nil {
+			return fmt.Errorf("write sidecar job info: %w", err)
+		}
+		callbackURL = &r.sidecarBaseURL
+	}
+
 	for i, bench := range benchmarks {
 		go func() {
-			if err := r.runBenchmark(jobID, bench, i, evaluation, r.callbackURL, storage); err != nil {
+			if err := r.runBenchmark(jobID, bench, i, evaluation, callbackURL, storage); err != nil {
 				metrics.RecordBenchmarkRuntimeError(r.ctx, r.Name())
 				r.logger.Error(
 					"local runtime benchmark launch failed",
@@ -200,6 +236,16 @@ func (r *LocalRuntime) runBenchmark(
 		return fmt.Errorf("build job spec: %w", err)
 	}
 
+	if r.sidecarEnabled() && spec.Model != nil && spec.Model.URL != "" {
+		modelCopy := *spec.Model
+		rewrittenURL, err := shared.RewriteModelURLForLocalSidecar(r.sidecarBaseURL, jobID, modelCopy.URL)
+		if err != nil {
+			return fmt.Errorf("rewrite model URL for sidecar: %w", err)
+		}
+		modelCopy.URL = rewrittenURL
+		spec.Model = &modelCopy
+	}
+
 	// Create output directory: /tmp/evalhub-jobs/<job_id>/<benchmark_index>/<provider_id>/<benchmark_id>/
 	jobDir := filepath.Join(localJobsBaseDir, jobID, fmt.Sprintf("%d", benchmarkIndex), bench.ProviderID, bench.ID)
 	metaDir := filepath.Join(jobDir, "meta")
@@ -234,7 +280,8 @@ func (r *LocalRuntime) runBenchmark(
 
 	// Build command using shell interpretation
 	command := provider.Runtime.Local.Command
-	cmd := exec.Command("sh", "-c", command) // #nosec G204 -- local runtime executes provider-defined commands by design
+	// G204 -- local runtime executes provider-defined commands by design
+	cmd := exec.Command("sh", "-c", command)
 	// Setpgid places the child in its own process group (PGID = child PID).
 	// This is critical for two reasons:
 	//   1. cancelJob calls Kill(-PID, SIGKILL) which targets the entire process
@@ -248,6 +295,7 @@ func (r *LocalRuntime) runBenchmark(
 	// Set environment variables
 	cmd.Env = append(os.Environ(),
 		fmt.Sprintf("EVALHUB_JOB_SPEC_PATH=%s", absJobSpecPath),
+		"EVALHUB_MODE=local",
 	)
 	for _, envVar := range provider.Runtime.Local.Env {
 		if envVar.Name != "" {
@@ -257,7 +305,7 @@ func (r *LocalRuntime) runBenchmark(
 
 	// Capture stdout/stderr to log file
 	logFilePath := filepath.Join(jobDir, "jobrun.log")
-	logFile, err := os.Create(logFilePath) // #nosec G304 -- log path derived from trusted job metadata
+	logFile, err := safefile.Create(jobDir, "jobrun.log")
 	if err != nil {
 		return fmt.Errorf("create log file: %w", err)
 	}
@@ -337,7 +385,7 @@ func (r *LocalRuntime) failBenchmark(
 			Status:         api.StateFailed,
 			ErrorMessage: api.WithMessageOrigin(&api.MessageInfo{
 				Message:     errMsg,
-				MessageCode: constants.MESSAGE_CODE_EVALUATION_JOB_FAILED,
+				MessageCode: constants.MessageCodeEvaluationJobFailed,
 			}, api.MessageOriginServer),
 		},
 	}
@@ -351,6 +399,42 @@ func (r *LocalRuntime) failBenchmark(
 			"provider_id", bench.ProviderID,
 		)
 	}
+}
+
+func (r *LocalRuntime) sidecarEnabled() bool {
+	return r.sidecarBaseURL != ""
+}
+
+func (r *LocalRuntime) writeSidecarJobInfo(evaluation *api.EvaluationJobResource) error {
+	var modelConfig *config.SidecarModelConfig
+	modelURL := strings.TrimSpace(evaluation.Model.URL)
+	if modelURL != "" {
+		modelConfig = &config.SidecarModelConfig{
+			URL:         modelURL,
+			HTTPTimeout: shared.DefaultModelHTTPTimeout,
+		}
+		if r.sidecarModelDefaults != nil {
+			if r.sidecarModelDefaults.HTTPTimeout > 0 {
+				modelConfig.HTTPTimeout = r.sidecarModelDefaults.HTTPTimeout
+			}
+			modelConfig.InsecureSkipVerify = r.sidecarModelDefaults.InsecureSkipVerify
+		}
+		if evaluation.Model.Auth != nil && evaluation.Model.Auth.SecretRef != "" {
+			modelConfig.AuthSecretMountPath = evaluation.Model.Auth.SecretRef
+		}
+	}
+
+	info := &shared.SidecarJobInfo{Model: modelConfig}
+	infoPath, err := shared.WriteSidecarJobInfo(localJobsBaseDir, evaluation.Resource.ID, info)
+	if err != nil {
+		return err
+	}
+	r.logger.Info(
+		"sidecar job info written",
+		"job_id", evaluation.Resource.ID,
+		"path", infoPath,
+	)
+	return nil
 }
 
 func (r *LocalRuntime) DeleteEvaluationJobResources(evaluation *api.EvaluationJobResource) error {
@@ -375,4 +459,8 @@ func (r *LocalRuntime) DeleteEvaluationJobResources(evaluation *api.EvaluationJo
 
 func (r *LocalRuntime) Name() string {
 	return "local"
+}
+
+func (r *LocalRuntime) ValidateHardwareProfiles(_ []api.EvaluationBenchmarkConfig) error {
+	return nil
 }
