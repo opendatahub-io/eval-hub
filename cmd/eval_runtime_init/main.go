@@ -39,14 +39,19 @@ const (
 	envGitTimeout = "TEST_DATA_GIT_TIMEOUT"
 
 	defaultTimeout = 10 * time.Minute
+
+	// defaultTerminationMessagePath is the default Kubernetes termination message path.
+	// The init container writes error messages here so they appear in pod status.
+	defaultTerminationMessagePath = "/dev/termination-log"
 )
 
 // Paths and URL validation are package vars so unit tests can redirect mounts and
 // exercise runGit against local file:// repos without writing under /.
 var (
-	scrtDir        = "/var/run/secrets/test-data"
-	destDir        = runtimeenv.TestDataDir
-	gitMetadataDir = runtimeenv.InitMetadataDir
+	scrtDir                = "/var/run/secrets/test-data"
+	destDir                = runtimeenv.TestDataDir
+	gitMetadataDir         = runtimeenv.InitMetadataDir
+	terminationMessagePath = defaultTerminationMessagePath
 )
 
 func main() {
@@ -54,9 +59,29 @@ func main() {
 	slog.SetDefault(logger)
 	if err := run(); err != nil {
 		logger.Error("eval-runtime-init failed", "error", err)
+		writeTerminationMessage(err, logger)
 		os.Exit(1)
 	}
 	logger.Info("eval-runtime-init completed")
+}
+
+// writeTerminationMessage writes the error message to the Kubernetes termination
+// message file so the error appears in pod status. If writing fails it is logged
+// but does not change the exit path (the process is already about to exit).
+func writeTerminationMessage(err error, logger *slog.Logger) {
+	if terminationMessagePath == "" {
+		return
+	}
+	msg := err.Error()
+	// Kubernetes truncates termination messages at 4096 bytes; truncate early
+	// so the message is not cut mid-sentence.
+	const maxLen = 4096
+	if len(msg) > maxLen {
+		msg = msg[:maxLen]
+	}
+	if writeErr := os.WriteFile(terminationMessagePath, []byte(msg), 0o600); writeErr != nil {
+		logger.Error("failed to write termination message", "path", terminationMessagePath, "error", writeErr)
+	}
 }
 
 func run() error {
