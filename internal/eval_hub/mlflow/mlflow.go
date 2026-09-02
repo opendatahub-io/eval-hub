@@ -19,7 +19,11 @@ import (
 	"go.opentelemetry.io/contrib/instrumentation/net/http/otelhttp"
 )
 
-const workspaceProbeTimeout = 5 * time.Second
+const (
+	workspaceProbeTimeout    = 5 * time.Second
+	workspaceProbeMaxRetries = 3
+	workspaceProbeRetryDelay = 2 * time.Second
+)
 
 func SetupMLFlowClient(config *config.Config, logger *slog.Logger) (*mlflowclient.Client, string, string, error) {
 	mlflowClient, err := NewMLFlowClient(config, logger)
@@ -117,17 +121,7 @@ func NewMLFlowClient(config *config.Config, logger *slog.Logger) (*mlflowclient.
 		logger.Info("Enabled OTEL transport for MLFlow client")
 	}
 
-	probeCtx, cancel := context.WithTimeout(context.Background(), workspaceProbeTimeout)
-	defer cancel()
-
-	workspacesEnabled, err := client.WithContext(probeCtx).ProbeWorkspacesEnabled()
-	if err != nil {
-		logger.Warn(
-			"Could not probe MLflow workspace support; workspace headers will not be sent",
-			"error", err.Error(),
-		)
-		workspacesEnabled = false
-	}
+	workspacesEnabled := probeWorkspacesWithRetry(client, logger, config.MLFlow.Workspace)
 	client = client.WithWorkspacesSupport(workspacesEnabled)
 	logger.Info("MLflow workspace support probed", "workspaces_enabled", workspacesEnabled)
 
@@ -146,6 +140,76 @@ func NewMLFlowClient(config *config.Config, logger *slog.Logger) (*mlflowclient.
 	logger.Info("MLFlow tracking enabled", "mlflow_experiment_url", client.GetExperimentsURL())
 
 	return client, nil
+}
+
+// probeWorkspacesWithRetry retries the MLflow workspace probe up to
+// workspaceProbeMaxRetries times with workspaceProbeRetryDelay between
+// attempts.  Each attempt uses a fresh context bounded by
+// workspaceProbeTimeout.
+//
+// If all attempts fail with an error (as opposed to the probe explicitly
+// returning workspacesEnabled=false) AND configuredWorkspace is non-empty,
+// the function assumes workspace support is enabled.  The rationale is that
+// the operator explicitly configured a workspace, so a probe failure is
+// likely transient (e.g. MLflow not yet ready during Kubernetes pod startup).
+func probeWorkspacesWithRetry(client *mlflowclient.Client, logger *slog.Logger, configuredWorkspace string) bool {
+	return probeWorkspacesWithRetryParams(client, logger, configuredWorkspace,
+		workspaceProbeMaxRetries, workspaceProbeRetryDelay, workspaceProbeTimeout)
+}
+
+// probeWorkspacesWithRetryParams is the parameterised implementation used by
+// tests to override retry counts and delays.
+func probeWorkspacesWithRetryParams(
+	client *mlflowclient.Client,
+	logger *slog.Logger,
+	configuredWorkspace string,
+	maxRetries int,
+	retryDelay time.Duration,
+	probeTimeout time.Duration,
+) bool {
+	if maxRetries <= 0 {
+		return false
+	}
+	var lastErr error
+	for attempt := 1; attempt <= maxRetries; attempt++ {
+		probeCtx, cancel := context.WithTimeout(context.Background(), probeTimeout)
+		enabled, err := client.WithContext(probeCtx).ProbeWorkspacesEnabled()
+		cancel()
+
+		if err == nil {
+			// Probe succeeded — trust whatever the server returned.
+			return enabled
+		}
+
+		lastErr = err
+		logger.Warn(
+			"MLflow workspace probe failed",
+			"attempt", attempt,
+			"max_retries", maxRetries,
+			"error", err.Error(),
+		)
+
+		if attempt < maxRetries {
+			time.Sleep(retryDelay)
+		}
+	}
+
+	// All retries exhausted.  If the operator configured a workspace, assume
+	// workspace support is available (the probe failure is likely transient).
+	if configuredWorkspace != "" {
+		logger.Warn(
+			"All MLflow workspace probe retries exhausted; assuming workspace support is enabled because MLFLOW_WORKSPACE is configured",
+			"workspace", configuredWorkspace,
+			"last_error", lastErr.Error(),
+		)
+		return true
+	}
+
+	logger.Warn(
+		"All MLflow workspace probe retries exhausted; workspace headers will not be sent",
+		"last_error", lastErr.Error(),
+	)
+	return false
 }
 
 func injectEvaluationJobTags(jobID string, evaluation *api.EvaluationJobConfig) []api.ExperimentTag {
