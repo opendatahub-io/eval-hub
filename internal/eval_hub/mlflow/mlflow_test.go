@@ -187,7 +187,7 @@ func TestProbeWorkspacesWithRetry(t *testing.T) {
 					return
 				}
 				conn, _, _ := hj.Hijack()
-				conn.Close()
+				_ = conn.Close()
 				return
 			}
 			_ = json.NewEncoder(w).Encode(mlflowclient.ServerInfoResponse{WorkspacesEnabled: true})
@@ -249,7 +249,7 @@ func TestProbeWorkspacesWithRetry(t *testing.T) {
 				return
 			}
 			conn, _, _ := hj.Hijack()
-			conn.Close()
+			_ = conn.Close()
 		}))
 		t.Cleanup(srv.Close)
 
