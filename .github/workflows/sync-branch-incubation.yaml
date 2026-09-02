@@ -1,8 +1,9 @@
-name: Sync branch incubation
+name: Sync branch incubation (deprecated)
+# DEPRECATED: main now syncs directly to stable (see sync-branch-stable.yaml).
+# The automatic push trigger is disabled; this workflow is kept for manual runs
+# only, and can be removed once nothing depends on the incubation branch.
 on:
-  push:
-    branches:
-      - main
+  workflow_dispatch:
 
 jobs:
   sync-branches:
