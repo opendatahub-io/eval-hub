@@ -9,7 +9,9 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"sync/atomic"
 	"testing"
+	"time"
 
 	"github.com/eval-hub/eval-hub/internal/eval_hub/config"
 	"github.com/eval-hub/eval-hub/internal/eval_hub/messages"
@@ -139,6 +141,122 @@ func TestNewMLFlowClient(t *testing.T) {
 		}
 		if !strings.Contains(err.Error(), "no valid PEM certificates") {
 			t.Fatalf("unexpected error: %v", err)
+		}
+	})
+}
+
+func TestProbeWorkspacesWithRetry(t *testing.T) {
+	t.Parallel()
+	logger := discardTestLogger()
+
+	// Use short delays and timeouts so tests run fast.
+	const (
+		testRetryDelay   = 10 * time.Millisecond
+		testProbeTimeout = 2 * time.Second
+	)
+
+	t.Run("succeeds on first attempt", func(t *testing.T) {
+		t.Parallel()
+		var calls atomic.Int32
+		srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			calls.Add(1)
+			_ = json.NewEncoder(w).Encode(mlflowclient.ServerInfoResponse{WorkspacesEnabled: true})
+		}))
+		t.Cleanup(srv.Close)
+
+		client := mlflowclient.NewClient(srv.URL).WithLogger(logger)
+		got := probeWorkspacesWithRetryParams(client, logger, "", 3, testRetryDelay, testProbeTimeout)
+		if !got {
+			t.Fatal("expected workspacesEnabled=true")
+		}
+		if c := calls.Load(); c != 1 {
+			t.Fatalf("probe called %d times, want 1", c)
+		}
+	})
+
+	t.Run("succeeds after transient failures", func(t *testing.T) {
+		t.Parallel()
+		var calls atomic.Int32
+		srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			n := calls.Add(1)
+			if n < 3 {
+				// Simulate MLflow not ready: close the connection.
+				hj, ok := w.(http.Hijacker)
+				if !ok {
+					http.Error(w, "cannot hijack", http.StatusInternalServerError)
+					return
+				}
+				conn, _, _ := hj.Hijack()
+				_ = conn.Close()
+				return
+			}
+			_ = json.NewEncoder(w).Encode(mlflowclient.ServerInfoResponse{WorkspacesEnabled: true})
+		}))
+		t.Cleanup(srv.Close)
+
+		client := mlflowclient.NewClient(srv.URL).WithLogger(logger)
+		got := probeWorkspacesWithRetryParams(client, logger, "", 3, testRetryDelay, testProbeTimeout)
+		if !got {
+			t.Fatal("expected workspacesEnabled=true after retry")
+		}
+		if c := calls.Load(); c != 3 {
+			t.Fatalf("probe called %d times, want 3", c)
+		}
+	})
+
+	t.Run("returns false from successful probe that says disabled", func(t *testing.T) {
+		t.Parallel()
+		srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			_ = json.NewEncoder(w).Encode(mlflowclient.ServerInfoResponse{WorkspacesEnabled: false})
+		}))
+		t.Cleanup(srv.Close)
+
+		client := mlflowclient.NewClient(srv.URL).WithLogger(logger)
+		// Even with workspace configured, a successful probe returning false wins.
+		got := probeWorkspacesWithRetryParams(client, logger, "my-workspace", 3, testRetryDelay, testProbeTimeout)
+		if got {
+			t.Fatal("expected workspacesEnabled=false when server explicitly disables workspaces")
+		}
+	})
+
+	t.Run("all retries fail without workspace config returns false", func(t *testing.T) {
+		t.Parallel()
+		client := mlflowclient.NewClient("http://127.0.0.1:1").WithLogger(logger)
+		got := probeWorkspacesWithRetryParams(client, logger, "", 2, testRetryDelay, testProbeTimeout)
+		if got {
+			t.Fatal("expected workspacesEnabled=false when all probes fail and no workspace configured")
+		}
+	})
+
+	t.Run("all retries fail with workspace config returns true (fallback)", func(t *testing.T) {
+		t.Parallel()
+		client := mlflowclient.NewClient("http://127.0.0.1:1").WithLogger(logger)
+		got := probeWorkspacesWithRetryParams(client, logger, "prod-ws", 2, testRetryDelay, testProbeTimeout)
+		if !got {
+			t.Fatal("expected workspacesEnabled=true as config-based fallback")
+		}
+	})
+
+	t.Run("retries correct number of times", func(t *testing.T) {
+		t.Parallel()
+		var calls atomic.Int32
+		srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			calls.Add(1)
+			// Always fail: close connection immediately.
+			hj, ok := w.(http.Hijacker)
+			if !ok {
+				http.Error(w, "cannot hijack", http.StatusInternalServerError)
+				return
+			}
+			conn, _, _ := hj.Hijack()
+			_ = conn.Close()
+		}))
+		t.Cleanup(srv.Close)
+
+		client := mlflowclient.NewClient(srv.URL).WithLogger(logger)
+		_ = probeWorkspacesWithRetryParams(client, logger, "", 4, testRetryDelay, testProbeTimeout)
+		if c := calls.Load(); c != 4 {
+			t.Fatalf("probe called %d times, want 4", c)
 		}
 	})
 }
