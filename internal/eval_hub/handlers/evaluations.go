@@ -70,28 +70,22 @@ func (h *Handlers) runtimeName() string {
 	return h.runtime.Name()
 }
 
-func (s *runtimeStorage) UpdateEvaluationJob(id string, runStatus *api.StatusEvent) error {
-	var previousState api.OverallState
-	job, jobErr := s.scopedStorage().GetEvaluationJob(id)
-	if jobErr == nil && job != nil && job.Status != nil {
-		previousState = job.Status.State
-	}
-
+func (s *runtimeStorage) UpdateEvaluationJob(id string, runStatus *api.StatusEvent) (api.OverallState, error) {
 	err := s.validate.Struct(runStatus)
 	if err != nil {
 		s.logger.Info("Failed to validate evaluation job status from the runtime", "job_id", id, "error", err)
-		return err
+		return "", err
 	}
-	err = s.scopedStorage().UpdateEvaluationJob(id, runStatus)
+	previousState, err := s.scopedStorage().UpdateEvaluationJob(id, runStatus)
 	if err != nil {
 		s.logger.Info("Failed to update evaluation job in storage", "job_id", id, "error", err)
-		return err
+		return previousState, err
 	}
 
 	s.handlers.onEvaluationJobUpdated(s.ctx, s.scopedStorage(), func() (*api.EvaluationJobResource, error) {
 		return s.scopedStorage().GetEvaluationJob(id)
 	}, previousState, s.logger)
-	return nil
+	return previousState, nil
 }
 
 func (h *Handlers) getStorage(ctx *executioncontext.ExecutionContext) abstractions.Storage {
@@ -582,16 +576,16 @@ func (h *Handlers) HandleUpdateEvaluation(ctx *executioncontext.ExecutionContext
 
 	ctx.Logger.Debug("Updating evaluation job", "id", evaluationJobID, "state", status.BenchmarkStatusEvent.Status, "status", status)
 
-	var previousState api.OverallState
-
 	_ = h.withSpan(
 		ctx,
 		func(runtimeCtx context.Context) error {
 			scoped := storage.WithContext(runtimeCtx)
-			job, jobErr := scoped.GetEvaluationJob(evaluationJobID)
-			if jobErr == nil && job != nil && job.Status != nil {
-				previousState = job.Status.State
-			}
+
+			// Read the job before the update for sidecar URL rewriting and phase
+			// notifications. This is NOT used for the previousState guard — that
+			// state is captured atomically inside the SQL transaction to prevent
+			// race conditions in concurrent benchmark completions.
+			job, _ := scoped.GetEvaluationJob(evaluationJobID)
 			if status.BenchmarkStatusEvent != nil {
 				h.rewriteSidecarURLsInBenchmarkStatus(status.BenchmarkStatusEvent, job, ctx.Logger)
 			}
@@ -606,7 +600,7 @@ func (h *Handlers) HandleUpdateEvaluation(ctx *executioncontext.ExecutionContext
 				status.BenchmarkStatusEvent.JobMeta = nil // metadata, not benchmark state
 			}
 
-			err = scoped.UpdateEvaluationJob(evaluationJobID, status)
+			previousState, err := scoped.UpdateEvaluationJob(evaluationJobID, status)
 			if err != nil {
 				w.Error(err, ctx.RequestID)
 				return err

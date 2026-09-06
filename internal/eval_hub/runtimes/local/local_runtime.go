@@ -434,7 +434,7 @@ func (r *LocalRuntime) failBenchmark(
 			}, api.MessageOriginServer),
 		},
 	}
-	if updateErr := storage.UpdateEvaluationJob(jobID, runStatus); updateErr != nil {
+	if _, updateErr := storage.UpdateEvaluationJob(jobID, runStatus); updateErr != nil {
 		r.logger.Error(
 			"failed to update benchmark status",
 			"error", updateErr,

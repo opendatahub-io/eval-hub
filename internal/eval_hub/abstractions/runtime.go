@@ -18,7 +18,7 @@ import (
 // this will shortcut certain checks that are needed for the operation to be successful.
 type RuntimeStorage interface {
 	GetProvider(id string) (*api.ProviderResource, error)
-	UpdateEvaluationJob(id string, runStatus *api.StatusEvent) error
+	UpdateEvaluationJob(id string, runStatus *api.StatusEvent) (api.OverallState, error)
 }
 
 type Runtime interface {
