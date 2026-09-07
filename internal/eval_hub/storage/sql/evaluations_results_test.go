@@ -244,3 +244,60 @@ func TestComputeBenchmarkTestResult_MissingPrimaryMetricReturnsNil(t *testing.T)
 		t.Fatalf("expected nil when primary metric is missing from metrics, got %+v", result)
 	}
 }
+
+func TestComputeBenchmarkTestResult_DuplicateBenchmarkIDs(t *testing.T) {
+	t.Parallel()
+	s := testResultsStorage()
+	job := &api.EvaluationJobResource{
+		EvaluationJobConfig: api.EvaluationJobConfig{
+			Benchmarks: []api.EvaluationBenchmarkConfig{
+				{
+					Ref:          api.Ref{ID: "arc_easy"},
+					ProviderID:   "lighteval",
+					PrimaryScore: &api.PrimaryScore{Metric: "arc_easy.em"},
+					PassCriteria: &api.PassCriteria{Threshold: threshold32(0.5)},
+				},
+				{
+					Ref:          api.Ref{ID: "arc_easy"},
+					ProviderID:   "lighteval",
+					PrimaryScore: &api.PrimaryScore{Metric: "arc_easy.em"},
+					PassCriteria: &api.PassCriteria{Threshold: threshold32(0.9)},
+				},
+			},
+		},
+	}
+
+	event0 := &api.BenchmarkStatusEvent{
+		ID:             "arc_easy",
+		ProviderID:     "lighteval",
+		BenchmarkIndex: 0,
+		Metrics:        map[string]any{"arc_easy.em": float64(0.7)},
+	}
+	result0 := s.computeBenchmarkTestResult(nil, job, event0, nil)
+	if result0 == nil {
+		t.Fatal("expected non-nil result for benchmark index 0")
+	}
+	if !result0.Pass {
+		t.Errorf("index 0: expected Pass=true (0.7 >= 0.5 threshold)")
+	}
+	if result0.Threshold != 0.5 {
+		t.Errorf("index 0: Threshold = %v, want 0.5", result0.Threshold)
+	}
+
+	event1 := &api.BenchmarkStatusEvent{
+		ID:             "arc_easy",
+		ProviderID:     "lighteval",
+		BenchmarkIndex: 1,
+		Metrics:        map[string]any{"arc_easy.em": float64(0.7)},
+	}
+	result1 := s.computeBenchmarkTestResult(nil, job, event1, nil)
+	if result1 == nil {
+		t.Fatal("expected non-nil result for benchmark index 1")
+	}
+	if result1.Pass {
+		t.Errorf("index 1: expected Pass=false (0.7 < 0.9 threshold)")
+	}
+	if result1.Threshold != 0.9 {
+		t.Errorf("index 1: Threshold = %v, want 0.9", result1.Threshold)
+	}
+}
