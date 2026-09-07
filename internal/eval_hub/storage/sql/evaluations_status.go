@@ -432,10 +432,20 @@ func stampCollectionOverrideSHA(ref *api.CollectionRef, collection *api.Collecti
 		}
 	}
 
-	// No matching override exists; create a minimal one.
+	// No matching override exists; create one carrying the collection benchmark's
+	// full TestDataRef (S3/Git/PVC source info) so that subsequent merges via
+	// GetJobBenchmarks do not lose the source reference.
+	var tdr *api.TestDataRef
+	if target.TestDataRef != nil {
+		cp := *target.TestDataRef
+		cp.ResolvedSHA = sha
+		tdr = &cp
+	} else {
+		tdr = &api.TestDataRef{ResolvedSHA: sha}
+	}
 	ref.Benchmarks = append(ref.Benchmarks, api.EvaluationBenchmarkConfig{
 		Ref:         api.Ref{ID: target.ID},
 		ProviderID:  target.ProviderID,
-		TestDataRef: &api.TestDataRef{ResolvedSHA: sha},
+		TestDataRef: tdr,
 	})
 }
