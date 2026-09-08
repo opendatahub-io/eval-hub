@@ -163,6 +163,13 @@ func (tc *scenarioConfig) iFetchMLflowArtifactByExperimentAndJob(artifactName, e
 		return err
 	}
 
+	// Allow time for asynchronous eval card generation to complete after the
+	// job status transitions to Completed. Without this delay the artifact
+	// fetch can race ahead of the card writer and fail intermittently.
+	const evalCardSettleDelay = 3 * time.Second
+	tc.logDebug("Waiting %v for eval card generation to settle before fetching artifact\n", evalCardSettleDelay)
+	time.Sleep(evalCardSettleDelay)
+
 	runID, err := tc.findMLflowRunIDForJob(experimentIDResolved, jobIDResolved)
 	if err != nil {
 		return err
