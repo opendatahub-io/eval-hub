@@ -70,6 +70,8 @@ const (
 	serviceCABundleFile             = "service-ca.crt"
 	envMLFlowCertPathName           = "MLFLOW_TRACKING_SERVER_CERT_PATH"
 	envEvalHubModeName              = "EVALHUB_MODE"
+	envHFHubOfflineName             = "HF_HUB_OFFLINE"
+	envTransformersOfflineName      = "TRANSFORMERS_OFFLINE"
 	envTestDataS3BucketName         = "TEST_DATA_S3_BUCKET"
 	envTestDataS3KeyName            = "TEST_DATA_S3_KEY"
 	envTestDataGitURLName           = "TEST_DATA_GIT_URL"
