@@ -352,6 +352,93 @@ func TestBuildEnvVarsMLFlowCertPathMatchesSidecarResolution(t *testing.T) {
 	})
 }
 
+func TestBuildEnvVarsDisconnectedModeInjectsOfflineVars(t *testing.T) {
+	base := &jobConfig{
+		jobID:          "job-disconnected",
+		resourceGUID:   "guid-disconnected",
+		benchmarkIndex: 0,
+		namespace:      "default",
+		providerID:     "provider-1",
+		benchmarkID:    "bench-1",
+		adapterImage:   "adapter:latest",
+		defaultEnv:     []api.EnvVar{},
+	}
+
+	t.Run("sets HF_HUB_OFFLINE and TRANSFORMERS_OFFLINE when disconnected", func(t *testing.T) {
+		cfg := *base
+		serviceConfig := &config.Config{
+			Service: &config.ServiceConfig{DisconnectedMode: true},
+		}
+		job, err := buildJob(&cfg, serviceConfig)
+		if err != nil {
+			t.Fatalf("buildJob: %v", err)
+		}
+		adapter := job.Spec.Template.Spec.Containers[0]
+		hfOffline := envValue(adapter.Env, "HF_HUB_OFFLINE")
+		if hfOffline != "1" {
+			t.Fatalf("HF_HUB_OFFLINE = %q, want \"1\"", hfOffline)
+		}
+		transformersOffline := envValue(adapter.Env, "TRANSFORMERS_OFFLINE")
+		if transformersOffline != "1" {
+			t.Fatalf("TRANSFORMERS_OFFLINE = %q, want \"1\"", transformersOffline)
+		}
+	})
+
+	t.Run("does not set offline vars when not disconnected", func(t *testing.T) {
+		cfg := *base
+		serviceConfig := &config.Config{
+			Service: &config.ServiceConfig{DisconnectedMode: false},
+		}
+		job, err := buildJob(&cfg, serviceConfig)
+		if err != nil {
+			t.Fatalf("buildJob: %v", err)
+		}
+		adapter := job.Spec.Template.Spec.Containers[0]
+		if hfOffline := envValue(adapter.Env, "HF_HUB_OFFLINE"); hfOffline != "" {
+			t.Fatalf("HF_HUB_OFFLINE = %q, want absent", hfOffline)
+		}
+		if transformersOffline := envValue(adapter.Env, "TRANSFORMERS_OFFLINE"); transformersOffline != "" {
+			t.Fatalf("TRANSFORMERS_OFFLINE = %q, want absent", transformersOffline)
+		}
+	})
+
+	t.Run("does not set offline vars when service config is nil", func(t *testing.T) {
+		cfg := *base
+		job, err := buildJob(&cfg, nil)
+		if err != nil {
+			t.Fatalf("buildJob: %v", err)
+		}
+		adapter := job.Spec.Template.Spec.Containers[0]
+		if hfOffline := envValue(adapter.Env, "HF_HUB_OFFLINE"); hfOffline != "" {
+			t.Fatalf("HF_HUB_OFFLINE = %q, want absent", hfOffline)
+		}
+	})
+
+	t.Run("provider env does not override disconnected vars", func(t *testing.T) {
+		cfg := *base
+		cfg.defaultEnv = []api.EnvVar{
+			{Name: "HF_HUB_OFFLINE", Value: "0"},
+			{Name: "TRANSFORMERS_OFFLINE", Value: "0"},
+		}
+		serviceConfig := &config.Config{
+			Service: &config.ServiceConfig{DisconnectedMode: true},
+		}
+		job, err := buildJob(&cfg, serviceConfig)
+		if err != nil {
+			t.Fatalf("buildJob: %v", err)
+		}
+		adapter := job.Spec.Template.Spec.Containers[0]
+		hfOffline := envValue(adapter.Env, "HF_HUB_OFFLINE")
+		if hfOffline != "1" {
+			t.Fatalf("HF_HUB_OFFLINE = %q, want \"1\" (disconnected should win)", hfOffline)
+		}
+		transformersOffline := envValue(adapter.Env, "TRANSFORMERS_OFFLINE")
+		if transformersOffline != "1" {
+			t.Fatalf("TRANSFORMERS_OFFLINE = %q, want \"1\" (disconnected should win)", transformersOffline)
+		}
+	})
+}
+
 func envValue(env []corev1.EnvVar, name string) string {
 	for _, e := range env {
 		if e.Name == name {

@@ -16,17 +16,18 @@ const DefaultMaxLogResponseBytes int64 = 50 << 20 // 50 MiB
 const DefaultLogStreamTimeout = 5 * time.Minute
 
 type ServiceConfig struct {
-	Version         string `mapstructure:"version,omitempty"`
-	Build           string `mapstructure:"build,omitempty"`
-	BuildDate       string `mapstructure:"build_date,omitempty"`
-	GitHash         string `mapstructure:"git_hash,omitempty"`
-	Port            int    `mapstructure:"port,omitempty"`
-	Host            string `mapstructure:"host,omitempty"`
-	TerminationFile string `mapstructure:"termination_file"`
-	EvalInitImage   string `mapstructure:"eval_init_image,omitempty"`
-	LocalMode       bool   `mapstructure:"local_mode,omitempty"`
-	TLSCertFile     string `mapstructure:"tls_cert_file,omitempty"`
-	TLSKeyFile      string `mapstructure:"tls_key_file,omitempty"`
+	Version          string `mapstructure:"version,omitempty"`
+	Build            string `mapstructure:"build,omitempty"`
+	BuildDate        string `mapstructure:"build_date,omitempty"`
+	GitHash          string `mapstructure:"git_hash,omitempty"`
+	Port             int    `mapstructure:"port,omitempty"`
+	Host             string `mapstructure:"host,omitempty"`
+	TerminationFile  string `mapstructure:"termination_file"`
+	EvalInitImage    string `mapstructure:"eval_init_image,omitempty"`
+	LocalMode        bool   `mapstructure:"local_mode,omitempty"`
+	DisconnectedMode bool   `mapstructure:"disconnected_mode,omitempty"`
+	TLSCertFile      string `mapstructure:"tls_cert_file,omitempty"`
+	TLSKeyFile       string `mapstructure:"tls_key_file,omitempty"`
 	// ReadTimeout is http.Server ReadTimeout (entire request read). Zero uses default (15s).
 	ReadTimeout time.Duration `mapstructure:"read_timeout,omitempty"`
 	// WriteTimeout is http.Server WriteTimeout. Zero uses default (15s).

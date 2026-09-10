@@ -51,3 +51,10 @@ func (c *Config) IsPrometheusEnabled() bool {
 func (c *Config) RequiresIdentityHeaders() bool {
 	return (c != nil) && (c.Service != nil) && !c.Service.LocalMode
 }
+
+// IsDisconnected reports whether the service is running in disconnected (air-gapped) mode.
+// When true, eval job pods receive HF_HUB_OFFLINE=1 and TRANSFORMERS_OFFLINE=1 so that
+// the HuggingFace transformers library does not attempt external downloads.
+func (c *Config) IsDisconnected() bool {
+	return (c != nil) && (c.Service != nil) && c.Service.DisconnectedMode
+}

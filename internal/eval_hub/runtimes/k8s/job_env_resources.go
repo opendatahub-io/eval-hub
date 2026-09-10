@@ -102,6 +102,23 @@ func buildEnvVars(jc *jobConfig, serviceConfig *config.Config) []corev1.EnvVar {
 		}
 	}
 
+	// When running on a disconnected (air-gapped) cluster, set HF_HUB_OFFLINE and
+	// TRANSFORMERS_OFFLINE so the HuggingFace transformers library uses cached/bundled
+	// tokenizer files instead of attempting downloads from huggingface.co.
+	if serviceConfig.IsDisconnected() {
+		env = append(env, corev1.EnvVar{
+			Name:  envHFHubOfflineName,
+			Value: "1",
+		})
+		seen[envHFHubOfflineName] = true
+
+		env = append(env, corev1.EnvVar{
+			Name:  envTransformersOfflineName,
+			Value: "1",
+		})
+		seen[envTransformersOfflineName] = true
+	}
+
 	// Add provider-specific environment variables
 	for _, item := range jc.defaultEnv {
 		if item.Name == "" || seen[item.Name] {

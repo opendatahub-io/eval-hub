@@ -32,6 +32,7 @@ env_mappings:
   METRICS_PORT: prometheus.port
   METRICS_HOST: prometheus.host
   OTEL_METRIC_EXPORT_INTERVAL: otel.metric_export_interval
+  EVALHUB_DISCONNECTED_MODE: service.disconnected_mode
 
 # Database configuration
 database:
