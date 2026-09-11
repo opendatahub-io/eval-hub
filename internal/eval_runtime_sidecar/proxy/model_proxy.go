@@ -2,11 +2,12 @@ package proxy
 
 import (
 	"bytes"
+	"crypto/rand"
 	"fmt"
 	"io"
 	"io/fs"
 	"log/slog"
-	"math/rand/v2"
+	"math/big"
 	"net/http"
 	"net/http/httputil"
 	"net/url"
@@ -212,7 +213,9 @@ func (t *modelRoundTripper) RoundTrip(req *http.Request) (*http.Response, error)
 	for attempt := 0; attempt <= t.maxRetries; attempt++ {
 		if attempt > 0 {
 			baseDelay := time.Duration(1<<(attempt-1)) * t.retryDelay
-			delay := baseDelay/2 + time.Duration(rand.Int64N(int64(baseDelay/2)+1))
+			halfBase := int64(baseDelay / 2)
+			jitter, _ := rand.Int(rand.Reader, big.NewInt(halfBase+1))
+			delay := baseDelay/2 + time.Duration(jitter.Int64())
 			reqLog.Warn("Retrying model request", "attempt", attempt+1, "delay", delay)
 
 			timer := time.NewTimer(delay)
