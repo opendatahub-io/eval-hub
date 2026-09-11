@@ -1,7 +1,9 @@
 package proxy
 
 import (
+	"bytes"
 	"fmt"
+	"io"
 	"io/fs"
 	"log/slog"
 	"net/http"
@@ -10,8 +12,14 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"time"
 
 	"github.com/google/uuid"
+)
+
+const (
+	modelProxyMaxRetries = 3
+	modelProxyRetryDelay = 500 * time.Millisecond
 )
 
 // modelRefSuffix is the value suffix that signals credential injection.
@@ -89,8 +97,10 @@ func NewModelReverseProxy(defaultTarget *url.URL, client *http.Client, logger *s
 
 	rp := &httputil.ReverseProxy{
 		Transport: &modelRoundTripper{
-			inner:  &roundTripperFromClient{client: client},
-			logger: logger,
+			inner:      &roundTripperFromClient{client: client},
+			logger:     logger,
+			maxRetries: modelProxyMaxRetries,
+			retryDelay: modelProxyRetryDelay,
 		},
 	}
 
@@ -167,11 +177,14 @@ func NewModelReverseProxy(defaultTarget *url.URL, client *http.Client, logger *s
 	return rp
 }
 
-// modelRoundTripper wraps an inner RoundTripper and intercepts requests marked with the
-// xModelAuthError sentinel header, returning 400 Bad Request without forwarding.
+// modelRoundTripper wraps an inner RoundTripper, intercepts requests marked with the
+// xModelAuthError sentinel header (returning 400), and retries on 5xx responses and
+// network errors with exponential backoff.
 type modelRoundTripper struct {
-	inner  http.RoundTripper
-	logger *slog.Logger
+	inner      http.RoundTripper
+	logger     *slog.Logger
+	maxRetries int
+	retryDelay time.Duration
 }
 
 func (t *modelRoundTripper) RoundTrip(req *http.Request) (*http.Response, error) {
@@ -181,7 +194,65 @@ func (t *modelRoundTripper) RoundTrip(req *http.Request) (*http.Response, error)
 			"request_id", getOrCreateRequestID(req), "error", errMsg)
 		return newSyntheticResponse(req, http.StatusBadRequest, strings.NewReader(errMsg+"\n")), nil
 	}
-	return t.inner.RoundTrip(req)
+
+	var bodyBytes []byte
+	if req.Body != nil {
+		var err error
+		bodyBytes, err = io.ReadAll(req.Body)
+		_ = req.Body.Close()
+		if err != nil {
+			return nil, fmt.Errorf("failed to buffer request body for retry: %w", err)
+		}
+	}
+
+	reqLog := loggerForRequest(t.logger, req)
+	var lastErr error
+
+	for attempt := 0; attempt <= t.maxRetries; attempt++ {
+		if attempt > 0 {
+			delay := time.Duration(1<<(attempt-1)) * t.retryDelay
+			reqLog.Warn("Retrying model request", "attempt", attempt+1, "delay", delay)
+
+			timer := time.NewTimer(delay)
+			select {
+			case <-req.Context().Done():
+				timer.Stop()
+				return nil, req.Context().Err()
+			case <-timer.C:
+			}
+		}
+
+		if bodyBytes != nil {
+			req.Body = io.NopCloser(bytes.NewReader(bodyBytes))
+			req.ContentLength = int64(len(bodyBytes))
+		} else {
+			req.Body = http.NoBody
+			req.ContentLength = 0
+		}
+
+		resp, err := t.inner.RoundTrip(req)
+		if err != nil {
+			lastErr = err
+			if attempt < t.maxRetries {
+				reqLog.Warn("Model request failed, will retry", "attempt", attempt+1, "error", err)
+				continue
+			}
+			return nil, err
+		}
+
+		if resp.StatusCode >= 500 && attempt < t.maxRetries {
+			reqLog.Warn("Model endpoint returned server error, will retry",
+				"attempt", attempt+1, "status", resp.StatusCode)
+			_, _ = io.Copy(io.Discard, resp.Body)
+			_ = resp.Body.Close()
+			lastErr = fmt.Errorf("model endpoint returned HTTP %d", resp.StatusCode)
+			continue
+		}
+
+		return resp, nil
+	}
+
+	return nil, lastErr
 }
 
 // isModelRefToken reports whether authHeader is a Bearer ref token.

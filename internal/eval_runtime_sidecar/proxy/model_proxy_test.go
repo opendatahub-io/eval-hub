@@ -760,6 +760,83 @@ func TestModelProxyExplicitEmptyTokenPrefixOnHTTPS(t *testing.T) {
 	}
 }
 
+func TestModelProxyRetriesOn5xxThenSucceeds(t *testing.T) {
+	var attempts int
+	var lastBody string
+	target, client := startModelTestUpstream(t, func(w http.ResponseWriter, r *http.Request) {
+		attempts++
+		body, _ := io.ReadAll(r.Body)
+		lastBody = string(body)
+		if attempts <= 2 {
+			w.WriteHeader(http.StatusInternalServerError)
+			return
+		}
+		w.WriteHeader(http.StatusOK)
+	}, false)
+
+	var logBuf bytes.Buffer
+	log := slog.New(slog.NewTextHandler(&logBuf, &slog.HandlerOptions{Level: slog.LevelWarn}))
+
+	rp := NewModelReverseProxy(target, client, log, t.TempDir(), "")
+
+	req := httptest.NewRequest(http.MethodPost, "/v1/completions", strings.NewReader(`{"prompt":"hello"}`))
+	rr := httptest.NewRecorder()
+	rp.ServeHTTP(rr, req)
+
+	if rr.Code != http.StatusOK {
+		t.Fatalf("expected 200 after retries, got %d", rr.Code)
+	}
+	if attempts != 3 {
+		t.Fatalf("expected 3 attempts, got %d", attempts)
+	}
+	if lastBody != `{"prompt":"hello"}` {
+		t.Fatalf("expected request body replayed on retry, got %q", lastBody)
+	}
+	if !strings.Contains(logBuf.String(), "will retry") {
+		t.Fatalf("logs = %q, want retry log", logBuf.String())
+	}
+}
+
+func TestModelProxyExhaustsRetriesOn5xx(t *testing.T) {
+	var attempts int
+	target, client := startModelTestUpstream(t, func(w http.ResponseWriter, _ *http.Request) {
+		attempts++
+		w.WriteHeader(http.StatusInternalServerError)
+	}, false)
+
+	rp := NewModelReverseProxy(target, client, slog.New(slog.NewTextHandler(io.Discard, nil)), t.TempDir(), "")
+
+	req := httptest.NewRequest(http.MethodPost, "/v1/completions", nil)
+	rr := httptest.NewRecorder()
+	rp.ServeHTTP(rr, req)
+
+	// After exhausting retries, the last 5xx response is returned via the proxy error handler.
+	if attempts != 4 { // 1 initial + 3 retries
+		t.Fatalf("expected 4 attempts (1 + 3 retries), got %d", attempts)
+	}
+}
+
+func TestModelProxyNoRetryOn4xx(t *testing.T) {
+	var attempts int
+	target, client := startModelTestUpstream(t, func(w http.ResponseWriter, _ *http.Request) {
+		attempts++
+		w.WriteHeader(http.StatusBadRequest)
+	}, false)
+
+	rp := NewModelReverseProxy(target, client, slog.New(slog.NewTextHandler(io.Discard, nil)), t.TempDir(), "")
+
+	req := httptest.NewRequest(http.MethodPost, "/v1/completions", nil)
+	rr := httptest.NewRecorder()
+	rp.ServeHTTP(rr, req)
+
+	if attempts != 1 {
+		t.Fatalf("expected 1 attempt (no retry on 4xx), got %d", attempts)
+	}
+	if rr.Code != http.StatusBadRequest {
+		t.Fatalf("expected 400, got %d", rr.Code)
+	}
+}
+
 func TestModelProxySATokenUnavailableOnHTTPS(t *testing.T) {
 	var gotAuth string
 	var logBuf bytes.Buffer
