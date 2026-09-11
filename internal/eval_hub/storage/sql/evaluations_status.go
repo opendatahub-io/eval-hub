@@ -337,10 +337,10 @@ func (s *sqlStorage) UpdateEvaluationJob(id string, runStatus *api.StatusEvent) 
 }
 
 // UpdateEvaluationJobResolvedSHA records the resolved test-data identity on the benchmark at
-// benchmarkIndex as TestDataRef.ResolvedSHA. It stamps the effective benchmark list from
-// GetJobBenchmarks (collection definition merged with job overrides, or job.Benchmarks for
-// direct jobs). For collection jobs the stamped list is written back to job.Collection.Benchmarks
-// so the SHA persists on the job entity. Idempotent: if the SHA is already set the call is a no-op.
+// benchmarkIndex as TestDataRef.ResolvedSHA. For non-collection jobs it stamps directly on
+// job.Benchmarks. For collection jobs it stamps the SHA on the corresponding collection
+// override entry so the SHA persists on the job entity without replacing the override list
+// with resolved benchmarks. Idempotent: if the SHA is already set the call is a no-op.
 func (s *sqlStorage) UpdateEvaluationJobResolvedSHA(id string, benchmarkIndex int, sha string) error {
 	if sha == "" {
 		return nil
@@ -354,22 +354,6 @@ func (s *sqlStorage) UpdateEvaluationJobResolvedSHA(id string, benchmarkIndex in
 			return err
 		}
 
-		stamp := func(benchmarks []api.EvaluationBenchmarkConfig, sliceName string) bool {
-			if benchmarkIndex < 0 || benchmarkIndex >= len(benchmarks) {
-				return false
-			}
-			b := &benchmarks[benchmarkIndex]
-			if b.TestDataRef == nil {
-				return false
-			}
-			if b.TestDataRef.ResolvedSHA != "" {
-				s.logger.Info("Resolved SHA already set on benchmark; skipping", "id", id, "slice", sliceName, "benchmark_index", benchmarkIndex)
-				return false
-			}
-			b.TestDataRef.ResolvedSHA = sha
-			return true
-		}
-
 		var collection *api.CollectionResource
 		if job.Collection != nil && job.Collection.ID != "" {
 			collection, err = s.getCollectionTransactional(txn, job.Collection.ID)
@@ -381,21 +365,87 @@ func (s *sqlStorage) UpdateEvaluationJobResolvedSHA(id string, benchmarkIndex in
 		if err != nil {
 			return err
 		}
-		updated := stamp(benchmarks, "effective")
-		if !updated {
-			s.logger.Info("Resolved SHA already set or benchmark has no test_data_ref; skipping update", "id", id, "benchmark_index", benchmarkIndex)
+		if benchmarkIndex < 0 || benchmarkIndex >= len(benchmarks) {
+			s.logger.Info("Benchmark index out of range; skipping SHA update", "id", id, "benchmark_index", benchmarkIndex)
 			return nil
 		}
-		// Materialize the effective list onto the job so collection-local TestDataRef
-		// (including ResolvedSHA) is stored with the job, not only on the shared collection.
-		if job.Collection != nil {
-			job.Collection.Benchmarks = benchmarks
+		resolved := benchmarks[benchmarkIndex]
+		if resolved.TestDataRef == nil {
+			s.logger.Info("Benchmark has no test_data_ref; skipping SHA update", "id", id, "benchmark_index", benchmarkIndex)
+			return nil
 		}
+		if resolved.TestDataRef.ResolvedSHA != "" {
+			s.logger.Info("Resolved SHA already set on benchmark; skipping", "id", id, "benchmark_index", benchmarkIndex)
+			return nil
+		}
+
+		if job.Collection != nil && job.Collection.ID != "" {
+			// Stamp the SHA on the corresponding collection override entry
+			// rather than replacing the entire override list with resolved benchmarks.
+			stampCollectionOverrideSHA(job.Collection, collection, benchmarkIndex, sha)
+		} else {
+			// Non-collection job: stamp directly on job.Benchmarks.
+			if benchmarkIndex < len(job.Benchmarks) && job.Benchmarks[benchmarkIndex].TestDataRef != nil {
+				job.Benchmarks[benchmarkIndex].TestDataRef.ResolvedSHA = sha
+			}
+		}
+
 		entity := EvaluationJobEntity{
 			Config:  &job.EvaluationJobConfig,
 			Status:  job.Status,
 			Results: job.Results,
 		}
 		return s.updateEvaluationJobTxn(txn, id, job.Status.State, &entity)
+	})
+}
+
+// stampCollectionOverrideSHA finds or creates the collection override entry for the
+// benchmark at collectionIndex and stamps the resolved SHA on it.
+func stampCollectionOverrideSHA(ref *api.CollectionRef, collection *api.CollectionResource, collectionIndex int, sha string) {
+	if collection == nil || collectionIndex < 0 || collectionIndex >= len(collection.Benchmarks) {
+		return
+	}
+	target := collection.Benchmarks[collectionIndex]
+
+	// Count how many earlier collection benchmarks share the same (ID, ProviderID)
+	// to determine which occurrence this benchmark is.
+	occurrence := 0
+	for i := 0; i < collectionIndex; i++ {
+		if collection.Benchmarks[i].ID == target.ID && collection.Benchmarks[i].ProviderID == target.ProviderID {
+			occurrence++
+		}
+	}
+
+	// Find the matching override using occurrence-based disambiguation.
+	seen := 0
+	for i := range ref.Benchmarks {
+		override := &ref.Benchmarks[i]
+		if override.ID == target.ID && override.ProviderID == target.ProviderID {
+			if seen == occurrence {
+				if override.TestDataRef == nil {
+					override.TestDataRef = &api.TestDataRef{}
+				}
+				override.TestDataRef.ResolvedSHA = sha
+				return
+			}
+			seen++
+		}
+	}
+
+	// No matching override exists; create one carrying the collection benchmark's
+	// full TestDataRef (S3/Git/PVC source info) so that subsequent merges via
+	// GetJobBenchmarks do not lose the source reference.
+	var tdr *api.TestDataRef
+	if target.TestDataRef != nil {
+		cp := *target.TestDataRef
+		cp.ResolvedSHA = sha
+		tdr = &cp
+	} else {
+		tdr = &api.TestDataRef{ResolvedSHA: sha}
+	}
+	ref.Benchmarks = append(ref.Benchmarks, api.EvaluationBenchmarkConfig{
+		Ref:         api.Ref{ID: target.ID},
+		ProviderID:  target.ProviderID,
+		TestDataRef: tdr,
 	})
 }

@@ -21,7 +21,7 @@ func TestMergeBenchmarkParameters(t *testing.T) {
 			Weight:     0.5,
 			Parameters: map[string]any{"k1": "v1", "k2": float64(2)},
 		}
-		got := mergeBenchmarkParameters(benchmark, nil)
+		got := mergeBenchmarkParameters(benchmark, nil, 0)
 		if !reflect.DeepEqual(got.Parameters, benchmark.Parameters) {
 			t.Fatalf("Parameters = %#v, want %#v", got.Parameters, benchmark.Parameters)
 		}
@@ -41,7 +41,7 @@ func TestMergeBenchmarkParameters(t *testing.T) {
 			ProviderID: "prov-a",
 			Parameters: map[string]any{"from_job": "y"},
 		}}
-		got := mergeBenchmarkParameters(benchmark, job)
+		got := mergeBenchmarkParameters(benchmark, job, 0)
 		want := map[string]any{"from_collection": "x", "from_job": "y"}
 		if !reflect.DeepEqual(got.Parameters, want) {
 			t.Fatalf("Parameters = %#v, want %#v", got.Parameters, want)
@@ -58,7 +58,7 @@ func TestMergeBenchmarkParameters(t *testing.T) {
 			ProviderID: "prov-a",
 			Parameters: map[string]any{"k": "from_job"},
 		}}
-		got := mergeBenchmarkParameters(benchmark, job)
+		got := mergeBenchmarkParameters(benchmark, job, 0)
 		if got.Parameters["k"] != "from_collection" {
 			t.Fatalf("k = %v, want from_collection", got.Parameters["k"])
 		}
@@ -74,7 +74,7 @@ func TestMergeBenchmarkParameters(t *testing.T) {
 			ProviderID: "prov-a",
 			Parameters: map[string]any{"k": "job_val", "other": "keep"},
 		}}
-		got := mergeBenchmarkParameters(benchmark, job)
+		got := mergeBenchmarkParameters(benchmark, job, 0)
 		want := map[string]any{"other": "keep"}
 		if !reflect.DeepEqual(got.Parameters, want) {
 			t.Fatalf("Parameters = %#v, want %#v", got.Parameters, want)
@@ -91,7 +91,7 @@ func TestMergeBenchmarkParameters(t *testing.T) {
 			ProviderID: "prov-a",
 			Parameters: map[string]any{"k": "job_val"},
 		}}
-		got := mergeBenchmarkParameters(benchmark, job)
+		got := mergeBenchmarkParameters(benchmark, job, 0)
 		if _, ok := got.Parameters["k"]; ok {
 			t.Fatalf("expected k removed, got %#v", got.Parameters)
 		}
@@ -107,7 +107,7 @@ func TestMergeBenchmarkParameters(t *testing.T) {
 			ProviderID: "prov-a",
 			Parameters: map[string]any{"noise": true},
 		}}
-		got := mergeBenchmarkParameters(benchmark, job)
+		got := mergeBenchmarkParameters(benchmark, job, 0)
 		if !reflect.DeepEqual(got.Parameters, benchmark.Parameters) {
 			t.Fatalf("Parameters = %#v, want %#v", got.Parameters, benchmark.Parameters)
 		}
@@ -126,7 +126,7 @@ func TestMergeBenchmarkParameters(t *testing.T) {
 				HardwareProfileName: "default-profile",
 			},
 		}}
-		got := mergeBenchmarkParameters(benchmark, job)
+		got := mergeBenchmarkParameters(benchmark, job, 0)
 		if got.HardwareConfig == nil {
 			t.Fatal("expected hardware_config from collection override")
 		}
@@ -147,7 +147,7 @@ func TestMergeBenchmarkParameters(t *testing.T) {
 				HardwareProfileName: "shared-profile",
 			},
 		}}
-		got := mergeBenchmarkParameters(benchmark, job)
+		got := mergeBenchmarkParameters(benchmark, job, 0)
 		if got.HardwareConfig == nil {
 			t.Fatal("expected provider-level hardware_config")
 		}
@@ -166,7 +166,7 @@ func TestMergeBenchmarkParameters(t *testing.T) {
 			{ProviderID: "prov-a", Parameters: map[string]any{"first": 1, "dup": "first"}},
 			{ProviderID: "prov-a", Parameters: map[string]any{"second": 2, "dup": "second"}},
 		}
-		got := mergeBenchmarkParameters(benchmark, job)
+		got := mergeBenchmarkParameters(benchmark, job, 0)
 		want := map[string]any{
 			"first":  1,
 			"second": 2,
@@ -175,6 +175,49 @@ func TestMergeBenchmarkParameters(t *testing.T) {
 		}
 		if !reflect.DeepEqual(got.Parameters, want) {
 			t.Fatalf("Parameters = %#v, want %#v", got.Parameters, want)
+		}
+	})
+
+	t.Run("duplicate benchmark IDs use occurrence to select correct override", func(t *testing.T) {
+		t.Parallel()
+		benchmark := api.CollectionBenchmarkConfig{
+			Ref:        api.Ref{ID: "arc_easy"},
+			ProviderID: "prov-a",
+		}
+		job := []api.EvaluationBenchmarkConfig{
+			{Ref: api.Ref{ID: "arc_easy"}, ProviderID: "prov-a", Parameters: map[string]any{"num_examples": 5}},
+			{Ref: api.Ref{ID: "arc_easy"}, ProviderID: "prov-a", Parameters: map[string]any{"num_examples": 10}},
+		}
+		got0 := mergeBenchmarkParameters(benchmark, job, 0)
+		if got0.Parameters["num_examples"] != 5 {
+			t.Fatalf("occurrence 0: num_examples = %v, want 5", got0.Parameters["num_examples"])
+		}
+		got1 := mergeBenchmarkParameters(benchmark, job, 1)
+		if got1.Parameters["num_examples"] != 10 {
+			t.Fatalf("occurrence 1: num_examples = %v, want 10", got1.Parameters["num_examples"])
+		}
+	})
+
+	t.Run("duplicate benchmark IDs pick correct TestDataRef per occurrence", func(t *testing.T) {
+		t.Parallel()
+		benchmark := api.CollectionBenchmarkConfig{
+			Ref:        api.Ref{ID: "bench"},
+			ProviderID: "prov-a",
+			TestDataRef: &api.TestDataRef{
+				S3: &api.S3TestDataRef{Bucket: "default"},
+			},
+		}
+		job := []api.EvaluationBenchmarkConfig{
+			{Ref: api.Ref{ID: "bench"}, ProviderID: "prov-a", TestDataRef: &api.TestDataRef{S3: &api.S3TestDataRef{Bucket: "first"}}},
+			{Ref: api.Ref{ID: "bench"}, ProviderID: "prov-a", TestDataRef: &api.TestDataRef{S3: &api.S3TestDataRef{Bucket: "second"}}},
+		}
+		got0 := mergeBenchmarkParameters(benchmark, job, 0)
+		if got0.TestDataRef.S3.Bucket != "first" {
+			t.Fatalf("occurrence 0: bucket = %q, want first", got0.TestDataRef.S3.Bucket)
+		}
+		got1 := mergeBenchmarkParameters(benchmark, job, 1)
+		if got1.TestDataRef.S3.Bucket != "second" {
+			t.Fatalf("occurrence 1: bucket = %q, want second", got1.TestDataRef.S3.Bucket)
 		}
 	})
 }
@@ -309,6 +352,46 @@ func TestGetJobBenchmarks(t *testing.T) {
 		}
 		if got[0].ID != "a-ref" || got[1].ID != "b-ref" {
 			t.Fatalf("Refs = %+v, %+v", got[0].Ref, got[1].Ref)
+		}
+	})
+
+	t.Run("collection with duplicate benchmark IDs preserves separate parameters", func(t *testing.T) {
+		t.Parallel()
+		job := makeJob()
+		job.Collection = &api.CollectionRef{
+			ID: "col-dup",
+			Benchmarks: []api.EvaluationBenchmarkConfig{
+				{Ref: api.Ref{ID: "arc_easy"}, ProviderID: "prov-a", Parameters: map[string]any{"num_examples": 5, "tokenizer": "/path/a"}},
+				{Ref: api.Ref{ID: "arc_easy"}, ProviderID: "prov-a", Parameters: map[string]any{"num_examples": 10, "tokenizer": "/path/b"}},
+			},
+		}
+		collection := &api.CollectionResource{
+			Resource: api.Resource{ID: "col-dup"},
+			CollectionConfig: api.CollectionConfig{
+				Benchmarks: []api.CollectionBenchmarkConfig{
+					{Ref: api.Ref{ID: "arc_easy"}, ProviderID: "prov-a"},
+					{Ref: api.Ref{ID: "arc_easy"}, ProviderID: "prov-a"},
+				},
+			},
+		}
+		got, err := GetJobBenchmarks(job, collection)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if len(got) != 2 {
+			t.Fatalf("len = %d, want 2", len(got))
+		}
+		if got[0].Parameters["num_examples"] != 5 {
+			t.Fatalf("benchmark 0: num_examples = %v, want 5", got[0].Parameters["num_examples"])
+		}
+		if got[0].Parameters["tokenizer"] != "/path/a" {
+			t.Fatalf("benchmark 0: tokenizer = %v, want /path/a", got[0].Parameters["tokenizer"])
+		}
+		if got[1].Parameters["num_examples"] != 10 {
+			t.Fatalf("benchmark 1: num_examples = %v, want 10", got[1].Parameters["num_examples"])
+		}
+		if got[1].Parameters["tokenizer"] != "/path/b" {
+			t.Fatalf("benchmark 1: tokenizer = %v, want /path/b", got[1].Parameters["tokenizer"])
 		}
 	})
 }
