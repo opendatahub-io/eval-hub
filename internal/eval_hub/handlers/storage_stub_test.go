@@ -29,8 +29,8 @@ func (noopStorage) GetEvaluationJobs(_ *abstractions.QueryFilter) (*abstractions
 	return &abstractions.QueryResults[api.EvaluationJobResource]{}, nil
 }
 func (noopStorage) DeleteEvaluationJob(_ string) error { return nil }
-func (noopStorage) UpdateEvaluationJob(_ string, _ *api.StatusEvent) error {
-	return nil
+func (noopStorage) UpdateEvaluationJob(_ string, _ *api.StatusEvent) (api.OverallState, error) {
+	return "", nil
 }
 func (noopStorage) UpdateEvaluationJobStatus(_ string, _ api.OverallState, _ *api.MessageInfo) error {
 	return nil

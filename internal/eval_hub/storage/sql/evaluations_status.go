@@ -241,15 +241,20 @@ func (s *sqlStorage) updateBenchmarkStatus(job *api.EvaluationJobResource, runSt
 	job.Status.Benchmarks = append(job.Status.Benchmarks, *benchmarkStatus)
 }
 
-// UpdateEvaluationJobWithRunStatus runs in a transaction: fetches the job, merges RunStatusInternal into the entity, and persists.
-func (s *sqlStorage) UpdateEvaluationJob(id string, runStatus *api.StatusEvent) error {
-	return s.withTransaction("update evaluation job", id, func(txn *sql.Tx) error {
+// UpdateEvaluationJob runs in a transaction: fetches the job, merges the status event into the
+// entity, and persists. Returns the overall state the job had before this update (read inside the
+// transaction under the FOR UPDATE lock, so it is consistent with the write).
+func (s *sqlStorage) UpdateEvaluationJob(id string, runStatus *api.StatusEvent) (api.OverallState, error) {
+	var previousState api.OverallState
+	err := s.withTransaction("update evaluation job", id, func(txn *sql.Tx) error {
 		s.logger.Info("Updating evaluation job", "id", id, "status", runStatus.BenchmarkStatusEvent.Status, "runStatus", runStatus)
 
 		job, err := s.getEvaluationJobTransactionalForUpdate(txn, id)
 		if err != nil {
 			return err
 		}
+		previousState = job.Status.State
+
 		// Test hook: no-op unless a test installs a callback (see test_hooks.go).
 		invokeEvaluationJobUpdateAfterLockedReadHook(id, runStatus.BenchmarkStatusEvent.ID)
 
@@ -334,6 +339,7 @@ func (s *sqlStorage) UpdateEvaluationJob(id string, runStatus *api.StatusEvent) 
 
 		return nil
 	})
+	return previousState, err
 }
 
 // UpdateEvaluationJobResolvedSHA records the resolved test-data identity on the benchmark at
