@@ -37,7 +37,7 @@ type fakeStorage struct {
 	collectionConfigs map[string]api.CollectionResource
 }
 
-// UpdateEvaluationJob implements [abstractions.Storage].
+// UpdateEvaluationJob implements [abstractions.RuntimeStorage].
 func (f *fakeStorage) UpdateEvaluationJob(id string, runStatus *api.StatusEvent) error {
 	f.called = true
 	f.runStatus = runStatus
@@ -115,7 +115,7 @@ func (f *fakeStorage) LoadSystemResources(_ map[string]api.CollectionResource, _
 	return nil
 }
 
-func (f *fakeStorage) WithLogger(logger *slog.Logger) abstractions.Storage {
+func (f *fakeStorage) WithLogger(logger *slog.Logger) *fakeStorage {
 	return &fakeStorage{
 		logger:            logger,
 		ctx:               f.ctx,
@@ -128,7 +128,7 @@ func (f *fakeStorage) WithLogger(logger *slog.Logger) abstractions.Storage {
 	}
 }
 
-func (f *fakeStorage) WithContext(ctx context.Context) abstractions.Storage {
+func (f *fakeStorage) WithContext(ctx context.Context) *fakeStorage {
 	return &fakeStorage{
 		logger:            f.logger,
 		ctx:               ctx,
@@ -141,7 +141,7 @@ func (f *fakeStorage) WithContext(ctx context.Context) abstractions.Storage {
 	}
 }
 
-func (f *fakeStorage) WithTenant(tenant api.Tenant) abstractions.Storage {
+func (f *fakeStorage) WithTenant(tenant api.Tenant) *fakeStorage {
 	return &fakeStorage{
 		logger:            f.logger,
 		ctx:               f.ctx,
@@ -154,7 +154,7 @@ func (f *fakeStorage) WithTenant(tenant api.Tenant) abstractions.Storage {
 	}
 }
 
-func (f *fakeStorage) WithOwner(owner api.User) abstractions.Storage {
+func (f *fakeStorage) WithOwner(owner api.User) *fakeStorage {
 	return &fakeStorage{
 		logger:            f.logger,
 		ctx:               f.ctx,
@@ -1240,14 +1240,13 @@ func TestRunEvaluationJobMarksBenchmarkFailedOnCreateError(t *testing.T) {
 
 	statusCh := make(chan *api.StatusEvent, 1)
 	storage := &fakeStorage{logger: logger, ctx: context.Background(), runStatusChan: statusCh, providerConfigs: sampleProviders(providerID)}
-	var store abstractions.Storage = storage
 
 	benchmarks, err := handlers.GetJobBenchmarks(evaluation, nil)
 	if err != nil {
 		t.Fatalf("RunEvaluationJob failed to resolve benchmarks: %v", err)
 	}
 
-	if err := runtime.RunEvaluationJob(evaluation, benchmarks, store); err != nil {
+	if err := runtime.RunEvaluationJob(evaluation, benchmarks, storage); err != nil {
 		t.Fatalf("expected no error, got %v", err)
 	}
 
@@ -1305,14 +1304,13 @@ func TestRunEvaluationJobHandlesUpdateFailure(t *testing.T) {
 		updateErr:       fmt.Errorf("update failed"),
 		providerConfigs: sampleProviders(providerID),
 	}
-	var store abstractions.Storage = storage
 
 	benchmarks, err := handlers.GetJobBenchmarks(evaluation, nil)
 	if err != nil {
 		t.Fatalf("RunEvaluationJob failed to resolve benchmarks: %v", err)
 	}
 
-	if err := runtime.RunEvaluationJob(evaluation, benchmarks, store); err != nil {
+	if err := runtime.RunEvaluationJob(evaluation, benchmarks, storage); err != nil {
 		t.Fatalf("expected no error, got %v", err)
 	}
 
