@@ -10,7 +10,9 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"sync"
 	"testing"
+	"time"
 )
 
 func startModelTestUpstream(t *testing.T, handler http.HandlerFunc, useTLS bool) (*url.URL, *http.Client) {
@@ -813,6 +815,39 @@ func TestModelProxyExhaustsRetriesOn5xx(t *testing.T) {
 	// After exhausting retries, the last 5xx response is returned via the proxy error handler.
 	if attempts != 4 { // 1 initial + 3 retries
 		t.Fatalf("expected 4 attempts (1 + 3 retries), got %d", attempts)
+	}
+}
+
+func TestModelProxyRetryJitter(t *testing.T) {
+	var timestamps []time.Time
+	var mu sync.Mutex
+	target, client := startModelTestUpstream(t, func(w http.ResponseWriter, _ *http.Request) {
+		mu.Lock()
+		timestamps = append(timestamps, time.Now())
+		mu.Unlock()
+		w.WriteHeader(http.StatusInternalServerError)
+	}, false)
+
+	rp := NewModelReverseProxy(target, client, slog.New(slog.NewTextHandler(io.Discard, nil)), t.TempDir(), "")
+
+	req := httptest.NewRequest(http.MethodPost, "/v1/completions", nil)
+	rr := httptest.NewRecorder()
+	rp.ServeHTTP(rr, req)
+
+	if len(timestamps) != 4 {
+		t.Fatalf("expected 4 attempts, got %d", len(timestamps))
+	}
+	for i := 1; i < len(timestamps); i++ {
+		gap := timestamps[i].Sub(timestamps[i-1])
+		baseDelay := time.Duration(1<<(i-1)) * modelProxyRetryDelay
+		minDelay := baseDelay / 2
+		if gap < minDelay {
+			t.Errorf("attempt %d: gap %v < min jitter bound %v", i+1, gap, minDelay)
+		}
+		maxDelay := baseDelay + 50*time.Millisecond
+		if gap > maxDelay {
+			t.Errorf("attempt %d: gap %v > max expected %v", i+1, gap, maxDelay)
+		}
 	}
 }
 

@@ -6,6 +6,7 @@ import (
 	"io"
 	"io/fs"
 	"log/slog"
+	"math/rand/v2"
 	"net/http"
 	"net/http/httputil"
 	"net/url"
@@ -179,7 +180,7 @@ func NewModelReverseProxy(defaultTarget *url.URL, client *http.Client, logger *s
 
 // modelRoundTripper wraps an inner RoundTripper, intercepts requests marked with the
 // xModelAuthError sentinel header (returning 400), and retries on 5xx responses and
-// network errors with exponential backoff.
+// network errors with exponential backoff and jitter.
 type modelRoundTripper struct {
 	inner      http.RoundTripper
 	logger     *slog.Logger
@@ -210,7 +211,8 @@ func (t *modelRoundTripper) RoundTrip(req *http.Request) (*http.Response, error)
 
 	for attempt := 0; attempt <= t.maxRetries; attempt++ {
 		if attempt > 0 {
-			delay := time.Duration(1<<(attempt-1)) * t.retryDelay
+			baseDelay := time.Duration(1<<(attempt-1)) * t.retryDelay
+			delay := baseDelay/2 + time.Duration(rand.Int64N(int64(baseDelay/2)+1))
 			reqLog.Warn("Retrying model request", "attempt", attempt+1, "delay", delay)
 
 			timer := time.NewTimer(delay)
