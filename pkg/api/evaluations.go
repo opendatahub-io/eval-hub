@@ -186,12 +186,23 @@ type GitTestDataRef struct {
 	SecretRef string `json:"secret_ref,omitempty" mapstructure:"secret_ref,omitempty" validate:"omitempty,rfc1123_dns_label"`
 }
 
+// HFTestDataRef represents a Hugging Face Hub repository source for test data.
+// The repository (or sub_path within it) is downloaded into /test_data before the adapter runs.
+// SecretRef is optional for public repositories; gated resources require a Kubernetes Secret.
+type HFTestDataRef struct {
+	RepoID    string `json:"repo_id" mapstructure:"repo_id" validate:"required"`
+	Revision  string `json:"revision,omitempty" mapstructure:"revision,omitempty"`
+	SubPath   string `json:"sub_path,omitempty" mapstructure:"sub_path,omitempty"`
+	SecretRef string `json:"secret_ref,omitempty" mapstructure:"secret_ref,omitempty" validate:"omitempty,rfc1123_dns_label"`
+}
+
 // TestDataRef represents external test data sources.
-// Exactly one of s3, pvc, or git must be set.
+// Exactly one of s3, pvc, git, or hf must be set.
 type TestDataRef struct {
-	S3  *S3TestDataRef  `mapstructure:"s3" json:"s3,omitempty" validate:"required_without_all=PVC Git,excluded_with=PVC Git"`
-	PVC *PVCTestDataRef `mapstructure:"pvc" json:"pvc,omitempty" validate:"required_without_all=S3 Git,excluded_with=S3 Git"`
-	Git *GitTestDataRef `mapstructure:"git" json:"git,omitempty" validate:"required_without_all=S3 PVC,excluded_with=S3 PVC"`
+	S3  *S3TestDataRef  `mapstructure:"s3" json:"s3,omitempty" validate:"required_without_all=PVC Git HF,excluded_with=PVC Git HF"`
+	PVC *PVCTestDataRef `mapstructure:"pvc" json:"pvc,omitempty" validate:"required_without_all=S3 Git HF,excluded_with=S3 Git HF"`
+	Git *GitTestDataRef `mapstructure:"git" json:"git,omitempty" validate:"required_without_all=S3 PVC HF,excluded_with=S3 PVC HF"`
+	HF  *HFTestDataRef  `mapstructure:"hf" json:"hf,omitempty" validate:"required_without_all=S3 PVC Git,excluded_with=S3 PVC Git"`
 	// Type is the type of test data source.
 	// - data_set: a data set from a data set provider or user-provided data set
 	// - pre_recorded_data: pre-recorded data from a model
@@ -382,6 +393,15 @@ type EvaluationExports struct {
 type CollectionRef struct {
 	ID         string                      `mapstructure:"id" json:"id" validate:"required"`
 	Benchmarks []EvaluationBenchmarkConfig `json:"benchmarks,omitempty" validate:"omitempty,dive"`
+
+	// VersionCounter is the version counter of the referenced collection at the moment this
+	// evaluation job was created. Set by the server; never accepted from the client.
+	//
+	// Sentinel values:
+	//   0 — job predates version tracking; collection version at that time is unknown.
+	//  >0 — collection's VersionCounter at job-creation time. Two runs with the same
+	//       collection id and VersionCounter used an identical collection definition.
+	VersionCounter int `json:"version_counter,omitempty"`
 }
 
 // QueueConfig represents an optional scheduling queue under hardware_config

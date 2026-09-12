@@ -174,7 +174,7 @@ vet: ## Run go vet
 # Prefer Nx so CI finishes deterministically; seed corpora also run under plain go test.
 FUZZTIME ?= 10000x
 # Packages that define Fuzz* tests. Keep in sync when adding new fuzz targets.
-FUZZ_PACKAGES ?= ./pkg/ociclient ./pkg/mlflowclient ./internal/eval_hub/handlers ./internal/eval_hub/storage/sql/shared ./internal/eval_runtime_sidecar/handlers
+FUZZ_PACKAGES ?= ./pkg/ociclient ./pkg/mlflowclient ./pkg/api ./internal/eval_hub/handlers ./internal/eval_hub/storage/sql/shared ./internal/eval_hub/config ./internal/eval_runtime_sidecar/handlers ./internal/eval_runtime_sidecar/proxy ./internal/evalhub_mcp/server ./internal/safefile ./cmd/eval_runtime_init
 
 test: ## Run unit tests (including fuzz seed corpora and a short fuzzing pass)
 	@echo "Running unit tests..."
@@ -221,7 +221,7 @@ SERVER_URL ?= http://localhost:8080
 
 FVT_TESTS ?= ./tests/features/...
 FVT_OUTPUT ?= --godog.format=junit:${PWD}/$(BIN_DIR)/junit-fvt-report.xml,pretty
-FVT_TAGS ?= --godog.tags=~@ignore && ~@mlflow && ~@cluster && ~@local_runtime
+FVT_TAGS ?= --godog.tags=~@ignore && ~@mlflow && ~@cluster && ~@local_runtime && ~@benchmark_providers
 FVT_CONCURRENCY ?= 1
 
 .PHONY: test-setup
@@ -277,9 +277,11 @@ install-deps: ## Install dependencies
 	@go mod tidy
 	@echo "Dependencies installed"
 
+GO_VERSION = $(shell awk '/^go /{print $$2}' go.mod)
+
 update-deps: ## Update all dependencies to latest versions
 	@echo "Updating dependencies to latest versions..."
-	@go get -t -u ./...
+	GOTOOLCHAIN=go${GO_VERSION} go get -t -u ./...
 	@go mod tidy
 	@echo "Dependencies updated"
 
