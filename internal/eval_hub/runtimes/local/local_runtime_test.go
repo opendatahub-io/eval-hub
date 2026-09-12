@@ -53,7 +53,7 @@ func TestReplaceEnvironmentVariable(t *testing.T) {
 	}
 }
 
-func (f *fakeStorage) UpdateEvaluationJob(id string, runStatus *api.StatusEvent) error {
+func (f *fakeStorage) UpdateEvaluationJob(id string, runStatus *api.StatusEvent) (api.OverallState, error) {
 	f.called = true
 	f.runStatus = runStatus
 	if f.runStatusChan != nil {
@@ -62,7 +62,7 @@ func (f *fakeStorage) UpdateEvaluationJob(id string, runStatus *api.StatusEvent)
 		default:
 		}
 	}
-	return f.updateErr
+	return "", f.updateErr
 }
 
 func (f *fakeStorage) Ping(_ time.Duration) error                             { return nil }
