@@ -4,6 +4,7 @@ import (
 	"database/sql"
 	"encoding/json"
 
+	"github.com/eval-hub/eval-hub/internal/eval_hub/abstractions"
 	"github.com/eval-hub/eval-hub/internal/eval_hub/constants"
 	"github.com/eval-hub/eval-hub/internal/eval_hub/handlers"
 	"github.com/eval-hub/eval-hub/internal/eval_hub/messages"
@@ -241,15 +242,20 @@ func (s *sqlStorage) updateBenchmarkStatus(job *api.EvaluationJobResource, runSt
 	job.Status.Benchmarks = append(job.Status.Benchmarks, *benchmarkStatus)
 }
 
-// UpdateEvaluationJobWithRunStatus runs in a transaction: fetches the job, merges RunStatusInternal into the entity, and persists.
-func (s *sqlStorage) UpdateEvaluationJob(id string, runStatus *api.StatusEvent) error {
-	return s.withTransaction("update evaluation job", id, func(txn *sql.Tx) error {
+// UpdateEvaluationJob runs in a transaction: fetches the job, merges the status event into the
+// entity, and persists. Returns the overall state the job had before this update (read inside the
+// transaction under the FOR UPDATE lock, so it is consistent with the write).
+func (s *sqlStorage) UpdateEvaluationJob(id string, runStatus *api.StatusEvent) (*abstractions.EvaluationJobUpdate, error) {
+	result := &abstractions.EvaluationJobUpdate{}
+	err := s.withTransaction("update evaluation job", id, func(txn *sql.Tx) error {
 		s.logger.Info("Updating evaluation job", "id", id, "status", runStatus.BenchmarkStatusEvent.Status, "runStatus", runStatus)
 
 		job, err := s.getEvaluationJobTransactionalForUpdate(txn, id)
 		if err != nil {
 			return err
 		}
+		result.PreviousState = job.Status.State
+
 		// Test hook: no-op unless a test installs a callback (see test_hooks.go).
 		invokeEvaluationJobUpdateAfterLockedReadHook(id, runStatus.BenchmarkStatusEvent.ID)
 
@@ -289,7 +295,7 @@ func (s *sqlStorage) UpdateEvaluationJob(id string, runStatus *api.StatusEvent) 
 
 		// if the run status is terminal, we need to update the results
 		if api.IsBenchmarkTerminalState(runStatus.BenchmarkStatusEvent.Status) {
-			result := api.BenchmarkResult{
+			benchResult := api.BenchmarkResult{
 				ID:             runStatus.BenchmarkStatusEvent.ID,
 				ProviderID:     runStatus.BenchmarkStatusEvent.ProviderID,
 				Metrics:        runStatus.BenchmarkStatusEvent.Metrics,
@@ -301,7 +307,7 @@ func (s *sqlStorage) UpdateEvaluationJob(id string, runStatus *api.StatusEvent) 
 				BenchmarkIndex: runStatus.BenchmarkStatusEvent.BenchmarkIndex,
 				Test:           outcome,
 			}
-			err := s.updateBenchmarkResults(job, runStatus, &result)
+			err := s.updateBenchmarkResults(job, runStatus, &benchResult)
 			if err != nil {
 				return err
 			}
@@ -312,8 +318,7 @@ func (s *sqlStorage) UpdateEvaluationJob(id string, runStatus *api.StatusEvent) 
 		if err != nil {
 			return err
 		}
-		job.Status.State = overallState
-		job.Status.Message = message
+		result.ComputedState = overallState
 
 		s.logger.Info("Calculated overall job status", "id", id, "overall_state", overallState, "status", runStatus.BenchmarkStatusEvent.Status)
 
@@ -322,18 +327,43 @@ func (s *sqlStorage) UpdateEvaluationJob(id string, runStatus *api.StatusEvent) 
 			s.computeJobTestResult(job, collection)
 		}
 
+		// When the computed state is a NEW terminal state, defer the terminal
+		// state commit: persist benchmark results with the previous (non-terminal)
+		// state so that clients polling the job do not see "completed" until the
+		// caller has finished pre-terminal work (e.g. MLflow evaluation-card export).
+		stateToWrite := overallState
+		previousMessage := job.Status.Message
+		if overallState.IsTerminalState() && !result.PreviousState.IsTerminalState() {
+			stateToWrite = result.PreviousState
+			result.TerminalMessage = message
+		}
+
+		// Write the entity with the (possibly deferred) state.
+		job.Status.State = stateToWrite
+		if stateToWrite != overallState {
+			job.Status.Message = previousMessage
+		} else {
+			job.Status.Message = message
+		}
+
 		entity := EvaluationJobEntity{
 			Config:  &job.EvaluationJobConfig,
 			Status:  job.Status,
 			Results: job.Results,
 		}
 
-		if err := s.updateEvaluationJobTxn(txn, id, overallState, &entity); err != nil {
+		if err := s.updateEvaluationJobTxn(txn, id, stateToWrite, &entity); err != nil {
 			return err
 		}
 
+		// Restore the computed terminal state on the in-memory job for the caller.
+		job.Status.State = overallState
+		job.Status.Message = message
+		result.Job = job
+
 		return nil
 	})
+	return result, err
 }
 
 // UpdateEvaluationJobResolvedSHA records the resolved test-data identity on the benchmark at

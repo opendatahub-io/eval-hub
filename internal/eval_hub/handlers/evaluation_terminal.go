@@ -9,45 +9,79 @@ import (
 	"github.com/eval-hub/eval-hub/pkg/api"
 )
 
-func (h *Handlers) onEvaluationJobUpdated(
+// finalizeEvaluationJobUpdate handles the post-update lifecycle for an evaluation
+// job. When the update computed a new terminal state (deferred by the storage
+// layer), this function:
+//  1. Exports evaluation results (MLflow card, OCI) BEFORE committing the terminal state,
+//     ensuring clients never observe "completed" without persisted artifacts.
+//  2. Commits the terminal state via UpdateEvaluationJobStatus.
+//  3. Records metrics, threshold violations, and OTEL container log exports.
+//
+// For non-terminal updates, only metrics recording is performed.
+func (h *Handlers) finalizeEvaluationJobUpdate(
 	ctx context.Context,
 	storage abstractions.Storage,
-	getJob func() (*api.EvaluationJobResource, error),
-	previousState api.OverallState,
+	update *abstractions.EvaluationJobUpdate,
 	logger *slog.Logger,
 ) {
-	recordEvaluationJobTerminalStateAfterUpdate(ctx, getJob, previousState)
-
-	job, err := getJob()
-	if err != nil || job == nil || job.Status == nil {
-		return
-	}
-	if !job.Status.State.IsTerminalState() || previousState == job.Status.State {
+	if update == nil || update.Job == nil || update.Job.Status == nil {
 		return
 	}
 
-	h.exportEvaluationResults(ctx, job, logger)
+	if update.IsTerminalTransition() {
+		// Step 1: Export evaluation results BEFORE the terminal state is visible
+		// to clients. This eliminates the race where a client polls "completed"
+		// but the MLflow evaluation-card artifact has not been created yet.
+		h.exportEvaluationResults(ctx, update.Job, logger)
 
-	if h.runtime != nil && job.Results != nil {
-		h.notifyThresholdViolations(ctx, job, logger)
+		// Step 2: Commit the terminal state to the database.
+		if err := storage.UpdateEvaluationJobStatus(
+			update.Job.Resource.ID,
+			update.ComputedState,
+			update.TerminalMessage,
+		); err != nil {
+			if logger != nil {
+				logger.Error("Failed to finalize terminal state after export",
+					"job_id", update.Job.Resource.ID,
+					"computed_state", update.ComputedState,
+					"error", err,
+				)
+			}
+		}
+	}
+
+	// Record metrics using the computed state (mirrors the old
+	// recordEvaluationJobTerminalStateAfterUpdate behavior but uses the
+	// in-memory job instead of re-reading from the database).
+	recordEvaluationJobTerminalStateAfterUpdate(ctx, func() (*api.EvaluationJobResource, error) {
+		return update.Job, nil
+	}, update.PreviousState)
+
+	if !update.IsTerminalTransition() {
+		return
+	}
+
+	// Post-terminal side effects: threshold violations, OTEL log export.
+	if h.runtime != nil && update.Job.Results != nil {
+		h.notifyThresholdViolations(ctx, update.Job, logger)
 	}
 
 	if h.serviceConfig == nil || !h.serviceConfig.IsOTELJobContainerLogsEnabled() || h.runtime == nil {
 		return
 	}
 
-	benchmarks, err := h.resolveJobBenchmarksForStorage(storage, job)
+	benchmarks, err := h.resolveJobBenchmarksForStorage(storage, update.Job)
 	if err != nil {
 		if logger != nil {
 			logger.WarnContext(ctx, "failed to resolve benchmarks for OTEL container log export",
-				"job_id", job.Resource.ID,
+				"job_id", update.Job.Resource.ID,
 				"error", err,
 			)
 		}
 		return
 	}
 
-	otel.ExportJobContainerLogsAsync(ctx, h.runtime, job, benchmarks, logger)
+	otel.ExportJobContainerLogsAsync(ctx, h.runtime, update.Job, benchmarks, logger)
 }
 
 // notifyThresholdViolations emits EvaluationThresholdViolated signals for every benchmark result

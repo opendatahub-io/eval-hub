@@ -71,26 +71,21 @@ func (h *Handlers) runtimeName() string {
 }
 
 func (s *runtimeStorage) UpdateEvaluationJob(id string, runStatus *api.StatusEvent) error {
-	var previousState api.OverallState
-	job, jobErr := s.scopedStorage().GetEvaluationJob(id)
-	if jobErr == nil && job != nil && job.Status != nil {
-		previousState = job.Status.State
-	}
-
 	err := s.validate.Struct(runStatus)
 	if err != nil {
 		s.logger.Info("Failed to validate evaluation job status from the runtime", "job_id", id, "error", err)
 		return err
 	}
-	err = s.scopedStorage().UpdateEvaluationJob(id, runStatus)
+	updateResult, err := s.scopedStorage().UpdateEvaluationJob(id, runStatus)
 	if err != nil {
 		s.logger.Info("Failed to update evaluation job in storage", "job_id", id, "error", err)
 		return err
 	}
 
-	s.handlers.onEvaluationJobUpdated(s.ctx, s.scopedStorage(), func() (*api.EvaluationJobResource, error) {
-		return s.scopedStorage().GetEvaluationJob(id)
-	}, previousState, s.logger)
+	// finalizeEvaluationJobUpdate exports evaluation results (MLflow card, OCI)
+	// BEFORE committing the terminal state to the DB, ensuring clients never
+	// see "completed" without persisted artifacts.
+	s.handlers.finalizeEvaluationJobUpdate(s.ctx, s.scopedStorage(), updateResult, s.logger)
 	return nil
 }
 
@@ -599,17 +594,12 @@ func (h *Handlers) HandleUpdateEvaluation(ctx *executioncontext.ExecutionContext
 
 	ctx.Logger.Debug("Updating evaluation job", "id", evaluationJobID, "state", status.BenchmarkStatusEvent.Status, "status", status)
 
-	var previousState api.OverallState
-
 	_ = h.withSpan(
 		ctx,
 		func(runtimeCtx context.Context) error {
 			scoped := storage.WithContext(runtimeCtx)
 			job, jobErr := scoped.GetEvaluationJob(evaluationJobID)
-			if jobErr == nil && job != nil && job.Status != nil {
-				previousState = job.Status.State
-			}
-			if status.BenchmarkStatusEvent != nil {
+			if jobErr == nil && job != nil && status.BenchmarkStatusEvent != nil {
 				h.rewriteSidecarURLsInBenchmarkStatus(status.BenchmarkStatusEvent, job, ctx.Logger)
 			}
 
@@ -623,7 +613,7 @@ func (h *Handlers) HandleUpdateEvaluation(ctx *executioncontext.ExecutionContext
 				status.BenchmarkStatusEvent.JobMeta = nil // metadata, not benchmark state
 			}
 
-			err = scoped.UpdateEvaluationJob(evaluationJobID, status)
+			updateResult, err := scoped.UpdateEvaluationJob(evaluationJobID, status)
 			if err != nil {
 				w.Error(err, ctx.RequestID)
 				return err
@@ -642,9 +632,16 @@ func (h *Handlers) HandleUpdateEvaluation(ctx *executioncontext.ExecutionContext
 				h.runtime.WithLogger(ctx.Logger).NotifyJobPhaseTransition(runtimeCtx, job, status.BenchmarkStatusEvent.BenchmarkIndex, status.BenchmarkStatusEvent.Status)
 			}
 
-			h.onEvaluationJobUpdated(runtimeCtx, scoped, func() (*api.EvaluationJobResource, error) {
-				return scoped.GetEvaluationJob(evaluationJobID)
-			}, previousState, ctx.Logger)
+			// Detach from the HTTP request context so that terminal-state
+			// side effects (MLflow export, OCI push, OTEL log export) are
+			// not cancelled when the sidecar closes its connection.
+			exportCtx := context.WithoutCancel(runtimeCtx)
+			exportScoped := storage.WithContext(exportCtx)
+
+			// finalizeEvaluationJobUpdate exports evaluation results (MLflow
+			// card, OCI) BEFORE committing the terminal state to the DB,
+			// ensuring clients never see "completed" without persisted artifacts.
+			h.finalizeEvaluationJobUpdate(exportCtx, exportScoped, updateResult, ctx.Logger)
 			w.WriteJSON(nil, 204)
 			return nil
 		},

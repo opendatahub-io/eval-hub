@@ -21,7 +21,7 @@ import (
 	"github.com/eval-hub/eval-hub/pkg/api"
 )
 
-// fakeStorage implements [abstractions.Storage] for testing.
+// fakeStorage implements [abstractions.RuntimeStorage] for testing.
 type fakeStorage struct {
 	logger            *slog.Logger
 	called            bool
@@ -119,7 +119,7 @@ func (f *fakeStorage) PatchProvider(_ string, _ *api.Patch) (*api.ProviderResour
 	return nil, nil
 }
 
-func (f *fakeStorage) WithLogger(logger *slog.Logger) abstractions.Storage {
+func (f *fakeStorage) WithLogger(logger *slog.Logger) *fakeStorage {
 	return &fakeStorage{
 		logger:        logger,
 		ctx:           f.ctx,
@@ -128,11 +128,11 @@ func (f *fakeStorage) WithLogger(logger *slog.Logger) abstractions.Storage {
 	}
 }
 
-func (f *fakeStorage) WithTenant(_ api.Tenant) abstractions.Storage {
+func (f *fakeStorage) WithTenant(_ api.Tenant) *fakeStorage {
 	return f
 }
 
-func (f *fakeStorage) WithContext(ctx context.Context) abstractions.Storage {
+func (f *fakeStorage) WithContext(ctx context.Context) *fakeStorage {
 	return &fakeStorage{
 		logger:        f.logger,
 		ctx:           ctx,
@@ -141,7 +141,7 @@ func (f *fakeStorage) WithContext(ctx context.Context) abstractions.Storage {
 	}
 }
 
-func (f *fakeStorage) WithOwner(owner api.User) abstractions.Storage {
+func (f *fakeStorage) WithOwner(owner api.User) *fakeStorage {
 	return f
 }
 
@@ -607,7 +607,6 @@ func TestRunEvaluationJobProviderNotFound(t *testing.T) {
 	logger := discardLogger()
 	statusCh := make(chan *api.StatusEvent, 1)
 	storage := &fakeStorage{logger: logger, ctx: tctx, runStatusChan: statusCh}
-	var store abstractions.Storage = storage
 
 	// Use empty providers map so provider is not found
 	rt := &LocalRuntime{
@@ -621,7 +620,7 @@ func TestRunEvaluationJobProviderNotFound(t *testing.T) {
 		t.Fatalf("RunEvaluationJob failed to resolve benchmarks: %v", err)
 	}
 
-	err = rt.RunEvaluationJob(evaluation, benchmarks, store)
+	err = rt.RunEvaluationJob(evaluation, benchmarks, storage)
 	if err != nil {
 		t.Fatalf("expected no synchronous error, got %v", err)
 	}
@@ -755,14 +754,13 @@ func TestRunEvaluationJobProcessFailureNoCallback(t *testing.T) {
 	}
 
 	storage := &fakeStorage{logger: logger, ctx: tctx, runStatusChan: statusCh, providerConfigs: providers}
-	var store abstractions.Storage = storage
 
 	benchmarks, err := handlers.GetJobBenchmarks(evaluation, nil)
 	if err != nil {
 		t.Fatalf("RunEvaluationJob failed to resolve benchmarks: %v", err)
 	}
 
-	err = rt.RunEvaluationJob(evaluation, benchmarks, store)
+	err = rt.RunEvaluationJob(evaluation, benchmarks, storage)
 	if err != nil {
 		t.Fatalf("expected no synchronous error, got %v", err)
 	}
@@ -800,14 +798,13 @@ func TestRunEvaluationJobCancelledNoFailure(t *testing.T) {
 	}
 
 	storage := &fakeStorage{logger: logger, ctx: tctx, runStatusChan: statusCh, providerConfigs: providers}
-	var store abstractions.Storage = storage
 
 	benchmarks, err := handlers.GetJobBenchmarks(evaluation, nil)
 	if err != nil {
 		t.Fatalf("RunEvaluationJob failed to resolve benchmarks: %v", err)
 	}
 
-	err = rt.RunEvaluationJob(evaluation, benchmarks, store)
+	err = rt.RunEvaluationJob(evaluation, benchmarks, storage)
 	if err != nil {
 		t.Fatalf("expected no synchronous error, got %v", err)
 	}
@@ -928,7 +925,6 @@ func TestRunEvaluationJobMultipleBenchmarksPartialFailure(t *testing.T) {
 	logger := discardLogger()
 	statusCh := make(chan *api.StatusEvent, 2)
 	storage := &fakeStorage{logger: logger, ctx: tctx, runStatusChan: statusCh, providerConfigs: providers}
-	var store abstractions.Storage = storage
 
 	rt := &LocalRuntime{
 		logger:  logger,
@@ -941,7 +937,7 @@ func TestRunEvaluationJobMultipleBenchmarksPartialFailure(t *testing.T) {
 		t.Fatalf("RunEvaluationJob failed to resolve benchmarks: %v", err)
 	}
 
-	err = rt.RunEvaluationJob(evaluation, benchmarks, store)
+	err = rt.RunEvaluationJob(evaluation, benchmarks, storage)
 	if err != nil {
 		t.Fatalf("expected no synchronous error, got %v", err)
 	}

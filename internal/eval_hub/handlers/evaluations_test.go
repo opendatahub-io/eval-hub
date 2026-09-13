@@ -83,8 +83,8 @@ func (f *fakeStorage) GetEvaluationJobs(_ *abstractions.QueryFilter) (*abstracti
 	return &abstractions.QueryResults[api.EvaluationJobResource]{Items: []api.EvaluationJobResource{}, TotalCount: 0}, nil
 }
 
-func (f *fakeStorage) UpdateEvaluationJob(_ string, _ *api.StatusEvent) error {
-	return nil
+func (f *fakeStorage) UpdateEvaluationJob(_ string, _ *api.StatusEvent) (*abstractions.EvaluationJobUpdate, error) {
+	return &abstractions.EvaluationJobUpdate{}, nil
 }
 
 func (f *fakeStorage) UpdateEvaluationJobResolvedSHA(id string, benchmarkIndex int, sha string) error {
@@ -203,9 +203,9 @@ func (s *updateEvaluationStorage) WithContext(_ context.Context) abstractions.St
 func (s *updateEvaluationStorage) WithTenant(_ api.Tenant) abstractions.Storage { return s }
 func (s *updateEvaluationStorage) WithOwner(_ api.User) abstractions.Storage    { return s }
 
-func (s *updateEvaluationStorage) UpdateEvaluationJob(_ string, status *api.StatusEvent) error {
+func (s *updateEvaluationStorage) UpdateEvaluationJob(_ string, status *api.StatusEvent) (*abstractions.EvaluationJobUpdate, error) {
 	s.lastStatusEvent = status
-	return s.updateErr
+	return &abstractions.EvaluationJobUpdate{}, s.updateErr
 }
 
 func (s *updateEvaluationStorage) UpdateEvaluationJobResolvedSHA(id string, benchmarkIndex int, sha string) error {
