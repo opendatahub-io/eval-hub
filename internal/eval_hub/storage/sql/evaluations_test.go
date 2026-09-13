@@ -1566,7 +1566,6 @@ func testEvaluationsStorage(t *testing.T, driver string, databaseName string) {
 						ErrorMessage: &api.MessageInfo{Message: "err", MessageCode: "E"},
 					},
 				})
-				}
 			}
 			got, _ := store.GetEvaluationJob(jobID)
 			if got == nil {
