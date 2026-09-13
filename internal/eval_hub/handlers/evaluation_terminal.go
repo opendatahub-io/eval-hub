@@ -84,61 +84,6 @@ func (h *Handlers) finalizeEvaluationJobUpdate(
 	otel.ExportJobContainerLogsAsync(ctx, h.runtime, update.Job, benchmarks, logger)
 }
 
-// onEvaluationJobUpdated is the legacy entry point kept for call sites that
-// still use the old getJob pattern. It delegates to finalizeEvaluationJobUpdate.
-func (h *Handlers) onEvaluationJobUpdated(
-	ctx context.Context,
-	storage abstractions.Storage,
-	getJob func() (*api.EvaluationJobResource, error),
-	previousState api.OverallState,
-	logger *slog.Logger,
-) {
-	job, err := getJob()
-	if err != nil || job == nil || job.Status == nil {
-		return
-	}
-
-	update := &abstractions.EvaluationJobUpdate{
-		PreviousState: previousState,
-		ComputedState: job.Status.State,
-		Job:           job,
-	}
-	// For the legacy path the terminal state was already committed by the
-	// caller, so we only need to run export and post-terminal effects without
-	// a second UpdateEvaluationJobStatus call. We signal this by leaving
-	// TerminalMessage nil -- IsTerminalTransition checks PreviousState !=
-	// ComputedState but the export still runs. However, since legacy callers
-	// already committed the state, we call the old inline logic directly.
-	recordEvaluationJobTerminalStateAfterUpdate(ctx, getJob, previousState)
-
-	if !job.Status.State.IsTerminalState() || previousState == job.Status.State {
-		return
-	}
-
-	h.exportEvaluationResults(ctx, job, logger)
-
-	if h.runtime != nil && job.Results != nil {
-		h.notifyThresholdViolations(ctx, job, logger)
-	}
-
-	if h.serviceConfig == nil || !h.serviceConfig.IsOTELJobContainerLogsEnabled() || h.runtime == nil {
-		return
-	}
-
-	benchmarks, err := h.resolveJobBenchmarksForStorage(storage, job)
-	if err != nil {
-		if logger != nil {
-			logger.WarnContext(ctx, "failed to resolve benchmarks for OTEL container log export",
-				"job_id", job.Resource.ID,
-				"error", err,
-			)
-		}
-		return
-	}
-
-	otel.ExportJobContainerLogsAsync(ctx, h.runtime, job, benchmarks, logger)
-}
-
 // notifyThresholdViolations emits EvaluationThresholdViolated signals for every benchmark result
 // that has a failing threshold test. Signals are best-effort: errors are absorbed by the runtime.
 func (h *Handlers) notifyThresholdViolations(ctx context.Context, job *api.EvaluationJobResource, logger *slog.Logger) {
