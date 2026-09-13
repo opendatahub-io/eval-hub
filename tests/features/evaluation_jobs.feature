@@ -1834,7 +1834,7 @@ Feature: Evaluation Jobs
     And I wait for the evaluation job status to be "completed"
     When I send a GET request to "/api/v1/evaluations/jobs/{id}"
     Then the response code should be 200
-    When I fetch the OCI manifest for repository "{{env:OCI_REPOSITORY|evalhub/test-results}}" and tag "{{env:OCI_TAG|test-v1}}"
+    When I fetch the OCI manifest for repository "{{env:OCI_REPOSITORY|evalhub/test-results}}" and tag "{{env:OCI_TAG|test-v1}}-{{value:job_id}}"
     Then the OCI artifact should exist
     And the OCI artifact should be valid JSON
     And the OCI artifact should contain "benchmark_id"
@@ -1853,8 +1853,8 @@ Feature: Evaluation Jobs
     And I wait for the evaluation job status to match "completed|failed"
     When I send a GET request to "/api/v1/evaluations/jobs/{id}"
     Then the response should contain the value "failed" at path "$.status.state"
-    # Verify user tag does not exist when job fails
-    When I fetch the OCI manifest for repository "{{env:OCI_REPOSITORY|evalhub/test-results}}" and tag "{{env:OCI_TAG_FAILED|failed-job-test}}"
+    # Verify compound tag (ociTag-jobID) does not exist when job fails
+    When I fetch the OCI manifest for repository "{{env:OCI_REPOSITORY|evalhub/test-results}}" and tag "{{env:OCI_TAG_FAILED|failed-job-test}}-{{value:job_id}}"
     Then the OCI manifest should not exist
 
   @oci
@@ -1881,7 +1881,7 @@ Feature: Evaluation Jobs
     When I send a GET request to "/api/v1/evaluations/jobs/{id}"
     Then the response code should be 200
     # Verify results artifact exists with custom annotations in OCI metadata
-    When I fetch the OCI manifest for repository "{{env:OCI_REPOSITORY|evalhub/test-results}}" and tag "{{env:OCI_TAG_ANNOTATIONS|annotations-test}}"
+    When I fetch the OCI manifest for repository "{{env:OCI_REPOSITORY|evalhub/test-results}}" and tag "{{env:OCI_TAG_ANNOTATIONS|annotations-test}}-{{value:job_id}}"
     # Verify custom annotations in manifest
     Then the OCI manifest should contain annotation "team" with value "ml-platform"
     And the OCI manifest should contain annotation "environment" with value "test"
@@ -1912,8 +1912,8 @@ Feature: Evaluation Jobs
     And I wait for the evaluation job status to be "completed"
     When I send a GET request to "/api/v1/evaluations/jobs/{id}"
     Then the response code should be 200
-    # Verify first job's results exist
-    When I fetch the OCI manifest for repository "{{env:OCI_REPOSITORY|evalhub/test-results}}" and tag "{{env:OCI_TAG_SHARED1|shared-repo-v1}}"
+    # Verify first job's results exist (tag includes jobID per EvaluationCardManifestTag)
+    When I fetch the OCI manifest for repository "{{env:OCI_REPOSITORY|evalhub/test-results}}" and tag "{{env:OCI_TAG_SHARED1|shared-repo-v1}}-{{value:job_id_1}}"
     Then the OCI artifact should exist
     And the OCI artifact should be valid JSON
     And the OCI artifact should contain "benchmark_id"
@@ -1927,7 +1927,7 @@ Feature: Evaluation Jobs
     When I send a GET request to "/api/v1/evaluations/jobs/{id}"
     Then the response code should be 200
     # Verify second job's results exist (different tag, same repo)
-    When I fetch the OCI manifest for repository "{{env:OCI_REPOSITORY|evalhub/test-results}}" and tag "{{env:OCI_TAG_SHARED2|shared-repo-v2}}"
+    When I fetch the OCI manifest for repository "{{env:OCI_REPOSITORY|evalhub/test-results}}" and tag "{{env:OCI_TAG_SHARED2|shared-repo-v2}}-{{value:job_id_2}}"
     Then the OCI artifact should exist
     And the OCI artifact should be valid JSON
     And the OCI artifact should contain "benchmark_id"
@@ -1935,7 +1935,7 @@ Feature: Evaluation Jobs
     And the OCI artifact should contain "results"
     And the OCI artifact should contain the value "{{value:job_id_2}}" at path "$.id"
     # Re-verify first job's artifact is still intact after second job completed
-    When I fetch the OCI manifest for repository "{{env:OCI_REPOSITORY|evalhub/test-results}}" and tag "{{env:OCI_TAG_SHARED1|shared-repo-v1}}"
+    When I fetch the OCI manifest for repository "{{env:OCI_REPOSITORY|evalhub/test-results}}" and tag "{{env:OCI_TAG_SHARED1|shared-repo-v1}}-{{value:job_id_1}}"
     Then the OCI artifact should exist
     And the OCI artifact should contain the value "{{value:job_id_1}}" at path "$.id"
 
@@ -1956,7 +1956,7 @@ Feature: Evaluation Jobs
     Then the response code should be 200
     And the response should contain the value "completed" at path "$.status.state"
     # Verify OCI results artifact exists
-    When I fetch the OCI manifest for repository "{{env:OCI_REPOSITORY|evalhub/test-results}}" and tag "{{env:OCI_TAG_DUAL|dual-export-test}}"
+    When I fetch the OCI manifest for repository "{{env:OCI_REPOSITORY|evalhub/test-results}}" and tag "{{env:OCI_TAG_DUAL|dual-export-test}}-{{value:job_id}}"
     Then the OCI artifact should exist
     And the OCI artifact should be valid JSON
     And the OCI artifact should contain "benchmark_id"
