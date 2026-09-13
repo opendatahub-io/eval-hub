@@ -76,15 +76,16 @@ func (s *runtimeStorage) UpdateEvaluationJob(id string, runStatus *api.StatusEve
 		s.logger.Info("Failed to validate evaluation job status from the runtime", "job_id", id, "error", err)
 		return err
 	}
-	previousState, err := s.scopedStorage().UpdateEvaluationJob(id, runStatus)
+	updateResult, err := s.scopedStorage().UpdateEvaluationJob(id, runStatus)
 	if err != nil {
 		s.logger.Info("Failed to update evaluation job in storage", "job_id", id, "error", err)
 		return err
 	}
 
-	s.handlers.onEvaluationJobUpdated(s.ctx, s.scopedStorage(), func() (*api.EvaluationJobResource, error) {
-		return s.scopedStorage().GetEvaluationJob(id)
-	}, previousState, s.logger)
+	// finalizeEvaluationJobUpdate exports evaluation results (MLflow card, OCI)
+	// BEFORE committing the terminal state to the DB, ensuring clients never
+	// see "completed" without persisted artifacts.
+	s.handlers.finalizeEvaluationJobUpdate(s.ctx, s.scopedStorage(), updateResult, s.logger)
 	return nil
 }
 
@@ -612,7 +613,7 @@ func (h *Handlers) HandleUpdateEvaluation(ctx *executioncontext.ExecutionContext
 				status.BenchmarkStatusEvent.JobMeta = nil // metadata, not benchmark state
 			}
 
-			previousState, err := scoped.UpdateEvaluationJob(evaluationJobID, status)
+			updateResult, err := scoped.UpdateEvaluationJob(evaluationJobID, status)
 			if err != nil {
 				w.Error(err, ctx.RequestID)
 				return err
@@ -636,9 +637,11 @@ func (h *Handlers) HandleUpdateEvaluation(ctx *executioncontext.ExecutionContext
 			// not cancelled when the sidecar closes its connection.
 			exportCtx := context.WithoutCancel(runtimeCtx)
 			exportScoped := storage.WithContext(exportCtx)
-			h.onEvaluationJobUpdated(exportCtx, exportScoped, func() (*api.EvaluationJobResource, error) {
-				return exportScoped.GetEvaluationJob(evaluationJobID)
-			}, previousState, ctx.Logger)
+
+			// finalizeEvaluationJobUpdate exports evaluation results (MLflow
+			// card, OCI) BEFORE committing the terminal state to the DB,
+			// ensuring clients never see "completed" without persisted artifacts.
+			h.finalizeEvaluationJobUpdate(exportCtx, exportScoped, updateResult, ctx.Logger)
 			w.WriteJSON(nil, 204)
 			return nil
 		},

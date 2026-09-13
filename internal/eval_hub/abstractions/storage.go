@@ -58,6 +58,33 @@ func (filter *QueryFilter) String() string {
 	return fmt.Sprintf(`{"limit":%d,"offset":%d,"params":%v}`, filter.Limit, filter.Offset, filter.Params)
 }
 
+// EvaluationJobUpdate holds the result of an UpdateEvaluationJob call.
+// When the computed overall state is terminal and differs from the previous state,
+// the storage layer persists benchmark results but defers the terminal state commit.
+// Callers must inspect the result and call UpdateEvaluationJobStatus to finalize.
+type EvaluationJobUpdate struct {
+	// PreviousState is the overall state before this update.
+	PreviousState api.OverallState
+	// ComputedState is the overall state computed by this update (may be terminal).
+	ComputedState api.OverallState
+	// Job is the fully populated job with benchmark results and ComputedState
+	// set on Status.State. When the terminal state is deferred, the DB entity
+	// still has the non-terminal state; this in-memory copy carries the computed
+	// terminal state so callers can use it for export without a re-read.
+	Job *api.EvaluationJobResource
+	// TerminalMessage is the status message for the terminal state. Non-nil only
+	// when ComputedState is terminal and differs from PreviousState.
+	TerminalMessage *api.MessageInfo
+}
+
+// IsTerminalTransition returns true when the update computed a new terminal state
+// that differs from the previous state and was deferred in the database.
+func (u *EvaluationJobUpdate) IsTerminalTransition() bool {
+	return u != nil &&
+		u.ComputedState.IsTerminalState() &&
+		u.PreviousState != u.ComputedState
+}
+
 type Storage interface {
 	WithLogger(logger *slog.Logger) Storage
 	WithContext(ctx context.Context) Storage
@@ -71,7 +98,12 @@ type Storage interface {
 	GetEvaluationJob(id string) (*api.EvaluationJobResource, error)
 	GetEvaluationJobs(filter *QueryFilter) (*QueryResults[api.EvaluationJobResource], error)
 	DeleteEvaluationJob(id string) error
-	UpdateEvaluationJob(id string, runStatus *api.StatusEvent) (api.OverallState, error)
+	// UpdateEvaluationJob merges a benchmark status event into the job, computes
+	// the new overall state, and persists benchmark results. When the computed
+	// state is terminal (and differs from the previous state), the overall state
+	// is NOT committed to the database; callers must first perform any pre-terminal
+	// work (e.g. MLflow export) and then call UpdateEvaluationJobStatus to finalize.
+	UpdateEvaluationJob(id string, runStatus *api.StatusEvent) (*EvaluationJobUpdate, error)
 	// UpdateEvaluationJobStatus is used to update the status of an evaluation job and is internal - do we need it here?
 	UpdateEvaluationJobStatus(id string, state api.OverallState, message *api.MessageInfo) error
 	// UpdateEvaluationJobResolvedSHA records the resolved test-data identity (e.g. git commit SHA)

@@ -21,6 +21,17 @@ var (
 	drivers = []string{"sqlite", "postgres"}
 )
 
+// finalizeIfTerminal calls UpdateEvaluationJobStatus to commit the deferred
+// terminal state when UpdateEvaluationJob computed a terminal transition.
+func finalizeIfTerminal(t *testing.T, store abstractions.Storage, result *abstractions.EvaluationJobUpdate) {
+	t.Helper()
+	if result.IsTerminalTransition() {
+		if err := store.UpdateEvaluationJobStatus(result.Job.Resource.ID, result.ComputedState, result.TerminalMessage); err != nil {
+			t.Fatalf("finalizeIfTerminal: %v", err)
+		}
+	}
+}
+
 // TestGetEvaluationJobs_TenantFilter verifies that WithTenant scopes list results
 // to only the jobs belonging to that tenant.
 func TestGetEvaluationJobs_TenantFilter(t *testing.T) {
@@ -198,13 +209,19 @@ func testUpdateEvaluationJob_ConcurrentBenchmarkCompletions(t *testing.T, driver
 	}
 
 	completeBenchmark := func(id string, index int) error {
-		_, err := store.UpdateEvaluationJob(jobID, &api.StatusEvent{
+		result, err := store.UpdateEvaluationJob(jobID, &api.StatusEvent{
 			BenchmarkStatusEvent: &api.BenchmarkStatusEvent{
 				ID: id, ProviderID: "garak", BenchmarkIndex: index,
 				Status: api.StateCompleted, CompletedAt: api.DateTimeToString(now),
 			},
 		})
-		return err
+		if err != nil {
+			return err
+		}
+		if result.IsTerminalTransition() {
+			return store.UpdateEvaluationJobStatus(jobID, result.ComputedState, result.TerminalMessage)
+		}
+		return nil
 	}
 
 	if err := completeBenchmark("truthfulqa_mc1", 1); err != nil {
@@ -1029,9 +1046,11 @@ func testEvaluationsStorage(t *testing.T, driver string, databaseName string) {
 			},
 		}
 		status.BenchmarkStatusEvent.StampRuntimeMessageOrigins()
-		if _, err := store.UpdateEvaluationJob(jobID, status); err != nil {
+		result, err := store.UpdateEvaluationJob(jobID, status)
+		if err != nil {
 			t.Fatalf("UpdateEvaluationJob: %v", err)
 		}
+		finalizeIfTerminal(t, store, result)
 
 		got, err := store.GetEvaluationJob(jobID)
 		if err != nil {
@@ -1092,9 +1111,11 @@ func testEvaluationsStorage(t *testing.T, driver string, databaseName string) {
 			},
 		}
 		status.BenchmarkStatusEvent.StampRuntimeMessageOrigins()
-		if _, err := store.UpdateEvaluationJob(jobID, status); err != nil {
+		result, err := store.UpdateEvaluationJob(jobID, status)
+		if err != nil {
 			t.Fatalf("UpdateEvaluationJob: %v", err)
 		}
+		finalizeIfTerminal(t, store, result)
 
 		got, err := store.GetEvaluationJob(jobID)
 		if err != nil {
@@ -1156,9 +1177,11 @@ func testEvaluationsStorage(t *testing.T, driver string, databaseName string) {
 		}
 		// Stamp defaults missing origins only; an explicit server origin must be kept.
 		status.BenchmarkStatusEvent.StampRuntimeMessageOrigins()
-		if _, err := store.UpdateEvaluationJob(jobID, status); err != nil {
+		result, err := store.UpdateEvaluationJob(jobID, status)
+		if err != nil {
 			t.Fatalf("UpdateEvaluationJob: %v", err)
 		}
+		finalizeIfTerminal(t, store, result)
 
 		got, err := store.GetEvaluationJob(jobID)
 		if err != nil {
@@ -1501,48 +1524,48 @@ func testEvaluationsStorage(t *testing.T, driver string, databaseName string) {
 			if err := store.CreateEvaluationJob(job); err != nil {
 				t.Fatalf("CreateEvaluationJob: %v", err)
 			}
-			// Drive job to terminal state
+			// Drive job to terminal state and finalize the deferred terminal commit
+			driveAndFinalize := func(evt *api.StatusEvent) {
+				result, err := store.UpdateEvaluationJob(jobID, evt)
+				if err != nil {
+					t.Fatalf("setup for %s: %v", terminalState, err)
+				}
+				finalizeIfTerminal(t, store, result)
+			}
 			switch terminalState {
 			case api.OverallStateCompleted:
-				if _, err := store.UpdateEvaluationJob(jobID, &api.StatusEvent{
+				driveAndFinalize(&api.StatusEvent{
 					BenchmarkStatusEvent: &api.BenchmarkStatusEvent{
 						ID: "b1", ProviderID: "p1", BenchmarkIndex: 0,
 						Status: api.StateCompleted,
 					},
-				}); err != nil {
-					t.Fatalf("setup for %s: %v", terminalState, err)
-				}
+				})
 			case api.OverallStateFailed:
-				if _, err := store.UpdateEvaluationJob(jobID, &api.StatusEvent{
+				driveAndFinalize(&api.StatusEvent{
 					BenchmarkStatusEvent: &api.BenchmarkStatusEvent{
 						ID: "b1", ProviderID: "p1", BenchmarkIndex: 0,
 						Status:       api.StateFailed,
 						ErrorMessage: &api.MessageInfo{Message: "err", MessageCode: "E"},
 					},
-				}); err != nil {
-					t.Fatalf("setup for %s: %v", terminalState, err)
-				}
+				})
 			case api.OverallStateCancelled:
 				if err := store.UpdateEvaluationJobStatus(jobID, api.OverallStateCancelled, &api.MessageInfo{Message: "cancelled", MessageCode: "X"}); err != nil {
 					t.Fatalf("setup for %s: %v", terminalState, err)
 				}
 			case api.OverallStatePartiallyFailed:
-				if _, err := store.UpdateEvaluationJob(jobID, &api.StatusEvent{
+				driveAndFinalize(&api.StatusEvent{
 					BenchmarkStatusEvent: &api.BenchmarkStatusEvent{
 						ID: "b1", ProviderID: "p1", BenchmarkIndex: 0,
 						Status: api.StateCompleted,
 					},
-				}); err != nil {
-					t.Fatalf("setup for %s (b1): %v", terminalState, err)
-				}
-				if _, err := store.UpdateEvaluationJob(jobID, &api.StatusEvent{
+				})
+				driveAndFinalize(&api.StatusEvent{
 					BenchmarkStatusEvent: &api.BenchmarkStatusEvent{
 						ID: "b2", ProviderID: "p1", BenchmarkIndex: 1,
 						Status:       api.StateFailed,
 						ErrorMessage: &api.MessageInfo{Message: "err", MessageCode: "E"},
 					},
-				}); err != nil {
-					t.Fatalf("setup for %s (b2): %v", terminalState, err)
+				})
 				}
 			}
 			got, _ := store.GetEvaluationJob(jobID)
