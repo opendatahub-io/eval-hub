@@ -229,6 +229,9 @@ func (h *Handlers) HandleCreateEvaluation(ctx *executioncontext.ExecutionContext
 			if err := ValidateReadOnlyResolvedSHA(evaluation); err != nil {
 				return err
 			}
+			if err := validation.ValidateGitTestDataAuth(benchmarks); err != nil {
+				return err
+			}
 			if err := h.validateBenchmarkReferences(ctx, benchmarks); err != nil {
 				return err
 			}

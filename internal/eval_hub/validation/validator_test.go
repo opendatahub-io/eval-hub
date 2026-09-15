@@ -788,6 +788,117 @@ func TestGitTestDataRef_HTTPSWithSecretAccepted(t *testing.T) {
 	}
 }
 
+func TestGitTestDataRef_HTTPWithSecretRejected_NestedInEvaluationJobConfig(t *testing.T) {
+	validate := newTestValidator(t)
+	cfg := api.EvaluationJobConfig{
+		Name:  "test-job",
+		Model: &api.ModelRef{URL: "http://model.example.com", Name: "m"},
+		Benchmarks: []api.EvaluationBenchmarkConfig{
+			{
+				Ref:        api.Ref{ID: "bench-1"},
+				ProviderID: "provider-1",
+				TestDataRef: &api.TestDataRef{
+					Git: &api.GitTestDataRef{
+						URL:       "http://git.example.com/repo.git",
+						Ref:       "main",
+						SecretRef: "git-creds",
+					},
+				},
+			},
+		},
+	}
+	err := validate.Struct(cfg)
+	if err == nil {
+		t.Fatal("expected validation error for http git url with secret_ref nested in EvaluationJobConfig")
+	}
+	if !strings.Contains(err.Error(), "git_http_with_secret") {
+		t.Fatalf("expected git_http_with_secret validation tag in error, got: %v", err)
+	}
+}
+
+func TestValidateGitTestDataAuth_RejectsHTTPWithSecret(t *testing.T) {
+	benchmarks := []api.EvaluationBenchmarkConfig{
+		{
+			Ref:        api.Ref{ID: "bench-1"},
+			ProviderID: "provider-1",
+			TestDataRef: &api.TestDataRef{
+				Git: &api.GitTestDataRef{
+					URL:       "http://git.example.com/repo.git",
+					Ref:       "main",
+					SecretRef: "git-creds",
+				},
+			},
+		},
+	}
+	err := ValidateGitTestDataAuth(benchmarks)
+	if err == nil {
+		t.Fatal("expected error for http git url with secret_ref")
+	}
+	var se *serviceerrors.ServiceError
+	if !errors.As(err, &se) {
+		t.Fatalf("expected ServiceError, got %T: %v", err, err)
+	}
+	if se.MessageCode() != messages.RequestValidationFailed {
+		t.Fatalf("expected RequestValidationFailed message code, got %v", se.MessageCode())
+	}
+}
+
+func TestValidateGitTestDataAuth_AcceptsHTTPSWithSecret(t *testing.T) {
+	benchmarks := []api.EvaluationBenchmarkConfig{
+		{
+			Ref:        api.Ref{ID: "bench-1"},
+			ProviderID: "provider-1",
+			TestDataRef: &api.TestDataRef{
+				Git: &api.GitTestDataRef{
+					URL:       "https://github.com/org/repo.git",
+					Ref:       "main",
+					SecretRef: "git-creds",
+				},
+			},
+		},
+	}
+	if err := ValidateGitTestDataAuth(benchmarks); err != nil {
+		t.Fatalf("expected no error for https with secret_ref, got: %v", err)
+	}
+}
+
+func TestValidateGitTestDataAuth_AcceptsHTTPWithoutSecret(t *testing.T) {
+	benchmarks := []api.EvaluationBenchmarkConfig{
+		{
+			Ref:        api.Ref{ID: "bench-1"},
+			ProviderID: "provider-1",
+			TestDataRef: &api.TestDataRef{
+				Git: &api.GitTestDataRef{
+					URL: "http://git.example.com/repo.git",
+					Ref: "main",
+				},
+			},
+		},
+	}
+	if err := ValidateGitTestDataAuth(benchmarks); err != nil {
+		t.Fatalf("expected no error for http without secret_ref, got: %v", err)
+	}
+}
+
+func TestValidateGitTestDataAuth_SkipsNonGitRefs(t *testing.T) {
+	benchmarks := []api.EvaluationBenchmarkConfig{
+		{
+			Ref:        api.Ref{ID: "bench-1"},
+			ProviderID: "provider-1",
+			TestDataRef: &api.TestDataRef{
+				S3: &api.S3TestDataRef{Bucket: "b", Key: "k", SecretRef: "s"},
+			},
+		},
+		{
+			Ref:        api.Ref{ID: "bench-2"},
+			ProviderID: "provider-2",
+		},
+	}
+	if err := ValidateGitTestDataAuth(benchmarks); err != nil {
+		t.Fatalf("expected no error for non-git test data refs, got: %v", err)
+	}
+}
+
 func TestStatusEvent_BenchmarkStatusEventRequired(t *testing.T) {
 	validate := newTestValidator(t)
 	ev := api.StatusEvent{BenchmarkStatusEvent: &api.BenchmarkStatusEvent{

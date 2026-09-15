@@ -88,6 +88,23 @@ func validateGitTestDataRefAuth(sl validator.StructLevel) {
 	}
 }
 
+// ValidateGitTestDataAuth checks all benchmarks for git test data refs
+// that use an HTTP URL with a secret_ref, rejecting them because credentials
+// would be sent in the clear. Called explicitly from the handler as a
+// defense-in-depth check alongside the struct-level validator.
+func ValidateGitTestDataAuth(benchmarks []api.EvaluationBenchmarkConfig) error {
+	for _, b := range benchmarks {
+		if b.TestDataRef == nil || b.TestDataRef.Git == nil {
+			continue
+		}
+		git := b.TestDataRef.Git
+		if err := api.ValidateGitCloneURLAuth(git.URL, strings.TrimSpace(git.SecretRef) != ""); err != nil {
+			return serviceerrors.NewServiceError(messages.RequestValidationFailed, "Error", err.Error())
+		}
+	}
+	return nil
+}
+
 // ValidateCollectionOverrides returns an error if any override references a
 // provider_id or benchmark id that does not exist in the collection.
 // It must be called after the collection is fetched from storage.
