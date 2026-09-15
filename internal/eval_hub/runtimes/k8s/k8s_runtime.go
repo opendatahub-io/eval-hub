@@ -74,6 +74,15 @@ func (r *K8sRuntime) RunEvaluationJob(
 	}
 
 	go func() {
+		defer func() {
+			if p := recover(); p != nil {
+				r.logger.Error(
+					"panic in kubernetes job creation goroutine",
+					"panic", p,
+					"job_id", evaluation.Resource.ID,
+				)
+			}
+		}()
 		for idx, bench := range benchmarks {
 			benchCtx := context.Background()
 			if err := r.createBenchmarkResources(benchCtx, r.logger, evaluation, &bench, idx, storage); err != nil {

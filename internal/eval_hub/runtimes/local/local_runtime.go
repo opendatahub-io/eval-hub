@@ -202,6 +202,17 @@ func (r *LocalRuntime) RunEvaluationJob(
 
 	for i, bench := range benchmarks {
 		go func() {
+			defer func() {
+				if p := recover(); p != nil {
+					r.logger.Error(
+						"panic in local runtime benchmark goroutine",
+						"panic", p,
+						"job_id", jobID,
+						"benchmark_id", bench.ID,
+						"benchmark_index", i,
+					)
+				}
+			}()
 			if err := r.runBenchmark(jobID, bench, i, evaluation, callbackURL, storage); err != nil {
 				metrics.RecordBenchmarkRuntimeError(r.ctx, r.Name())
 				r.logger.Error(
