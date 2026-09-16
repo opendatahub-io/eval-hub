@@ -227,6 +227,65 @@ const (
 // The caller uses this to fall back to commit-SHA handling.
 var errRefNotFound = fmt.Errorf("ref not found as branch or tag")
 
+// classifyGitError inspects err for network-related causes (DNS resolution
+// failures, connection refused, timeouts, unreachable hosts) and returns a
+// user-friendly, actionable message wrapping the original error. If the error
+// is not network-related it is returned unchanged.
+func classifyGitError(err error, repoURL string) error {
+	if err == nil {
+		return nil
+	}
+
+	msg := err.Error()
+
+	// DNS resolution failure.
+	var dnsErr *net.DNSError
+	if errors.As(err, &dnsErr) {
+		return fmt.Errorf("cannot clone git repository %q: DNS resolution failed for %q. "+
+			"Ensure the git server is accessible from this cluster: %w", repoURL, dnsErr.Name, err)
+	}
+
+	// Connection-level errors (refused, timeout, unreachable).
+	var opErr *net.OpError
+	if errors.As(err, &opErr) {
+		if opErr.Timeout() {
+			return fmt.Errorf("cannot clone git repository %q: connection timed out. "+
+				"Ensure the git server is accessible from this cluster and not blocked by a firewall: %w", repoURL, err)
+		}
+		return fmt.Errorf("cannot clone git repository %q: %s. "+
+			"Ensure the git server is accessible from this cluster: %w", repoURL, opErr.Err, err)
+	}
+
+	// Context deadline exceeded (overall timeout).
+	if errors.Is(err, context.DeadlineExceeded) {
+		return fmt.Errorf("cannot clone git repository %q: operation timed out. "+
+			"Ensure the git server is accessible from this cluster and consider increasing %s: %w",
+			repoURL, envGitTimeout, err)
+	}
+
+	// String-based heuristics for errors surfaced by go-git or net/http that do
+	// not always wrap a typed net error.
+	lower := strings.ToLower(msg)
+	networkPatterns := []string{
+		"no such host",
+		"connection refused",
+		"connection reset",
+		"network is unreachable",
+		"no route to host",
+		"i/o timeout",
+		"tls handshake timeout",
+		"dial tcp",
+	}
+	for _, pat := range networkPatterns {
+		if strings.Contains(lower, pat) {
+			return fmt.Errorf("cannot clone git repository %q: network is unreachable. "+
+				"Ensure the git server is accessible from this cluster: %w", repoURL, err)
+		}
+	}
+
+	return err
+}
+
 // resolveRemoteRef performs a lightweight ls-remote (no pack transfer) to determine
 // whether ref is a branch or a tag. When both refs/heads/<ref> and refs/tags/<ref> exist,
 // branch wins. Returns errRefNotFound when neither matches.
@@ -237,7 +296,7 @@ func resolveRemoteRef(ctx context.Context, repoURL, ref string, auth *githttp.Ba
 	})
 	refs, err := remote.ListContext(ctx, &git.ListOptions{Auth: auth})
 	if err != nil {
-		return refKindBranch, fmt.Errorf("ls-remote %q: %w", repoURL, err)
+		return refKindBranch, classifyGitError(fmt.Errorf("ls-remote %q: %w", repoURL, err), repoURL)
 	}
 	branchName := plumbing.NewBranchReferenceName(ref)
 	tagName := plumbing.NewTagReferenceName(ref)
@@ -297,7 +356,7 @@ func cloneRef(ctx context.Context, cloneDir, repoURL, ref string, auth *githttp.
 			Progress:      os.Stdout,
 		})
 		if cloneErr != nil {
-			return "", fmt.Errorf("shallow clone %q at %q: %w", repoURL, ref, cloneErr)
+			return "", classifyGitError(fmt.Errorf("shallow clone %q at %q: %w", repoURL, ref, cloneErr), repoURL)
 		}
 
 	case refKindCommit:
@@ -308,7 +367,7 @@ func cloneRef(ctx context.Context, cloneDir, repoURL, ref string, auth *githttp.
 			Progress: os.Stdout,
 		})
 		if cloneErr != nil {
-			return "", fmt.Errorf("clone %q: %w", repoURL, cloneErr)
+			return "", classifyGitError(fmt.Errorf("clone %q: %w", repoURL, cloneErr), repoURL)
 		}
 		wt, err := repo.Worktree()
 		if err != nil {

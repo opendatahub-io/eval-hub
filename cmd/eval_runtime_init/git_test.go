@@ -3,6 +3,7 @@ package main
 import (
 	"context"
 	"errors"
+	"fmt"
 	"net"
 	"net/http"
 	"os"
@@ -654,6 +655,112 @@ func TestReadSecret_ViaOpenRoot(t *testing.T) {
 	}
 	if _, err := readSecret("../escape"); err == nil {
 		t.Error("traversal should return error")
+	}
+}
+
+func TestClassifyGitError_DNSError(t *testing.T) {
+	t.Parallel()
+	inner := &net.DNSError{Err: "no such host", Name: "example.com", IsNotFound: true}
+	err := classifyGitError(fmt.Errorf("ls-remote: %w", inner), "https://example.com/repo.git")
+	if err == nil {
+		t.Fatal("expected error")
+	}
+	msg := err.Error()
+	if !strings.Contains(msg, "DNS resolution failed") {
+		t.Errorf("want DNS resolution message, got: %s", msg)
+	}
+	if !strings.Contains(msg, "example.com") {
+		t.Errorf("want hostname in message, got: %s", msg)
+	}
+	if !strings.Contains(msg, "Ensure the git server is accessible from this cluster") {
+		t.Errorf("want actionable guidance, got: %s", msg)
+	}
+	// Original error should be preserved in the chain.
+	if !errors.Is(err, inner) {
+		t.Errorf("original error not in chain")
+	}
+}
+
+func TestClassifyGitError_OpError(t *testing.T) {
+	t.Parallel()
+	inner := &net.OpError{
+		Op:  "dial",
+		Net: "tcp",
+		Addr: &net.TCPAddr{
+			IP:   net.ParseIP("1.2.3.4"),
+			Port: 443,
+		},
+		Err: fmt.Errorf("connection refused"),
+	}
+	err := classifyGitError(fmt.Errorf("clone: %w", inner), "https://example.com/repo.git")
+	if err == nil {
+		t.Fatal("expected error")
+	}
+	msg := err.Error()
+	if !strings.Contains(msg, "cannot clone git repository") {
+		t.Errorf("want actionable message, got: %s", msg)
+	}
+	if !strings.Contains(msg, "Ensure the git server is accessible from this cluster") {
+		t.Errorf("want guidance, got: %s", msg)
+	}
+}
+
+func TestClassifyGitError_ContextDeadline(t *testing.T) {
+	t.Parallel()
+	err := classifyGitError(
+		fmt.Errorf("clone: %w", context.DeadlineExceeded),
+		"https://example.com/repo.git",
+	)
+	if err == nil {
+		t.Fatal("expected error")
+	}
+	msg := err.Error()
+	if !strings.Contains(msg, "operation timed out") {
+		t.Errorf("want timeout message, got: %s", msg)
+	}
+	if !strings.Contains(msg, envGitTimeout) {
+		t.Errorf("want timeout env var hint, got: %s", msg)
+	}
+}
+
+func TestClassifyGitError_StringHeuristics(t *testing.T) {
+	t.Parallel()
+	patterns := []string{
+		"dial tcp: lookup example.com: no such host",
+		"connection refused",
+		"network is unreachable",
+		"no route to host",
+		"i/o timeout",
+		"connection reset by peer",
+	}
+	for _, pat := range patterns {
+		t.Run(pat, func(t *testing.T) {
+			t.Parallel()
+			err := classifyGitError(fmt.Errorf("clone failed: %s", pat), "https://example.com/repo.git")
+			if err == nil {
+				t.Fatal("expected error")
+			}
+			msg := err.Error()
+			if !strings.Contains(msg, "cannot clone git repository") {
+				t.Errorf("want actionable message for %q, got: %s", pat, msg)
+			}
+		})
+	}
+}
+
+func TestClassifyGitError_NonNetworkPassthrough(t *testing.T) {
+	t.Parallel()
+	orig := fmt.Errorf("ref not found")
+	err := classifyGitError(orig, "https://example.com/repo.git")
+	if err != orig {
+		t.Errorf("non-network error should pass through unchanged, got: %v", err)
+	}
+}
+
+func TestClassifyGitError_Nil(t *testing.T) {
+	t.Parallel()
+	if err := classifyGitError(nil, "https://example.com/repo.git"); err != nil {
+		t.Errorf("nil input should return nil, got: %v", err)
 	}
 }
 

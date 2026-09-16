@@ -2,8 +2,10 @@ package main
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"io"
+	"log/slog"
 	"net/http"
 	"net/http/httptest"
 	"os"
@@ -338,5 +340,56 @@ func TestDownloadObjectWritesNestedFile(t *testing.T) {
 	}
 	if string(got) != "hello" {
 		t.Fatalf("file contents = %q, want %q", got, "hello")
+	}
+}
+
+func TestWriteTerminationMessage_WritesFile(t *testing.T) {
+	t.Parallel()
+	dir := t.TempDir()
+	path := filepath.Join(dir, "termination-log")
+	orig := terminationMessagePath
+	terminationMessagePath = path
+	t.Cleanup(func() { terminationMessagePath = orig })
+
+	logger := slog.New(slog.NewTextHandler(os.Stdout, &slog.HandlerOptions{Level: slog.LevelError}))
+	writeTerminationMessage(errors.New("something broke"), logger)
+
+	got, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatalf("ReadFile() = %v", err)
+	}
+	if string(got) != "something broke" {
+		t.Fatalf("termination message = %q, want %q", got, "something broke")
+	}
+}
+
+func TestWriteTerminationMessage_EmptyPathSkips(t *testing.T) {
+	t.Parallel()
+	orig := terminationMessagePath
+	terminationMessagePath = ""
+	t.Cleanup(func() { terminationMessagePath = orig })
+
+	logger := slog.New(slog.NewTextHandler(os.Stdout, &slog.HandlerOptions{Level: slog.LevelError}))
+	writeTerminationMessage(errors.New("should not be written"), logger)
+}
+
+func TestWriteTerminationMessage_TruncatesLongMessage(t *testing.T) {
+	t.Parallel()
+	dir := t.TempDir()
+	path := filepath.Join(dir, "termination-log")
+	orig := terminationMessagePath
+	terminationMessagePath = path
+	t.Cleanup(func() { terminationMessagePath = orig })
+
+	logger := slog.New(slog.NewTextHandler(os.Stdout, &slog.HandlerOptions{Level: slog.LevelError}))
+	long := strings.Repeat("x", 5000)
+	writeTerminationMessage(errors.New(long), logger)
+
+	got, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatalf("ReadFile() = %v", err)
+	}
+	if len(got) != 4096 {
+		t.Fatalf("termination message length = %d, want 4096", len(got))
 	}
 }
