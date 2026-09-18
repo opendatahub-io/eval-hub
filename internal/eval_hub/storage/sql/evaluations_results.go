@@ -4,6 +4,7 @@ import (
 	"database/sql"
 	"fmt"
 	"reflect"
+	"sort"
 
 	"github.com/eval-hub/eval-hub/internal/eval_hub/handlers"
 	"github.com/eval-hub/eval-hub/pkg/api"
@@ -30,6 +31,12 @@ func (s *sqlStorage) updateBenchmarkResults(job *api.EvaluationJobResource, runS
 	}
 
 	job.Results.Benchmarks = append(job.Results.Benchmarks, *result)
+
+	// Sort benchmarks by BenchmarkIndex to preserve submission order regardless
+	// of event arrival order.
+	sort.Slice(job.Results.Benchmarks, func(i, j int) bool {
+		return job.Results.Benchmarks[i].BenchmarkIndex < job.Results.Benchmarks[j].BenchmarkIndex
+	})
 
 	return nil
 }

@@ -3,6 +3,7 @@ package sql
 import (
 	"database/sql"
 	"encoding/json"
+	"sort"
 
 	"github.com/eval-hub/eval-hub/internal/eval_hub/constants"
 	"github.com/eval-hub/eval-hub/internal/eval_hub/handlers"
@@ -239,6 +240,12 @@ func (s *sqlStorage) updateBenchmarkStatus(job *api.EvaluationJobResource, runSt
 		}
 	}
 	job.Status.Benchmarks = append(job.Status.Benchmarks, *benchmarkStatus)
+
+	// Sort benchmarks by BenchmarkIndex to preserve submission order regardless
+	// of event arrival order.
+	sort.Slice(job.Status.Benchmarks, func(i, j int) bool {
+		return job.Status.Benchmarks[i].BenchmarkIndex < job.Status.Benchmarks[j].BenchmarkIndex
+	})
 }
 
 // UpdateEvaluationJobWithRunStatus runs in a transaction: fetches the job, merges RunStatusInternal into the entity, and persists.

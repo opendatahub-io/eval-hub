@@ -78,6 +78,14 @@ func TestUpdateEvaluationJob_ConcurrentBenchmarkCompletions(t *testing.T) {
 	testUpdateEvaluationJob_ConcurrentBenchmarkCompletions(t, drivers[0], getDBName())
 }
 
+func TestUpdateEvaluationJob_BenchmarkOrderPreserved(t *testing.T) {
+	testUpdateEvaluationJob_BenchmarkOrderPreserved(t, drivers[0], getDBName())
+}
+
+func TestUpdateEvaluationJob_ResultsBenchmarkOrderPreserved(t *testing.T) {
+	testUpdateEvaluationJob_ResultsBenchmarkOrderPreserved(t, drivers[0], getDBName())
+}
+
 func TestUpdateEvaluationJobResolvedSHA_DirectJob(t *testing.T) {
 	testUpdateEvaluationJobResolvedSHA_DirectJob(t, drivers[0], getDBName())
 }
@@ -287,6 +295,183 @@ func testUpdateEvaluationJob_ConcurrentBenchmarkCompletions(t *testing.T, driver
 	for _, benchmark := range final.Status.Benchmarks {
 		if benchmark.Status != api.StateCompleted {
 			t.Fatalf("benchmark %s status = %s, want completed", benchmark.ID, benchmark.Status)
+		}
+	}
+}
+
+// testUpdateEvaluationJob_BenchmarkOrderPreserved verifies that status.benchmarks
+// is sorted by benchmark_index (submission order) regardless of the order in which
+// benchmark status events arrive. Regression test for RHOAIENG-88600.
+func testUpdateEvaluationJob_BenchmarkOrderPreserved(t *testing.T, driver string, databaseName string) {
+	store, err := getTestStorage(t, driver, databaseName)
+	if err != nil {
+		t.Fatalf("failed to create storage: %v", err)
+	}
+
+	jobID := common.GUID()
+	now := time.Now()
+	config := &api.EvaluationJobConfig{
+		Model: &api.ModelRef{URL: "http://test.com", Name: "test"},
+		Benchmarks: []api.EvaluationBenchmarkConfig{
+			{Ref: api.Ref{ID: "arc_easy"}, ProviderID: "lm_eval"},
+			{Ref: api.Ref{ID: "truthfulqa_mc1"}, ProviderID: "lm_eval"},
+			{Ref: api.Ref{ID: "hellaswag"}, ProviderID: "lm_eval"},
+		},
+	}
+	job := &api.EvaluationJobResource{
+		Resource: api.EvaluationResource{
+			Resource: api.Resource{
+				ID:        jobID,
+				Tenant:    api.Tenant(getTenant("team-order")),
+				CreatedAt: now,
+				UpdatedAt: now,
+			},
+		},
+		Status: &api.EvaluationJobStatus{
+			EvaluationJobState: api.EvaluationJobState{State: api.OverallStateRunning},
+		},
+		EvaluationJobConfig: *config,
+	}
+	if err := store.CreateEvaluationJob(job); err != nil {
+		t.Fatalf("CreateEvaluationJob: %v", err)
+	}
+
+	// Complete benchmarks in reverse order (index 2, then 1, then 0) to
+	// simulate out-of-order completion.
+	completions := []struct {
+		id    string
+		index int
+	}{
+		{"hellaswag", 2},
+		{"truthfulqa_mc1", 1},
+		{"arc_easy", 0},
+	}
+	for _, c := range completions {
+		if err := store.UpdateEvaluationJob(jobID, &api.StatusEvent{
+			BenchmarkStatusEvent: &api.BenchmarkStatusEvent{
+				ID: c.id, ProviderID: "lm_eval", BenchmarkIndex: c.index,
+				Status: api.StateCompleted, CompletedAt: api.DateTimeToString(now),
+			},
+		}); err != nil {
+			t.Fatalf("complete %s (index %d): %v", c.id, c.index, err)
+		}
+	}
+
+	final, err := store.GetEvaluationJob(jobID)
+	if err != nil {
+		t.Fatalf("GetEvaluationJob: %v", err)
+	}
+	if len(final.Status.Benchmarks) != 3 {
+		t.Fatalf("expected 3 benchmark statuses, got %d", len(final.Status.Benchmarks))
+	}
+
+	// Verify that benchmarks are sorted by benchmark_index (submission order).
+	expectedOrder := []struct {
+		id    string
+		index int
+	}{
+		{"arc_easy", 0},
+		{"truthfulqa_mc1", 1},
+		{"hellaswag", 2},
+	}
+	for i, want := range expectedOrder {
+		got := final.Status.Benchmarks[i]
+		if got.BenchmarkIndex != want.index {
+			t.Errorf("status.benchmarks[%d].benchmark_index = %d, want %d", i, got.BenchmarkIndex, want.index)
+		}
+		if got.ID != want.id {
+			t.Errorf("status.benchmarks[%d].id = %q, want %q", i, got.ID, want.id)
+		}
+	}
+}
+
+// testUpdateEvaluationJob_ResultsBenchmarkOrderPreserved verifies that results.benchmarks
+// is sorted by benchmark_index (submission order) regardless of the order in which
+// benchmark status events arrive. Companion to the status.benchmarks ordering test.
+func testUpdateEvaluationJob_ResultsBenchmarkOrderPreserved(t *testing.T, driver string, databaseName string) {
+	store, err := getTestStorage(t, driver, databaseName)
+	if err != nil {
+		t.Fatalf("failed to create storage: %v", err)
+	}
+
+	jobID := common.GUID()
+	now := time.Now()
+	config := &api.EvaluationJobConfig{
+		Model: &api.ModelRef{URL: "http://test.com", Name: "test"},
+		Benchmarks: []api.EvaluationBenchmarkConfig{
+			{Ref: api.Ref{ID: "arc_easy"}, ProviderID: "lm_eval"},
+			{Ref: api.Ref{ID: "truthfulqa_mc1"}, ProviderID: "lm_eval"},
+			{Ref: api.Ref{ID: "hellaswag"}, ProviderID: "lm_eval"},
+		},
+	}
+	job := &api.EvaluationJobResource{
+		Resource: api.EvaluationResource{
+			Resource: api.Resource{
+				ID:        jobID,
+				Tenant:    api.Tenant(getTenant("team-results-order")),
+				CreatedAt: now,
+				UpdatedAt: now,
+			},
+		},
+		Status: &api.EvaluationJobStatus{
+			EvaluationJobState: api.EvaluationJobState{State: api.OverallStateRunning},
+		},
+		EvaluationJobConfig: *config,
+	}
+	if err := store.CreateEvaluationJob(job); err != nil {
+		t.Fatalf("CreateEvaluationJob: %v", err)
+	}
+
+	// Complete benchmarks in reverse order (index 2, then 1, then 0) to
+	// simulate out-of-order completion.
+	completions := []struct {
+		id    string
+		index int
+	}{
+		{"hellaswag", 2},
+		{"truthfulqa_mc1", 1},
+		{"arc_easy", 0},
+	}
+	for _, c := range completions {
+		if err := store.UpdateEvaluationJob(jobID, &api.StatusEvent{
+			BenchmarkStatusEvent: &api.BenchmarkStatusEvent{
+				ID: c.id, ProviderID: "lm_eval", BenchmarkIndex: c.index,
+				Status: api.StateCompleted, CompletedAt: api.DateTimeToString(now),
+				Metrics: map[string]any{"score": float64(0.5)},
+			},
+		}); err != nil {
+			t.Fatalf("complete %s (index %d): %v", c.id, c.index, err)
+		}
+	}
+
+	final, err := store.GetEvaluationJob(jobID)
+	if err != nil {
+		t.Fatalf("GetEvaluationJob: %v", err)
+	}
+	if final.Results == nil || len(final.Results.Benchmarks) != 3 {
+		benchCount := 0
+		if final.Results != nil {
+			benchCount = len(final.Results.Benchmarks)
+		}
+		t.Fatalf("expected 3 benchmark results, got %d", benchCount)
+	}
+
+	// Verify that results.benchmarks are sorted by benchmark_index (submission order).
+	expectedOrder := []struct {
+		id    string
+		index int
+	}{
+		{"arc_easy", 0},
+		{"truthfulqa_mc1", 1},
+		{"hellaswag", 2},
+	}
+	for i, want := range expectedOrder {
+		got := final.Results.Benchmarks[i]
+		if got.BenchmarkIndex != want.index {
+			t.Errorf("results.benchmarks[%d].benchmark_index = %d, want %d", i, got.BenchmarkIndex, want.index)
+		}
+		if got.ID != want.id {
+			t.Errorf("results.benchmarks[%d].id = %q, want %q", i, got.ID, want.id)
 		}
 	}
 }
