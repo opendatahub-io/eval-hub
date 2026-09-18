@@ -94,6 +94,14 @@ func TestUpdateEvaluationJobResolvedSHA_EdgeCases(t *testing.T) {
 	testUpdateEvaluationJobResolvedSHA_EdgeCases(t, drivers[0], getDBName())
 }
 
+func TestUpdateEvaluationJob_PersistsEvaluationPhase(t *testing.T) {
+	testUpdateEvaluationJob_PersistsEvaluationPhase(t, drivers[0], getDBName())
+}
+
+func TestUpdateEvaluationJob_EvaluationPhaseThresholdViolated(t *testing.T) {
+	testUpdateEvaluationJob_EvaluationPhaseThresholdViolated(t, drivers[0], getDBName())
+}
+
 func testUpdateBenchmarkStatus_RejectsTerminalDowngrade(t *testing.T, driver string, databaseName string) {
 	store, err := getTestStorage(t, driver, databaseName)
 	if err != nil {
@@ -2182,4 +2190,162 @@ func testGetEvaluationJobs_PassCriteria(jobThreshold *float32, collectionThresho
 		return fmt.Errorf("Expected threshold to be %v, got %v", result, v)
 	}
 	return nil
+}
+
+func testUpdateEvaluationJob_PersistsEvaluationPhase(t *testing.T, driver string, databaseName string) {
+	store, err := getTestStorage(t, driver, databaseName)
+	if err != nil {
+		t.Fatalf("Failed to create storage: %v", err)
+	}
+
+	now := time.Now()
+	jobID := common.GUID()
+	job := &api.EvaluationJobResource{
+		Resource: api.EvaluationResource{
+			Resource: api.Resource{
+				ID:        jobID,
+				Tenant:    api.Tenant(getTenant("tenant-eval-phase")),
+				CreatedAt: now,
+				UpdatedAt: now,
+			},
+		},
+		Status: &api.EvaluationJobStatus{
+			EvaluationJobState: api.EvaluationJobState{
+				State:           api.OverallStatePending,
+				EvaluationPhase: api.EvaluationPhasePending,
+				Message:         &api.MessageInfo{Message: "Created", MessageCode: "CREATED"},
+			},
+		},
+		EvaluationJobConfig: api.EvaluationJobConfig{
+			Model: &api.ModelRef{URL: "http://test-model:8000", Name: "test-model"},
+			Benchmarks: []api.EvaluationBenchmarkConfig{
+				{Ref: api.Ref{ID: "b1"}, ProviderID: "p1"},
+			},
+		},
+	}
+
+	if err := store.CreateEvaluationJob(job); err != nil {
+		t.Fatalf("Failed to create job: %v", err)
+	}
+
+	// Verify initial phase is persisted
+	created, err := store.GetEvaluationJob(jobID)
+	if err != nil {
+		t.Fatalf("Failed to get created job: %v", err)
+	}
+	if created.Status.EvaluationPhase != api.EvaluationPhasePending {
+		t.Fatalf("Expected initial evaluation_phase=%q, got %q", api.EvaluationPhasePending, created.Status.EvaluationPhase)
+	}
+
+	// Transition to running
+	runEvent := &api.StatusEvent{
+		BenchmarkStatusEvent: &api.BenchmarkStatusEvent{
+			ProviderID: "p1",
+			ID:         "b1",
+			Status:     api.StateRunning,
+			StartedAt:  api.DateTimeToString(now),
+		},
+	}
+	if err := store.UpdateEvaluationJob(jobID, runEvent); err != nil {
+		t.Fatalf("Failed to update job to running: %v", err)
+	}
+	running, err := store.GetEvaluationJob(jobID)
+	if err != nil {
+		t.Fatalf("Failed to get running job: %v", err)
+	}
+	if running.Status.EvaluationPhase != api.EvaluationPhaseRunning {
+		t.Fatalf("Expected evaluation_phase=%q after running, got %q", api.EvaluationPhaseRunning, running.Status.EvaluationPhase)
+	}
+
+	// Transition to failed
+	failEvent := &api.StatusEvent{
+		BenchmarkStatusEvent: &api.BenchmarkStatusEvent{
+			ProviderID: "p1",
+			ID:         "b1",
+			Status:     api.StateFailed,
+			ErrorMessage: &api.MessageInfo{
+				Message:     "model unreachable",
+				MessageCode: "BENCHMARK_FAILED",
+			},
+		},
+	}
+	if err := store.UpdateEvaluationJob(jobID, failEvent); err != nil {
+		t.Fatalf("Failed to update job to failed: %v", err)
+	}
+	failed, err := store.GetEvaluationJob(jobID)
+	if err != nil {
+		t.Fatalf("Failed to get failed job: %v", err)
+	}
+	if failed.Status.EvaluationPhase != api.EvaluationPhaseFailed {
+		t.Fatalf("Expected evaluation_phase=%q after failure, got %q", api.EvaluationPhaseFailed, failed.Status.EvaluationPhase)
+	}
+}
+
+func testUpdateEvaluationJob_EvaluationPhaseThresholdViolated(t *testing.T, driver string, databaseName string) {
+	store, err := getTestStorage(t, driver, databaseName)
+	if err != nil {
+		t.Fatalf("Failed to create storage: %v", err)
+	}
+
+	now := time.Now()
+	jobID := common.GUID()
+	threshold := float32(0.9)
+	job := &api.EvaluationJobResource{
+		Resource: api.EvaluationResource{
+			Resource: api.Resource{
+				ID:        jobID,
+				Tenant:    api.Tenant(getTenant("tenant-threshold")),
+				CreatedAt: now,
+				UpdatedAt: now,
+			},
+		},
+		Status: &api.EvaluationJobStatus{
+			EvaluationJobState: api.EvaluationJobState{
+				State:           api.OverallStatePending,
+				EvaluationPhase: api.EvaluationPhasePending,
+				Message:         &api.MessageInfo{Message: "Created", MessageCode: "CREATED"},
+			},
+		},
+		EvaluationJobConfig: api.EvaluationJobConfig{
+			Model:        &api.ModelRef{URL: "http://test-model:8000", Name: "test-model"},
+			PassCriteria: &api.PassCriteria{Threshold: &threshold},
+			Benchmarks: []api.EvaluationBenchmarkConfig{
+				{
+					Ref:          api.Ref{ID: "b1"},
+					ProviderID:   "p1",
+					PrimaryScore: &api.PrimaryScore{Metric: "acc"},
+					PassCriteria: &api.PassCriteria{Threshold: &threshold},
+				},
+			},
+		},
+	}
+
+	if err := store.CreateEvaluationJob(job); err != nil {
+		t.Fatalf("Failed to create job: %v", err)
+	}
+
+	// Complete the benchmark with a score below the threshold
+	completeEvent := &api.StatusEvent{
+		BenchmarkStatusEvent: &api.BenchmarkStatusEvent{
+			ProviderID:  "p1",
+			ID:          "b1",
+			Status:      api.StateCompleted,
+			Metrics:     map[string]any{"acc": float64(0.5)},
+			CompletedAt: api.DateTimeToString(now),
+		},
+	}
+	if err := store.UpdateEvaluationJob(jobID, completeEvent); err != nil {
+		t.Fatalf("Failed to update job to completed: %v", err)
+	}
+
+	completed, err := store.GetEvaluationJob(jobID)
+	if err != nil {
+		t.Fatalf("Failed to get completed job: %v", err)
+	}
+	if completed.Status.State != api.OverallStateCompleted {
+		t.Fatalf("Expected overall state=%q, got %q", api.OverallStateCompleted, completed.Status.State)
+	}
+	if completed.Status.EvaluationPhase != api.EvaluationPhaseThresholdViolated {
+		t.Fatalf("Expected evaluation_phase=%q when threshold violated, got %q", api.EvaluationPhaseThresholdViolated, completed.Status.EvaluationPhase)
+	}
 }
