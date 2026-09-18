@@ -261,16 +261,20 @@ func GetJobBenchmarks(job *api.EvaluationJobResource, collection *api.Collection
 
 func mergeBenchmarkParameters(benchmark api.CollectionBenchmarkConfig, jobBenchmarks []api.EvaluationBenchmarkConfig) api.EvaluationBenchmarkConfig {
 	parameters := map[string]any{}
-	for _, jobBenchmark := range jobBenchmarks {
-		if jobBenchmark.ProviderID == benchmark.ProviderID {
-			maps.Copy(parameters, jobBenchmark.Parameters)
+	for key, value := range benchmark.Parameters {
+		if !isEmpty(value) {
+			parameters[key] = value
 		}
 	}
-	for key, value := range benchmark.Parameters {
-		if isEmpty(value) {
-			delete(parameters, key)
-		} else {
-			parameters[key] = value
+	for _, jobBenchmark := range jobBenchmarks {
+		if jobBenchmark.ProviderID == benchmark.ProviderID {
+			for key, value := range jobBenchmark.Parameters {
+				if isEmpty(value) {
+					delete(parameters, key)
+				} else {
+					parameters[key] = value
+				}
+			}
 		}
 	}
 	// pick up TestDataRef and HardwareConfig from the job override if provided
