@@ -1394,6 +1394,11 @@ func TestResolveNodeSelector(t *testing.T) {
 			want: nil,
 		},
 		{
+			name: "zero gpu count with node_selector returns nil",
+			gpu:  &api.GPUConfig{Count: 0, NodeSelector: map[string]string{"nvidia.com/gpu.product": "NVIDIA-A10G"}},
+			want: nil,
+		},
+		{
 			name: "node_selector copied",
 			gpu:  &api.GPUConfig{Count: 1, NodeSelector: map[string]string{"nvidia.com/gpu.product": "NVIDIA-H100-SXM5-80GB"}},
 			want: map[string]string{"nvidia.com/gpu.product": "NVIDIA-H100-SXM5-80GB"},
