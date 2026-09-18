@@ -243,10 +243,15 @@ func GetJobBenchmarks(job *api.EvaluationJobResource, collection *api.Collection
 				"CollectionID", job.Collection.ID,
 			)
 		}
+		type benchmarkKey struct{ id, providerID string }
+		occurrences := make(map[benchmarkKey]int)
 		var mergedBenchmarks []api.EvaluationBenchmarkConfig
 		for _, benchmark := range collection.Benchmarks {
-			benchmark := mergeBenchmarkParameters(benchmark, job.Collection.Benchmarks)
-			mergedBenchmarks = append(mergedBenchmarks, benchmark)
+			key := benchmarkKey{benchmark.ID, benchmark.ProviderID}
+			occurrence := occurrences[key]
+			occurrences[key]++
+			merged := mergeBenchmarkParameters(benchmark, job.Collection.Benchmarks, occurrence)
+			mergedBenchmarks = append(mergedBenchmarks, merged)
 		}
 		return mergedBenchmarks, nil
 	}
@@ -259,13 +264,30 @@ func GetJobBenchmarks(job *api.EvaluationJobResource, collection *api.Collection
 	return job.Benchmarks, nil
 }
 
-func mergeBenchmarkParameters(benchmark api.CollectionBenchmarkConfig, jobBenchmarks []api.EvaluationBenchmarkConfig) api.EvaluationBenchmarkConfig {
+func mergeBenchmarkParameters(benchmark api.CollectionBenchmarkConfig, jobBenchmarks []api.EvaluationBenchmarkConfig, occurrence int) api.EvaluationBenchmarkConfig {
 	parameters := map[string]any{}
+	// Provider-level overrides (no benchmark ID): apply to all collection
+	// benchmarks from the same provider.
 	for _, jobBenchmark := range jobBenchmarks {
-		if jobBenchmark.ProviderID == benchmark.ProviderID {
+		if jobBenchmark.ID == "" && jobBenchmark.ProviderID == benchmark.ProviderID {
 			maps.Copy(parameters, jobBenchmark.Parameters)
 		}
 	}
+	// Benchmark-specific overrides: match by (ID, ProviderID). When the same
+	// pair appears more than once, use the occurrence-th match so that the Nth
+	// collection benchmark with a given (ID, ProviderID) pairs with the Nth
+	// override carrying the same key.
+	seen := 0
+	for _, jobBenchmark := range jobBenchmarks {
+		if jobBenchmark.ID != "" && jobBenchmark.ID == benchmark.ID && jobBenchmark.ProviderID == benchmark.ProviderID {
+			if seen == occurrence {
+				maps.Copy(parameters, jobBenchmark.Parameters)
+				break
+			}
+			seen++
+		}
+	}
+	// Collection benchmark parameters take final precedence.
 	for key, value := range benchmark.Parameters {
 		if isEmpty(value) {
 			delete(parameters, key)
@@ -277,15 +299,19 @@ func mergeBenchmarkParameters(benchmark api.CollectionBenchmarkConfig, jobBenchm
 	testDataRef := benchmark.TestDataRef
 	var hardwareConfig *api.BenchmarkHardwareConfig
 
+	seen = 0
 	for _, jobBenchmark := range jobBenchmarks {
 		if jobBenchmark.ID == benchmark.ID && jobBenchmark.ProviderID == benchmark.ProviderID {
-			if jobBenchmark.TestDataRef != nil {
-				testDataRef = jobBenchmark.TestDataRef
+			if seen == occurrence {
+				if jobBenchmark.TestDataRef != nil {
+					testDataRef = jobBenchmark.TestDataRef
+				}
+				if jobBenchmark.HardwareConfig != nil {
+					hardwareConfig = jobBenchmark.HardwareConfig
+				}
+				break
 			}
-			if jobBenchmark.HardwareConfig != nil {
-				hardwareConfig = jobBenchmark.HardwareConfig
-			}
-			break
+			seen++
 		}
 	}
 	if hardwareConfig == nil {
