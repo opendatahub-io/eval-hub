@@ -54,6 +54,9 @@ func (f *fakeStorage) Ping(_ time.Duration) error { return nil }
 func (f *fakeStorage) CreateEvaluationJob(_ *api.EvaluationJobResource) error {
 	return nil
 }
+func (f *fakeStorage) CreateEvaluationJobAndUpdateCollection(_ *api.EvaluationJobResource) error {
+	return nil
+}
 func (f *fakeStorage) GetEvaluationJob(_ string) (*api.EvaluationJobResource, error) {
 	return nil, nil
 }
@@ -86,8 +89,9 @@ func (f *fakeStorage) UpdateCollection(_ string, _ *api.CollectionConfig) (*api.
 func (f *fakeStorage) PatchCollection(_ string, _ *api.Patch) (*api.CollectionResource, error) {
 	return nil, nil
 }
-func (f *fakeStorage) DeleteCollection(_ string) error {
-	return nil
+func (f *fakeStorage) DeleteCollection(_ string) error { return nil }
+func (f *fakeStorage) UpdateCollectionStatus(_ string, _ *api.CollectionStatus) (*api.CollectionResource, error) {
+	return nil, nil
 }
 func (f *fakeStorage) CreateProvider(_ *api.ProviderResource) error {
 	return nil

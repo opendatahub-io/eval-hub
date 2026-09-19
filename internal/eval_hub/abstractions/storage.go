@@ -68,6 +68,9 @@ type Storage interface {
 
 	// Evaluation job operations
 	CreateEvaluationJob(evaluation *api.EvaluationJobResource) error
+	// CreateEvaluationJobAndUpdateCollection atomically persists an evaluation job and
+	// applies server-managed updates to the collection referenced by the job.
+	CreateEvaluationJobAndUpdateCollection(evaluation *api.EvaluationJobResource) error
 	GetEvaluationJob(id string) (*api.EvaluationJobResource, error)
 	GetEvaluationJobs(filter *QueryFilter) (*QueryResults[api.EvaluationJobResource], error)
 	DeleteEvaluationJob(id string) error
@@ -85,6 +88,9 @@ type Storage interface {
 	UpdateCollection(id string, collection *api.CollectionConfig) (*api.CollectionResource, error)
 	PatchCollection(id string, patches *api.Patch) (*api.CollectionResource, error)
 	DeleteCollection(id string) error
+	// UpdateCollectionStatus overwrites the Status field on an existing collection.
+	// Used by the clone handler (to set DerivedFrom) and by job creation (to increment RunCount).
+	UpdateCollectionStatus(id string, state *api.CollectionStatus) (*api.CollectionResource, error)
 
 	// Provider operations
 	CreateProvider(provider *api.ProviderResource) error

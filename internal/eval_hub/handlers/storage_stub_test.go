@@ -22,6 +22,9 @@ func (noopStorage) Ping(_ time.Duration) error                   { return nil }
 func (noopStorage) CreateEvaluationJob(_ *api.EvaluationJobResource) error {
 	return nil
 }
+func (noopStorage) CreateEvaluationJobAndUpdateCollection(_ *api.EvaluationJobResource) error {
+	return nil
+}
 func (noopStorage) GetEvaluationJob(_ string) (*api.EvaluationJobResource, error) {
 	return nil, nil
 }
@@ -49,7 +52,10 @@ func (noopStorage) UpdateCollection(_ string, _ *api.CollectionConfig) (*api.Col
 func (noopStorage) PatchCollection(_ string, _ *api.Patch) (*api.CollectionResource, error) {
 	return nil, nil
 }
-func (noopStorage) DeleteCollection(_ string) error              { return nil }
+func (noopStorage) DeleteCollection(_ string) error { return nil }
+func (noopStorage) UpdateCollectionStatus(_ string, _ *api.CollectionStatus) (*api.CollectionResource, error) {
+	return nil, nil
+}
 func (noopStorage) CreateProvider(_ *api.ProviderResource) error { return nil }
 func (noopStorage) GetProvider(_ string) (*api.ProviderResource, error) {
 	return nil, nil
