@@ -9,6 +9,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"sync"
 
@@ -23,7 +24,12 @@ import (
 	"github.com/eval-hub/eval-hub/pkg/api"
 )
 
-const localJobsBaseDir = "/tmp/evalhub-jobs"
+const (
+	localJobsBaseDir      = "/tmp/evalhub-jobs"
+	evalHubJobSpecPathEnv = "EVALHUB_JOB_SPEC_PATH"
+	evalHubModeEnv        = "EVALHUB_MODE"
+	mlflowTrackingURIEnv  = "MLFLOW_TRACKING_URI"
+)
 
 // jobTracker manages subprocess tracking per job for cancellation.
 type jobTracker interface {
@@ -83,6 +89,8 @@ type LocalRuntime struct {
 	ctx                  context.Context
 	tracker              jobTracker
 	callbackURL          *string
+	mlflowTrackingURI    string
+	otelEndpoint         string                     // OTEL_EXPORTER_OTLP_ENDPOINT for adapter subprocesses; empty when OTEL is not configured
 	sidecarBaseURL       string                     // non-empty when local sidecar mode is active
 	sidecarModelDefaults *config.SidecarModelConfig // model proxy defaults from config; may be nil
 }
@@ -93,13 +101,21 @@ func NewLocalRuntime(
 ) (abstractions.Runtime, error) {
 	var sidecarBaseURL string
 	var sidecarModelDefaults *config.SidecarModelConfig
+	var mlflowTrackingURI string
+	var otelEndpoint string
+	if serviceConfig != nil && serviceConfig.MLFlow != nil {
+		mlflowTrackingURI = serviceConfig.MLFlow.EffectiveTrackingURI()
+	}
 	if serviceConfig != nil && serviceConfig.Sidecar != nil && serviceConfig.Sidecar.LocalMode && serviceConfig.Sidecar.BaseURL != "" {
 		sidecarBaseURL = serviceConfig.Sidecar.BaseURL
 		sidecarModelDefaults = serviceConfig.Sidecar.Model
 	}
+	otelEndpoint = otelEndpointFromConfig(serviceConfig)
 	return &LocalRuntime{
 		logger:               logger,
 		callbackURL:          buildCallbackURL(serviceConfig),
+		mlflowTrackingURI:    mlflowTrackingURI,
+		otelEndpoint:         otelEndpoint,
 		sidecarBaseURL:       sidecarBaseURL,
 		sidecarModelDefaults: sidecarModelDefaults,
 		tracker: &pidTracker{
@@ -125,12 +141,33 @@ func buildCallbackURL(serviceConfig *config.Config) *string {
 	return &u
 }
 
+// otelEndpointFromConfig derives the OTEL_EXPORTER_OTLP_ENDPOINT value from
+// service config. Returns empty when OTEL is not enabled or no endpoint is set.
+func otelEndpointFromConfig(serviceConfig *config.Config) string {
+	if serviceConfig == nil || serviceConfig.OTEL == nil || !serviceConfig.OTEL.Enabled {
+		return ""
+	}
+	ep := strings.TrimSpace(serviceConfig.OTEL.ExporterEndpoint)
+	if ep == "" {
+		return ""
+	}
+	if strings.HasPrefix(strings.ToLower(ep), "http://") || strings.HasPrefix(strings.ToLower(ep), "https://") {
+		return ep
+	}
+	if serviceConfig.OTEL.ExporterInsecure {
+		return "http://" + ep
+	}
+	return "https://" + ep
+}
+
 func (r *LocalRuntime) WithLogger(logger *slog.Logger) abstractions.Runtime {
 	return &LocalRuntime{
 		logger:               logger,
 		ctx:                  r.ctx,
 		tracker:              r.tracker,
 		callbackURL:          r.callbackURL,
+		mlflowTrackingURI:    r.mlflowTrackingURI,
+		otelEndpoint:         r.otelEndpoint,
 		sidecarBaseURL:       r.sidecarBaseURL,
 		sidecarModelDefaults: r.sidecarModelDefaults,
 	}
@@ -142,6 +179,8 @@ func (r *LocalRuntime) WithContext(ctx context.Context) abstractions.Runtime {
 		ctx:                  ctx,
 		tracker:              r.tracker,
 		callbackURL:          r.callbackURL,
+		mlflowTrackingURI:    r.mlflowTrackingURI,
+		otelEndpoint:         r.otelEndpoint,
 		sidecarBaseURL:       r.sidecarBaseURL,
 		sidecarModelDefaults: r.sidecarModelDefaults,
 	}
@@ -188,8 +227,11 @@ func (r *LocalRuntime) RunEvaluationJob(
 
 	for i, bench := range benchmarks {
 		go func() {
-			if err := r.runBenchmark(jobID, bench, i, evaluation, callbackURL, storage); err != nil {
-				metrics.RecordBenchmarkRuntimeError(r.ctx, r.Name())
+			_, span := startBenchmarkSpan(r.ctx, bench, i)
+			err := r.runBenchmark(jobID, bench, i, evaluation, callbackURL, storage)
+			endBenchmarkSpan(span, err)
+			if err != nil {
+				metrics.RecordBenchmarkRuntimeError(r.ctx, r.Name(), evaluation.Resource.Tenant.String())
 				r.logger.Error(
 					"local runtime benchmark launch failed",
 					"error", err,
@@ -231,7 +273,7 @@ func (r *LocalRuntime) runBenchmark(
 	}
 
 	// Build job spec JSON using shared logic
-	spec, err := shared.BuildJobSpec(evaluation, bench.ProviderID, &bench, benchmarkIndex, callbackURL)
+	spec, err := shared.BuildJobSpec(evaluation, bench.ProviderID, &bench, benchmarkIndex, callbackURL, provider)
 	if err != nil {
 		return fmt.Errorf("build job spec: %w", err)
 	}
@@ -292,14 +334,22 @@ func (r *LocalRuntime) runBenchmark(
 	//      and grandchildren could survive as orphans reparented to PID 1.
 	setSysProcAttr(cmd)
 
-	// Set environment variables
-	cmd.Env = append(os.Environ(),
-		fmt.Sprintf("EVALHUB_JOB_SPEC_PATH=%s", absJobSpecPath),
-		"EVALHUB_MODE=local",
-	)
+	// Start with the inherited environment, then apply EvalHub/configuration
+	// values, and finally provider values. Each later layer replaces matching
+	// keys so the most specific configuration wins.
+	cmd.Env = os.Environ()
+	cmd.Env = replaceEnvironmentVariable(cmd.Env, evalHubJobSpecPathEnv, absJobSpecPath)
+	cmd.Env = replaceEnvironmentVariable(cmd.Env, evalHubModeEnv, "local")
+	if r.mlflowTrackingURI != "" {
+		cmd.Env = replaceEnvironmentVariable(cmd.Env, mlflowTrackingURIEnv, r.mlflowTrackingURI)
+	}
+	if r.otelEndpoint != "" {
+		cmd.Env = replaceEnvironmentVariable(cmd.Env, "OTEL_EXPORTER_OTLP_ENDPOINT", r.otelEndpoint)
+		cmd.Env = replaceEnvironmentVariable(cmd.Env, "OTEL_SERVICE_NAME", "evalhub-adapter")
+	}
 	for _, envVar := range provider.Runtime.Local.Env {
 		if envVar.Name != "" {
-			cmd.Env = append(cmd.Env, fmt.Sprintf("%s=%s", envVar.Name, envVar.Value))
+			cmd.Env = replaceEnvironmentVariable(cmd.Env, envVar.Name, envVar.Value)
 		}
 	}
 
@@ -364,6 +414,33 @@ func (r *LocalRuntime) runBenchmark(
 	}
 
 	return nil
+}
+
+// replaceEnvironmentVariable removes all existing entries for name before
+// appending the replacement. Removing all entries matters because exec.Cmd
+// uses the last matching entry, while subprocesses may observe duplicates.
+func replaceEnvironmentVariable(env []string, name, value string) []string {
+	prefix := name + "="
+	filtered := make([]string, 0, len(env)+1)
+	for _, entry := range env {
+		if !environmentVariableEntryMatches(entry, prefix) {
+			filtered = append(filtered, entry)
+		}
+	}
+	return append(filtered, prefix+value)
+}
+
+// environmentVariableEntryMatches applies the case rules used by the host
+// operating system. Environment variable names are case-sensitive on Unix
+// systems and case-insensitive on Windows.
+func environmentVariableEntryMatches(entry, prefix string) bool {
+	if len(entry) < len(prefix) {
+		return false
+	}
+	if runtime.GOOS == "windows" {
+		return strings.EqualFold(entry[:len(prefix)], prefix)
+	}
+	return strings.HasPrefix(entry, prefix)
 }
 
 // failBenchmark updates storage to mark a benchmark as failed.

@@ -200,6 +200,7 @@ cython_debug/
 #  refer to https://docs.cursor.com/context/ignore-files
 .cursorignore
 .cursorindexingignore
+.cursor/
 
 # Marimo
 marimo/_static/
@@ -263,3 +264,6 @@ mlflow.log
 tests/mcp/vscode/test-scripts/reports/
 
 internal/eval_runtime_sidecar/handlers/testdata/fuzz/
+
+# Inspect AI evaluation logs (local smoke tests)
+logs/

@@ -91,11 +91,11 @@ func (s *postgresStatementsFactory) GetAllowedFilterColumns(tableName string) []
 	allColumns := []string{"owner", "name", "tags"}
 	switch tableName {
 	case shared.TableEvaluations:
-		return append(allColumns, "status", "experiment_id")
+		return append(allColumns, "status", "experiment_id", "collection_id")
 	case shared.TableProviders:
 		return allColumns // "benchmarks" and "scope" are not allowed filters for providers from the database
 	case shared.TableCollections:
-		return append(allColumns, "category") // "scope" is not allowed filter for collections from the database
+		return append(allColumns, "category", "domains", "tasks", "modalities", "industries", "evaluation_targets")
 	default:
 		return nil
 	}
@@ -114,14 +114,31 @@ func (s *postgresStatementsFactory) CreateEntityFilterCondition(key string, valu
 			namePath = "entity->'config'->>'name'"
 		}
 		return fmt.Sprintf("%s = $%d", namePath, index), []any{value}
+	case "collection_id":
+		if tableName == shared.TableEvaluations {
+			return fmt.Sprintf("entity->'config'->'collection'->>'id' = $%d", index), []any{value}
+		}
+		return "", []any{}
 	case "category":
 		if tableName == shared.TableCollections {
-			// collections: category at entity root
 			categoryPath := "entity->>'category'"
 			return fmt.Sprintf("%s = $%d", categoryPath, index), []any{value}
 		}
-		// should never get here as we validate the filter before calling this function
 		return "", []any{}
+	case "domains", "tasks", "modalities", "industries", "evaluation_targets":
+		// Array-contains filter: single string or []string (AND semantics for multiple values).
+		jsonPath := fmt.Sprintf("entity->'%s'", key)
+		if strs, ok := value.([]string); ok {
+			var parts []string
+			var multiArgs []any
+			for i, s := range strs {
+				parts = append(parts, fmt.Sprintf("jsonb_typeof(%s) = 'array' AND EXISTS (SELECT 1 FROM jsonb_array_elements_text(%s) AS val WHERE val = $%d)", jsonPath, jsonPath, index+i))
+				multiArgs = append(multiArgs, s)
+			}
+			return "(" + strings.Join(parts, " AND ") + ")", multiArgs
+		}
+		fieldStr, _ := value.(string)
+		return fmt.Sprintf("jsonb_typeof(%s) = 'array' AND EXISTS (SELECT 1 FROM jsonb_array_elements_text(%s) AS val WHERE val = $%d)", jsonPath, jsonPath, index), []any{fieldStr}
 	case "tags":
 		tagStr, _ := value.(string)
 		// evaluations: tags at config.tags; providers and collections: tags at entity root
@@ -236,4 +253,9 @@ func (s *postgresStatementsFactory) CreateCollectionAddEntityStatement(collectio
 func (s *postgresStatementsFactory) CreateCollectionGetEntityStatement(query *shared.EntityQuery) (string, []any, []any) {
 	where, whereArgs := s.getWhereStatement(query.Resource.Tenant, query.Resource.ID, 1)
 	return fmt.Sprintf(`SELECT id, created_at, updated_at, tenant_id, owner, entity FROM collections WHERE %s;`, where), whereArgs, []any{&query.Resource.ID, &query.Resource.CreatedAt, &query.Resource.UpdatedAt, &query.Resource.Tenant, &query.Resource.Owner, &query.EntityJSON}
+}
+
+func (s *postgresStatementsFactory) CreateCollectionGetEntityForUpdateStatement(query *shared.EntityQuery) (string, []any, []any) {
+	stmt, args, scanArgs := s.CreateCollectionGetEntityStatement(query)
+	return strings.TrimSuffix(stmt, ";") + " FOR UPDATE;", args, scanArgs
 }
