@@ -36,11 +36,15 @@ func (s *terminalExportStorage) WithContext(_ context.Context) abstractions.Stor
 func (s *terminalExportStorage) WithTenant(_ api.Tenant) abstractions.Storage { return s }
 func (s *terminalExportStorage) WithOwner(_ api.User) abstractions.Storage    { return s }
 
-func (s *terminalExportStorage) UpdateEvaluationJob(_ string, status *api.StatusEvent) error {
+func (s *terminalExportStorage) UpdateEvaluationJob(_ string, status *api.StatusEvent) (api.OverallState, error) {
+	var previousState api.OverallState
+	if s.job != nil && s.job.Status != nil {
+		previousState = s.job.Status.State
+	}
 	if s.job != nil && s.job.Status != nil && status != nil && status.BenchmarkStatusEvent != nil {
 		s.job.Status.State = api.OverallState(status.BenchmarkStatusEvent.Status)
 	}
-	return nil
+	return previousState, nil
 }
 
 func TestHandleUpdateEvaluationSkipsCardExportWhenNotTerminal(t *testing.T) {

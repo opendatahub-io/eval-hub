@@ -244,7 +244,7 @@ func testUpdateBenchmarkStatus_RejectsTerminalDowngrade(t *testing.T, driver str
 		t.Fatalf("CreateEvaluationJob: %v", err)
 	}
 
-	if err := store.UpdateEvaluationJob(jobID, &api.StatusEvent{
+	if _, err := store.UpdateEvaluationJob(jobID, &api.StatusEvent{
 		BenchmarkStatusEvent: &api.BenchmarkStatusEvent{
 			ID: "b1", ProviderID: "prov1", BenchmarkIndex: 0,
 			Status: api.StateCompleted, CompletedAt: api.DateTimeToString(now),
@@ -253,7 +253,7 @@ func testUpdateBenchmarkStatus_RejectsTerminalDowngrade(t *testing.T, driver str
 		t.Fatalf("UpdateEvaluationJob completed: %v", err)
 	}
 
-	if err := store.UpdateEvaluationJob(jobID, &api.StatusEvent{
+	if _, err := store.UpdateEvaluationJob(jobID, &api.StatusEvent{
 		BenchmarkStatusEvent: &api.BenchmarkStatusEvent{
 			ID: "b1", ProviderID: "prov1", BenchmarkIndex: 0,
 			Status: api.StateRunning, Phase: api.JobPhasePersistingArtifacts,
@@ -315,12 +315,13 @@ func testUpdateEvaluationJob_ConcurrentBenchmarkCompletions(t *testing.T, driver
 	}
 
 	completeBenchmark := func(id string, index int) error {
-		return store.UpdateEvaluationJob(jobID, &api.StatusEvent{
+		_, err := store.UpdateEvaluationJob(jobID, &api.StatusEvent{
 			BenchmarkStatusEvent: &api.BenchmarkStatusEvent{
 				ID: id, ProviderID: "garak", BenchmarkIndex: index,
 				Status: api.StateCompleted, CompletedAt: api.DateTimeToString(now),
 			},
 		})
+		return err
 	}
 
 	if err := completeBenchmark("truthfulqa_mc1", 1); err != nil {
@@ -565,7 +566,7 @@ func testUpdateEvaluationJob_PreservesProviderID(t *testing.T, driver string, da
 		},
 	}
 
-	err = store.UpdateEvaluationJob(job.Resource.ID, statusUpdate)
+	_, err = store.UpdateEvaluationJob(job.Resource.ID, statusUpdate)
 	if err != nil {
 		t.Fatalf("Failed to update job: %v", err)
 	}
@@ -593,7 +594,7 @@ func testUpdateEvaluationJob_PreservesProviderID(t *testing.T, driver string, da
 		},
 	}
 
-	err = store.UpdateEvaluationJob(job.Resource.ID, completionUpdate)
+	_, err = store.UpdateEvaluationJob(job.Resource.ID, completionUpdate)
 	if err != nil {
 		t.Fatalf("Failed to update job with results: %v", err)
 	}
@@ -670,7 +671,7 @@ func testUpdateEvaluationJob_PersistsPhase(t *testing.T, driver string, database
 		},
 	}
 
-	if err := store.UpdateEvaluationJob(jobID, statusUpdate); err != nil {
+	if _, err := store.UpdateEvaluationJob(jobID, statusUpdate); err != nil {
 		t.Fatalf("Failed to update job with phase: %v", err)
 	}
 
@@ -697,7 +698,7 @@ func testUpdateEvaluationJob_PersistsPhase(t *testing.T, driver string, database
 		},
 	}
 
-	if err := store.UpdateEvaluationJob(jobID, completionUpdate); err != nil {
+	if _, err := store.UpdateEvaluationJob(jobID, completionUpdate); err != nil {
 		t.Fatalf("Failed to update job with completed phase: %v", err)
 	}
 
@@ -762,7 +763,7 @@ func testUpdateEvaluationJob_PersistsAdditionalInfo(t *testing.T, driver string,
 		},
 	}
 
-	if err := store.UpdateEvaluationJob(jobID, runningUpdate); err != nil {
+	if _, err := store.UpdateEvaluationJob(jobID, runningUpdate); err != nil {
 		t.Fatalf("Failed to update job with running status: %v", err)
 	}
 
@@ -784,7 +785,7 @@ func testUpdateEvaluationJob_PersistsAdditionalInfo(t *testing.T, driver string,
 		},
 	}
 
-	if err := store.UpdateEvaluationJob(jobID, completionUpdate); err != nil {
+	if _, err := store.UpdateEvaluationJob(jobID, completionUpdate); err != nil {
 		t.Fatalf("Failed to update job with completed status: %v", err)
 	}
 
@@ -988,7 +989,7 @@ func testEvaluationsStorage(t *testing.T, driver string, databaseName string) {
 		if err != nil {
 			t.Fatalf("Failed to validate status: %v", err)
 		}
-		err = store.UpdateEvaluationJob(evaluationId, status)
+		_, err = store.UpdateEvaluationJob(evaluationId, status)
 		if err != nil {
 			t.Fatalf("Failed to update evaluation job: %v", err)
 		}
@@ -1073,7 +1074,7 @@ func testEvaluationsStorage(t *testing.T, driver string, databaseName string) {
 			},
 		}
 		status.BenchmarkStatusEvent.StampRuntimeMessageOrigins()
-		if err := store.UpdateEvaluationJob(jobID, status); err != nil {
+		if _, err := store.UpdateEvaluationJob(jobID, status); err != nil {
 			t.Fatalf("UpdateEvaluationJob: %v", err)
 		}
 
@@ -1145,7 +1146,7 @@ func testEvaluationsStorage(t *testing.T, driver string, databaseName string) {
 			},
 		}
 		status.BenchmarkStatusEvent.StampRuntimeMessageOrigins()
-		if err := store.UpdateEvaluationJob(jobID, status); err != nil {
+		if _, err := store.UpdateEvaluationJob(jobID, status); err != nil {
 			t.Fatalf("UpdateEvaluationJob: %v", err)
 		}
 
@@ -1208,7 +1209,7 @@ func testEvaluationsStorage(t *testing.T, driver string, databaseName string) {
 			},
 		}
 		status.BenchmarkStatusEvent.StampRuntimeMessageOrigins()
-		if err := store.UpdateEvaluationJob(jobID, status); err != nil {
+		if _, err := store.UpdateEvaluationJob(jobID, status); err != nil {
 			t.Fatalf("UpdateEvaluationJob: %v", err)
 		}
 
@@ -1272,7 +1273,7 @@ func testEvaluationsStorage(t *testing.T, driver string, databaseName string) {
 		}
 		// Stamp defaults missing origins only; an explicit server origin must be kept.
 		status.BenchmarkStatusEvent.StampRuntimeMessageOrigins()
-		if err := store.UpdateEvaluationJob(jobID, status); err != nil {
+		if _, err := store.UpdateEvaluationJob(jobID, status); err != nil {
 			t.Fatalf("UpdateEvaluationJob: %v", err)
 		}
 
@@ -1332,7 +1333,7 @@ func testEvaluationsStorage(t *testing.T, driver string, databaseName string) {
 			},
 		}
 		status.BenchmarkStatusEvent.StampRuntimeMessageOrigins()
-		if err := store.UpdateEvaluationJob(jobID, status); err != nil {
+		if _, err := store.UpdateEvaluationJob(jobID, status); err != nil {
 			t.Fatalf("UpdateEvaluationJob: %v", err)
 		}
 
@@ -1620,7 +1621,7 @@ func testEvaluationsStorage(t *testing.T, driver string, databaseName string) {
 			// Drive job to terminal state
 			switch terminalState {
 			case api.OverallStateCompleted:
-				if err := store.UpdateEvaluationJob(jobID, &api.StatusEvent{
+				if _, err := store.UpdateEvaluationJob(jobID, &api.StatusEvent{
 					BenchmarkStatusEvent: &api.BenchmarkStatusEvent{
 						ID: "b1", ProviderID: "p1", BenchmarkIndex: 0,
 						Status: api.StateCompleted,
@@ -1629,7 +1630,7 @@ func testEvaluationsStorage(t *testing.T, driver string, databaseName string) {
 					t.Fatalf("setup for %s: %v", terminalState, err)
 				}
 			case api.OverallStateFailed:
-				if err := store.UpdateEvaluationJob(jobID, &api.StatusEvent{
+				if _, err := store.UpdateEvaluationJob(jobID, &api.StatusEvent{
 					BenchmarkStatusEvent: &api.BenchmarkStatusEvent{
 						ID: "b1", ProviderID: "p1", BenchmarkIndex: 0,
 						Status:       api.StateFailed,
@@ -1643,7 +1644,7 @@ func testEvaluationsStorage(t *testing.T, driver string, databaseName string) {
 					t.Fatalf("setup for %s: %v", terminalState, err)
 				}
 			case api.OverallStatePartiallyFailed:
-				if err := store.UpdateEvaluationJob(jobID, &api.StatusEvent{
+				if _, err := store.UpdateEvaluationJob(jobID, &api.StatusEvent{
 					BenchmarkStatusEvent: &api.BenchmarkStatusEvent{
 						ID: "b1", ProviderID: "p1", BenchmarkIndex: 0,
 						Status: api.StateCompleted,
@@ -1651,7 +1652,7 @@ func testEvaluationsStorage(t *testing.T, driver string, databaseName string) {
 				}); err != nil {
 					t.Fatalf("setup for %s (b1): %v", terminalState, err)
 				}
-				if err := store.UpdateEvaluationJob(jobID, &api.StatusEvent{
+				if _, err := store.UpdateEvaluationJob(jobID, &api.StatusEvent{
 					BenchmarkStatusEvent: &api.BenchmarkStatusEvent{
 						ID: "b2", ProviderID: "p1", BenchmarkIndex: 1,
 						Status:       api.StateFailed,
@@ -1727,7 +1728,7 @@ func testEvaluationsStorage(t *testing.T, driver string, databaseName string) {
 			t.Errorf("Message should be updated, got %v", updated.Status.Message)
 		}
 		// (2) running->cancelled: verify Benchmarks and Results preserved
-		if err := store.UpdateEvaluationJob(jobID, &api.StatusEvent{
+		if _, err := store.UpdateEvaluationJob(jobID, &api.StatusEvent{
 			BenchmarkStatusEvent: &api.BenchmarkStatusEvent{
 				ID: "bx", ProviderID: "garak", BenchmarkIndex: 0,
 				Status:  api.StateCompleted,
@@ -1764,7 +1765,7 @@ func testEvaluationsStorage(t *testing.T, driver string, databaseName string) {
 		if err := store.CreateEvaluationJob(job2); err != nil {
 			t.Fatalf("CreateEvaluationJob job2: %v", err)
 		}
-		if err := store.UpdateEvaluationJob(jobID2, &api.StatusEvent{
+		if _, err := store.UpdateEvaluationJob(jobID2, &api.StatusEvent{
 			BenchmarkStatusEvent: &api.BenchmarkStatusEvent{
 				ID: "bx", ProviderID: "garak", BenchmarkIndex: 0,
 				Status: api.StateRunning,
@@ -1827,7 +1828,7 @@ func testEvaluationsStorage(t *testing.T, driver string, databaseName string) {
 			t.Fatalf("CreateEvaluationJob: %v", err)
 		}
 		// Set benchmark 0 to running, benchmark 1 to completed, benchmark 2 to pending
-		if err := store.UpdateEvaluationJob(jobID, &api.StatusEvent{
+		if _, err := store.UpdateEvaluationJob(jobID, &api.StatusEvent{
 			BenchmarkStatusEvent: &api.BenchmarkStatusEvent{
 				ID: "b1", ProviderID: "prov1", BenchmarkIndex: 0,
 				Status: api.StateRunning,
@@ -1835,7 +1836,7 @@ func testEvaluationsStorage(t *testing.T, driver string, databaseName string) {
 		}); err != nil {
 			t.Fatalf("UpdateEvaluationJob b1 running: %v", err)
 		}
-		if err := store.UpdateEvaluationJob(jobID, &api.StatusEvent{
+		if _, err := store.UpdateEvaluationJob(jobID, &api.StatusEvent{
 			BenchmarkStatusEvent: &api.BenchmarkStatusEvent{
 				ID: "b2", ProviderID: "prov2", BenchmarkIndex: 1,
 				Status:  api.StateCompleted,
@@ -1844,7 +1845,7 @@ func testEvaluationsStorage(t *testing.T, driver string, databaseName string) {
 		}); err != nil {
 			t.Fatalf("UpdateEvaluationJob b2 completed: %v", err)
 		}
-		if err := store.UpdateEvaluationJob(jobID, &api.StatusEvent{
+		if _, err := store.UpdateEvaluationJob(jobID, &api.StatusEvent{
 			BenchmarkStatusEvent: &api.BenchmarkStatusEvent{
 				ID: "b3", ProviderID: "prov3", BenchmarkIndex: 2,
 				Status: api.StatePending,
