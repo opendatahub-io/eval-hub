@@ -102,6 +102,18 @@ func buildEnvVars(jc *jobConfig, serviceConfig *config.Config) []corev1.EnvVar {
 		}
 	}
 
+	// When pre-cached test data is mounted, tell HuggingFace libraries to
+	// work offline so jobs on disconnected (air-gapped) clusters do not
+	// attempt to reach huggingface.co.
+	if hasS3TestData(jc) || hasPVCTestData(jc) || hasGitTestData(jc) {
+		for _, name := range []string{"HF_HUB_OFFLINE", "HF_DATASETS_OFFLINE", "TRANSFORMERS_OFFLINE"} {
+			if !seen[name] {
+				seen[name] = true
+				env = append(env, corev1.EnvVar{Name: name, Value: "1"})
+			}
+		}
+	}
+
 	// Add provider-specific environment variables
 	for _, item := range jc.defaultEnv {
 		if item.Name == "" || seen[item.Name] {
