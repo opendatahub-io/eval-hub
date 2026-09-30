@@ -1,0 +1,86 @@
+name: Sync from upstream
+
+# Merges eval-hub/eval-hub:main into this mirror and opens a PR with the result.
+# The merge runs in-job so the `ours` merge driver is honored, which keeps this
+# repo's centrally-managed .gitleaks.toml (see .gitattributes `merge=ours`).
+# Any *other* conflict fails the merge step and is surfaced for manual review.
+
+on:
+  schedule:
+    - cron: "0 6 * * *"   # daily at 06:00 UTC
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+env:
+  UPSTREAM_REPO: https://github.com/eval-hub/eval-hub.git
+  UPSTREAM_BRANCH: main
+  SYNC_BRANCH: sync/upstream-main
+
+jobs:
+  sync:
+    if: ${{ github.repository == 'opendatahub-io/eval-hub' }}
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+      pull-requests: write
+    steps:
+      - name: Harden the runner (Audit all outbound calls)
+        uses: step-security/harden-runner@e14015d583714f6e62063499dc959a02595150a1 # v2.21.1
+        with:
+          egress-policy: audit
+
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          fetch-depth: 0
+          # Keep credentials so we can push the sync branch back to origin.
+          persist-credentials: true
+
+      - name: Configure git and the "ours" merge driver
+        run: |
+          git config user.name "eval-hub-sync[bot]"
+          git config user.email "eval-hub-sync@users.noreply.github.com"
+          # Activates the `merge=ours` attribute on .gitleaks.toml for the merge below.
+          git config merge.ours.driver true
+
+      - name: Fetch upstream
+        run: |
+          git remote add upstream "${UPSTREAM_REPO}"
+          git fetch upstream "${UPSTREAM_BRANCH}"
+
+      - name: Check for changes
+        id: check
+        run: |
+          if git merge-base --is-ancestor "upstream/${UPSTREAM_BRANCH}" origin/main; then
+            echo "Already up to date with upstream; nothing to sync."
+            echo "changed=false" >> "$GITHUB_OUTPUT"
+          else
+            echo "changed=true" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Merge upstream
+        if: ${{ steps.check.outputs.changed == 'true' }}
+        run: |
+          git checkout -B "${SYNC_BRANCH}" origin/main
+          # .gitleaks.toml is auto-kept via merge=ours; any other conflict fails here.
+          git merge --no-edit "upstream/${UPSTREAM_BRANCH}"
+
+      - name: Push sync branch
+        if: ${{ steps.check.outputs.changed == 'true' }}
+        run: git push --force-with-lease origin "${SYNC_BRANCH}"
+
+      - name: Open or update pull request
+        if: ${{ steps.check.outputs.changed == 'true' }}
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          if [ -z "$(gh pr list --head "${SYNC_BRANCH}" --base main --state open --json number --jq '.[].number')" ]; then
+            gh pr create \
+              --base main \
+              --head "${SYNC_BRANCH}" \
+              --title "chore: sync from eval-hub:main" \
+              --body "Automated upstream sync. \`.gitleaks.toml\` is kept from this repo via the \`merge=ours\` driver (see \`.gitattributes\`)."
+          else
+            echo "PR from ${SYNC_BRANCH} already open; branch updated."
+          fi
