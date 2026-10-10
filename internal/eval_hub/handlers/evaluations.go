@@ -387,7 +387,8 @@ func (h *Handlers) createPreparedEvaluationJob(
 				},
 				Status: &api.EvaluationJobStatus{
 					EvaluationJobState: api.EvaluationJobState{
-						State: api.OverallStatePending,
+						State:           api.OverallStatePending,
+						EvaluationPhase: api.EvaluationPhasePending,
 						Message: api.WithMessageOrigin(&api.MessageInfo{
 							Message:     "Evaluation job created",
 							MessageCode: constants.MessageCodeEvaluationJobCreated,

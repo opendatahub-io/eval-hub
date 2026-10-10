@@ -1,0 +1,13 @@
+# EvaluationPhase represents the lifecycle phase of an evaluation job.
+# Mirrors the trustyai.opendatahub.io/evaluation-phase label on Kubernetes Jobs
+# and is persisted in EvalHub storage so that it survives Job deletion.
+type: string
+enum:
+  - Pending
+  - Running
+  - Completed
+  - Failed
+  - ThresholdViolated
+description: >-
+  Lifecycle phase of the evaluation job, persisted in storage so it is available
+  even after the backing Kubernetes Job is deleted.
