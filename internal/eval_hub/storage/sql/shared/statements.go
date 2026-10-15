@@ -4,6 +4,7 @@ import (
 	"database/sql"
 	"log/slog"
 
+	"github.com/eval-hub/eval-hub/internal/eval_hub/workloads"
 	"github.com/eval-hub/eval-hub/pkg/api"
 )
 
@@ -16,7 +17,7 @@ type SQLStatementsFactory interface {
 	CreateEntityFilterCondition(key string, value any, index int, tableName string) (condition string, args []any)
 
 	// evaluations operations
-	CreateEvaluationAddEntityStatement(evaluation *api.EvaluationJobResource, entity string) (string, []any)
+	CreateEvaluationAddEntityStatement(evaluation *api.EvaluationJobResource, entity string, workloadType workloads.Type) (string, []any)
 	CreateEvaluationGetEntityStatement(query *EntityQuery) (string, []any, []any)
 	CreateEvaluationGetEntityForUpdateStatement(query *EntityQuery) (string, []any, []any)
 
@@ -31,7 +32,7 @@ type SQLStatementsFactory interface {
 
 	// common operations
 	CreateCountEntitiesStatement(tenant api.Tenant, tableName string, filter map[string]any) (string, []any)
-	CreateListEntitiesStatement(tenant api.Tenant, tableName string, limit, offset int, filter map[string]any) (string, []any)
+	CreateListEntitiesStatement(tenant api.Tenant, tableName string, limit, offset int, filter map[string]any, sortBy string) (string, []any)
 	ScanRowForEntity(tenant api.Tenant, ableName string, rows *sql.Rows, query *EntityQuery) error
 	CreateDeleteEntityStatement(tenant api.Tenant, tableName string, id string) (string, []any)
 	// CreateDeleteSystemEntitiesStatement deletes all owner=system rows in tableName.

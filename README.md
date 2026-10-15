@@ -1,10 +1,12 @@
 # EvalHub
 
-[![CI](https://github.com/eval-hub/eval-hub/actions/workflows/ci.yml/badge.svg)](https://github.com/eval-hub/eval-hub/actions/workflows/ci.yml)
+[![GO](https://img.shields.io/badge/Made%20with-Go-1f425f?logo=go&logoColor=white)](https://go.dev)
+[![GitHub go.mod Go version](https://img.shields.io/github/go-mod/go-version/eval-hub/eval-hub.svg)](https://github.com/eval-hub/eval-hub)
 [![Go Reference](https://pkg.go.dev/badge/github.com/eval-hub/eval-hub.svg)](https://pkg.go.dev/github.com/eval-hub/eval-hub)
+[![CI](https://github.com/eval-hub/eval-hub/actions/workflows/ci.yml/badge.svg)](https://github.com/eval-hub/eval-hub/actions/workflows/ci.yml)
 [![golangci-lint](https://github.com/eval-hub/eval-hub/actions/workflows/golangci-lint.yml/badge.svg)](https://github.com/eval-hub/eval-hub/actions/workflows/golangci-lint.yml)
 [![codecov](https://codecov.io/github/eval-hub/eval-hub/graph/badge.svg?token=LHJACCNC9A)](https://codecov.io/github/eval-hub/eval-hub)
-[![TrustyAI Operator ConfigMap Sync](https://github.com/eval-hub/eval-hub/actions/workflows/check-trustyai-service-operator-configmap-sync.yml/badge.svg)](https://github.com/eval-hub/eval-hub/actions/workflows/check-trustyai-service-operator-configmap-sync.yml)
+[![TrustyAI Operator ConfigMap Sync](https://github.com/eval-hub/eval-hub/actions/workflows/check-trustyai-service-operator-configmap-sync.yml/badge.svg)](https://github.com/eval-hub/eval-hub/actions/workflows/check-trustyai-service-operator-configmap-sync.yml)[![see sync](https://img.shields.io/badge/syncing_docs-here)](#syncing-providers-and-collections-to-the-trustyai-operator)
 [![license](https://img.shields.io/badge/License-Apache2.0-blue.svg?plastic)](https://github.com/eval-hub/eval-hub/blob/main/LICENSE)
 [![Signed release](https://github.com/eval-hub/eval-hub/actions/workflows/signed-release.yml/badge.svg)](https://github.com/eval-hub/eval-hub/actions/workflows/signed-release.yml)
 [![OpenSSF Scorecard](https://api.scorecard.dev/projects/github.com/eval-hub/eval-hub/badge)](https://scorecard.dev/viewer/?uri=github.com/eval-hub/eval-hub)
@@ -16,9 +18,120 @@ A lightweight REST API service for orchestrating LLM evaluations across multiple
 
 ## Architecture
 
-![Architecture](docs/images/architecture.svg)
+### OpenShift architecture
 
-The service uses Go's standard `net/http` router, structured logging with zap, Prometheus metrics, and a pluggable storage layer (SQLite for development, PostgreSQL for production). Providers and benchmarks are declared in YAML configuration files shipped with the container image.
+```mermaid
+flowchart TB
+    subgraph clients[Clients]
+        direction LR
+        rest[REST clients]
+        agents[MCP clients / agents]
+    end
+
+    subgraph openshift[OpenShift cluster]
+        direction TB
+        proxy[kube-rbac-proxy<br/>authentication and authorization]
+        api[EvalHub API<br/>REST routes and handlers]
+        mcp[EvalHub MCP server<br/>tools, resources, prompts<br/>stdio or HTTP]
+        mlflow[MLflow]
+        otelCollector[OpenTelemetry Collector<br/>OTLP endpoint]
+        database[(SQL storage<br/>PostgreSQL typical)]
+        config[YAML config<br/>providers and collections]
+        metrics[Metrics listener<br/>:8081 /metrics]
+        prometheus[Prometheus]
+        runtime[Kubernetes runtime]
+        kubeapi[Kubernetes API]
+        subgraph job[Evaluation job pod]
+            direction TB
+            init[Optional data/source init]
+            adapter[Provider adapter]
+            sidecar[EvalHub sidecar<br/>API, model, MLflow and OCI proxies]
+            init -.-> adapter
+            adapter <--> sidecar
+        end
+    end
+
+    subgraph externalEndpoints[External endpoints]
+        direction LR
+        model[Model endpoints]
+        registry[OCI registry]
+    end
+
+    rest -->|REST| proxy
+    proxy --> api
+    agents -->|MCP| mcp
+    mcp -->|EvalHub REST client| proxy
+    api --> database
+    config --> api
+    api --> runtime
+    runtime -->|create jobs| kubeapi
+    kubeapi --> job
+    sidecar -->|status events| proxy
+    sidecar --> mlflow
+    api -->|tracking and results| mlflow
+    sidecar -->|Model traffic| model
+    sidecar -->|OCI traffic| registry
+    prometheus -->|scrape| metrics
+    api -. OTLP .-> otelCollector
+    adapter -. OTLP .-> otelCollector
+    sidecar -. OTLP .-> otelCollector
+
+    classDef external fill:#f5f7fa,stroke:#64748b,color:#1e293b
+    classDef service fill:#e8f2ff,stroke:#3973ac,color:#142b45
+    classDef runtimeNode fill:#eef8f1,stroke:#4b8b62,color:#193d26
+    class rest,agents,model,registry external
+    class proxy,api,mcp,mlflow,otelCollector,database,config,metrics service
+    class runtime,kubeapi,init,adapter,sidecar runtimeNode
+```
+
+OpenShift API requests pass through kube-rbac-proxy, which supplies the authenticated user and tenant identity. The API creates Kubernetes jobs; each job pod runs a provider adapter and sidecar. The sidecar proxies model, MLflow, OCI, and API callback traffic. Prometheus scrapes the dedicated metrics listener. The MCP server runs inside the cluster as a process separate from the API.
+
+### Local architecture
+
+```mermaid
+flowchart TB
+    rest[REST clients]
+    agents[MCP clients / agents]
+    mcp[EvalHub MCP server<br/>tools, resources, prompts<br/>stdio or HTTP]
+    prometheus[Prometheus]
+    model[Model endpoints]
+    mlflow[MLflow<br/>optional]
+
+    subgraph local[Local machine]
+        direction TB
+        api[EvalHub API<br/>REST routes and handlers]
+        database[(SQLite by default<br/>PostgreSQL optional)]
+        config[YAML config<br/>providers and collections]
+        metrics[Metrics listener<br/>:8081 /metrics]
+        runtime[Local runtime]
+        adapter[Provider adapter<br/>local process]
+        sidecar[Optional local sidecar<br/>API and per-job model proxy]
+    end
+
+    rest -->|REST| api
+    agents -->|MCP| mcp
+    mcp -->|EvalHub REST client| api
+    api --> database
+    config --> api
+    api --> runtime
+    runtime -->|launch| adapter
+    adapter -->|API callbacks when sidecar is off| api
+    adapter -. when enabled .-> sidecar
+    sidecar -->|API callbacks| api
+    adapter -. direct model calls when sidecar is off .-> model
+    sidecar -->|when enabled| model
+    api -->|tracking and results| mlflow
+    prometheus -->|scrape| metrics
+
+    classDef external fill:#f5f7fa,stroke:#64748b,color:#1e293b
+    classDef service fill:#e8f2ff,stroke:#3973ac,color:#142b45
+    classDef runtimeNode fill:#eef8f1,stroke:#4b8b62,color:#193d26
+    class rest,agents,mcp,prometheus,model,mlflow external
+    class api,database,config,metrics service
+    class runtime,adapter,sidecar runtimeNode
+```
+
+Local mode connects directly to the API without kube-rbac-proxy and runs each adapter as a local process. The shared sidecar is optional; when enabled, it handles API callbacks and per-job model routing. MLflow can be configured for experiment tracking and result export. Prometheus can scrape the separate metrics listener; local mode also exposes `/metrics` on the API port. The MCP server is a separate process and can run near the MCP client or alongside the API.
 
 ## Quick start
 
@@ -104,6 +217,14 @@ make lint                   # go vet
 make fmt                    # go fmt
 ```
 
+For local post-processing, the runtime launches the real adapter from a sibling
+`../eval-hub-contrib/adapters/evalhub-post-processor` checkout. Install that
+adapter's `requirements.txt` in its `.venv` before starting EvalHub from this
+repository root. For another checkout or Python environment, set
+`EVALHUB_POST_PROCESSING_LOCAL_COMMAND` to the command that runs its `main.py`.
+The adapter also needs a reachable callback service and access to the referenced
+data; see the adapter's README for local setup.
+
 Run a single test:
 
 ```bash
@@ -116,6 +237,63 @@ To create a Python wheel distribution of the server for local development and te
 make cross-compile
 make build-wheel
 ```
+
+### Quick local OCI evaluation card check
+
+Developers can use `scripts/test-local-oci-export.sh` to simulate a quick OCI evaluation card
+generation during development. It runs an evaluation with the local test adapter,
+downloads the exported card from a local OCI registry, and verifies it against
+the completed job. No model server is required.
+
+Install these dependencies before starting:
+
+- `curl`, `jq`, and `oras`, available on your `PATH`.
+- Go (the version specified in `go.mod`) and `uv` for the service setup.
+- A running container engine: Podman by default, or Docker with `DOCKER=docker`.
+
+From the repository root, start the registry and service:
+
+```sh
+make start-oci-registry
+make start-service
+```
+
+These targets start the registry at `localhost:5001` and build and start the
+service in local mode at `http://localhost:8080`, including the test adapter setup.
+For Docker, use `make start-oci-registry DOCKER=docker`.
+
+Run the check:
+
+```sh
+bash scripts/test-local-oci-export.sh
+```
+
+A successful run prints a verification message and saves these files in
+`./bin/local-oci/` by default:
+
+| File | Contents |
+| --- | --- |
+| `request.json` | Submitted evaluation job request |
+| `created.json` | Job creation response, including the job ID |
+| `job.json` | Latest job status response, with results on completion |
+| `manifest.json` | Exported OCI artifact manifest |
+| `artifact-config.json` | OCI artifact configuration |
+| `evaluation-card-<job-id>.json` | Downloaded evaluation card |
+
+Set `OUTPUT_DIR` to save verification files elsewhere:
+
+```sh
+OUTPUT_DIR=/tmp/local-oci-check bash scripts/test-local-oci-export.sh
+```
+
+When finished, stop the service and remove the registry container:
+
+```sh
+make stop-service
+make stop-oci-registry
+```
+
+If using Docker, use `make stop-oci-registry DOCKER=docker`.
 
 ### Exposing private functions for tests
 

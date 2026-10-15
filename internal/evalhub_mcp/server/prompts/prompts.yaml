@@ -86,6 +86,71 @@ evaluate_model:
           After submission, use `get_job_status` to track progress.
           The job will report per-benchmark status and overall completion percentage.
           Once complete, review the results to understand your model's performance.
+design_collection:
+  description: "Design a benchmark collection from a natural-language evaluation goal. Fetches the live provider catalog and curated collection examples, then guides you through benchmark selection, weight assignment, and threshold calibration."
+  arguments:
+    evaluation_goal:
+      description: "Natural-language description of the evaluation use-case (e.g. 'enterprise deployment requiring safety, instruction following, and long-context support')."
+      required: true
+    max_benchmarks:
+      description: "Maximum number of benchmarks to include (default: 12)."
+    strictness:
+      description: "Threshold strictness level: lenient, moderate, or strict. Shifts all thresholds down/center/up respectively. Defaults to moderate."
+    provider_filter:
+      description: "Comma-separated provider IDs to restrict benchmark selection (e.g. 'lm_evaluation_harness,lighteval'). Omit to consider all providers."
+  result:
+    description: "A collection design prompt with the full benchmark catalog and calibration guidelines."
+    messages:
+      any:
+        user: "I need to design an evaluation collection for the following goal: {evaluation_goal}"
+        assistant: |
+          I'll help you design a benchmark collection for: **{evaluation_goal}**
+
+          {options_summary}
+
+          ## Instructions
+
+          {design_requirements}
+
+          ### Sourcing benchmarks
+
+          Always select benchmarks from the AVAILABLE BENCHMARKS catalog below — it is
+          the live provider catalog and is the source of truth for valid `id` and
+          `provider_id` values. **Do not read local files or invent benchmark IDs.**
+
+          **If the AVAILABLE BENCHMARKS catalog below is empty (no entries), stop
+          immediately and fail.** Do not call `discover_providers`, do not invent IDs,
+          and do not produce a collection. Report that the benchmark catalog is empty —
+          the eval-hub service has no providers/benchmarks loaded — and end without
+          calling `create_collection`.
+
+          Otherwise, if a specific benchmark you need is missing from the (non-empty)
+          catalog below, or you need more detail about a benchmark, use the
+          `search_benchmarks` tool (filter by `query`, `labels`, `category`, or
+          `provider_id`) to find benchmark IDs, and `get_benchmark` to fetch full detail
+          for a specific `id`. Use `discover_providers` only to choose a provider by
+          capability — it returns provider-level metadata, not benchmark IDs. Use only
+          the `id` and `provider_id` values these tools return.
+
+          {calibration_guidelines}
+
+          {domain_signal_mapping}
+
+          These are illustrative signal→benchmark hints, not IDs; always confirm the
+          exact `id` and `provider_id` against the AVAILABLE BENCHMARKS catalog,
+          `search_benchmarks`, or `get_benchmark` before using them.
+
+          {output_format}
+
+          Use the `create_collection` tool to persist the collection when the user approves it.
+
+          ## Available Benchmarks
+
+          {benchmark_catalog}
+
+          ## Reference Collections
+
+          {collection_examples}
 compare_runs:
   description: "Guidance for comparing two or more evaluation jobs: select jobs, fetch results, compare metrics, and summarize findings."
   arguments:

@@ -1,11 +1,16 @@
 package sql_test
 
 import (
+	"context"
 	"encoding/json"
 	"math"
+	"slices"
+	"sync"
 	"testing"
+	"time"
 
 	"github.com/eval-hub/eval-hub/internal/eval_hub/abstractions"
+	"github.com/eval-hub/eval-hub/internal/eval_hub/common"
 	"github.com/eval-hub/eval-hub/internal/eval_hub/config"
 	"github.com/eval-hub/eval-hub/internal/eval_hub/storage"
 	"github.com/eval-hub/eval-hub/internal/eval_hub/storage/sql"
@@ -36,6 +41,7 @@ func TestCollections_PassCriteria(t *testing.T) {
 	if err != nil {
 		t.Fatalf("failed to create storage: %v", err)
 	}
+	t.Cleanup(func() { _ = store.Close() })
 
 	filter := &abstractions.QueryFilter{Limit: 50, Offset: 0, Params: map[string]any{"scope": "system"}}
 
@@ -117,10 +123,11 @@ func TestCollections_BenchmarksExist(t *testing.T) {
 	if err != nil {
 		t.Fatalf("failed to create storage: %v", err)
 	}
+	t.Cleanup(func() { _ = store.Close() })
 
 	filter := &abstractions.QueryFilter{Limit: 50, Offset: 0, Params: map[string]any{"scope": "system"}}
 
-	t.Run("get system collections and check pass criteria", func(t *testing.T) {
+	t.Run("get system collections and check benchmark IDs and curated metrics", func(t *testing.T) {
 		res, err := store.GetCollections(filter)
 		if err != nil {
 			t.Fatalf("GetCollections: %v", err)
@@ -147,11 +154,20 @@ func TestCollections_BenchmarksExist(t *testing.T) {
 				for _, pbenchmark := range provider.Benchmarks {
 					if pbenchmark.ID == benchmark.ID {
 						found = true
+						// Curated collections use fixed benchmark metrics; custom tasks
+						// in other collections can select metrics at runtime.
+						if coll.CurationOrder > 0 && benchmark.PrimaryScore != nil {
+							metric := benchmark.PrimaryScore.Metric
+							matchesPrimary := pbenchmark.PrimaryScore != nil && pbenchmark.PrimaryScore.Metric == metric
+							if !matchesPrimary && !slices.Contains(pbenchmark.Metrics, metric) {
+								t.Errorf("collection %s benchmark %s provider %s: primary score metric %q is not declared by the provider", coll.Resource.ID, benchmark.ID, benchmark.ProviderID, metric)
+							}
+						}
 						break
 					}
 				}
 				if !found {
-					t.Errorf("expected benchmark %s for provider %s, got none", benchmark.ID, benchmark.ProviderID)
+					t.Errorf("collection %s: expected benchmark %s for provider %s, got none", coll.Resource.ID, benchmark.ID, benchmark.ProviderID)
 				}
 			}
 		}
@@ -340,6 +356,55 @@ func TestCollectionDerivedFrom_StoredAndRetrieved(t *testing.T) {
 		t.Errorf("DerivedFrom: got %q, want %q", fetched.DerivedFrom, "source-coll-id")
 	}
 }
+func TestCollectionFilters_Scope(t *testing.T) {
+	t.Parallel()
+	store, err := getTestStorage(t, "sqlite", getDBName())
+	if err != nil {
+		t.Fatalf("getTestStorage: %v", err)
+	}
+
+	systemCollection := &api.CollectionResource{
+		Resource: api.Resource{ID: "system-collection", Owner: abstractions.OwnerSystem},
+		CollectionConfig: api.CollectionConfig{
+			Name: "System", Category: "test",
+			Benchmarks: []api.CollectionBenchmarkConfig{{Ref: api.Ref{ID: "b1"}, ProviderID: "p1"}},
+		},
+	}
+	if err := store.CreateCollection(systemCollection); err != nil {
+		t.Fatalf("CreateCollection system: %v", err)
+	}
+
+	scoped := store.WithTenant("tenant-a").WithOwner("user-a")
+	tenantCollection := &api.CollectionResource{
+		Resource: api.Resource{ID: "tenant-collection", Tenant: "tenant-a", Owner: "user-a"},
+		CollectionConfig: api.CollectionConfig{
+			Name: "Tenant", Category: "test",
+			Benchmarks: []api.CollectionBenchmarkConfig{{Ref: api.Ref{ID: "b2"}, ProviderID: "p1"}},
+		},
+	}
+	if err := scoped.CreateCollection(tenantCollection); err != nil {
+		t.Fatalf("CreateCollection tenant: %v", err)
+	}
+
+	for scope, expectedID := range map[string]string{
+		abstractions.ScopeSystem: "system-collection",
+		abstractions.ScopeTenant: "tenant-collection",
+	} {
+		results, err := scoped.GetCollections(&abstractions.QueryFilter{
+			Limit:  10,
+			Params: map[string]any{"scope": scope},
+		})
+		if err != nil {
+			t.Fatalf("GetCollections scope=%s: %v", scope, err)
+		}
+		if results.TotalCount != 1 || len(results.Items) != 1 {
+			t.Fatalf("scope=%s returned total=%d items=%d, want one", scope, results.TotalCount, len(results.Items))
+		}
+		if results.Items[0].Resource.ID != expectedID {
+			t.Errorf("scope=%s returned %q, want %q", scope, results.Items[0].Resource.ID, expectedID)
+		}
+	}
+}
 
 func TestCollectionFilters_ArrayFields(t *testing.T) {
 	t.Parallel()
@@ -496,6 +561,155 @@ func TestCollectionPatchCollection(t *testing.T) {
 				t.Errorf("expected name 'Patched Name', got %q", updated.Name)
 			}
 		})
+	}
+}
+
+func TestCollectionPatchConcurrentPostgres(t *testing.T) {
+	image := usePostgresImage()
+	databaseName := getDBName()
+	user, err := getPostgresUser()
+	if err != nil {
+		t.Skipf("Failed to get Postgres user: %v", err)
+	}
+	if err := startPostgres(t, databaseName, user, image); err != nil {
+		t.Skipf("Skipping postgres tests: %v", err)
+	}
+	t.Cleanup(func() {
+		stopPostgres(t, databaseName, user, image)
+	})
+
+	testCollectionPatchConcurrentDisjoint(t, "postgres", databaseName)
+}
+
+func testCollectionPatchConcurrentDisjoint(t *testing.T, driver, databaseName string) {
+	store, err := getTestStorage(t, driver, databaseName)
+	if err != nil {
+		t.Fatalf("getTestStorage: %v", err)
+	}
+	scoped := store.WithTenant("t1").WithOwner("user1")
+	collection := &api.CollectionResource{
+		Resource: api.Resource{ID: common.GUID(), Owner: "user1", Tenant: "t1"},
+		CollectionConfig: api.CollectionConfig{
+			Name:        "Original Name",
+			Description: "Original description",
+			Category:    "test",
+			Benchmarks:  []api.CollectionBenchmarkConfig{{Ref: api.Ref{ID: "b1"}, ProviderID: "p1"}},
+		},
+	}
+	if err := scoped.CreateCollection(collection); err != nil {
+		t.Fatalf("CreateCollection: %v", err)
+	}
+
+	// Hold the first PATCH transaction after its locked read. A concurrent PATCH
+	// must wait at SELECT ... FOR UPDATE, then apply its change to the first
+	// transaction's committed entity instead of overwriting it with a stale copy.
+	locked := make(chan struct{})
+	secondLockedReadAttempt := make(chan struct{})
+	release := make(chan struct{})
+	var releaseOnce sync.Once
+	releaseTransactions := func() {
+		releaseOnce.Do(func() {
+			close(release)
+		})
+	}
+	workerCtx, cancelWorkers := context.WithCancel(context.Background())
+	workerScoped := scoped.WithContext(workerCtx)
+	var holdGate sync.Mutex
+	var holdingTxn bool
+	var readAttemptGate sync.Mutex
+	readAttempts := 0
+	var wg sync.WaitGroup
+	t.Cleanup(func() {
+		sql.SetCollectionPatchBeforeLockedReadHook(nil)
+		sql.SetCollectionPatchAfterLockedReadHook(nil)
+		releaseTransactions()
+		cancelWorkers()
+		done := make(chan struct{})
+		go func() {
+			wg.Wait()
+			close(done)
+		}()
+		select {
+		case <-done:
+		case <-time.After(5 * time.Second):
+			t.Errorf("timed out waiting for concurrent PatchCollection goroutines")
+		}
+	})
+	sql.SetCollectionPatchBeforeLockedReadHook(func(_ string) {
+		readAttemptGate.Lock()
+		defer readAttemptGate.Unlock()
+		readAttempts++
+		if readAttempts == 2 {
+			close(secondLockedReadAttempt)
+		}
+	})
+	sql.SetCollectionPatchAfterLockedReadHook(func(_ string) {
+		holdGate.Lock()
+		if holdingTxn {
+			holdGate.Unlock()
+			return
+		}
+		holdingTxn = true
+		holdGate.Unlock()
+		close(locked)
+		<-release
+	})
+
+	patchName := &api.Patch{{Op: api.PatchOpReplace, Path: "/name", Value: "Updated Name"}}
+	patchDescription := &api.Patch{{Op: api.PatchOpReplace, Path: "/description", Value: "Updated description"}}
+	firstDone := make(chan error, 1)
+	secondDone := make(chan error, 1)
+	wg.Add(1)
+	go func() {
+		defer wg.Done()
+		_, err := workerScoped.PatchCollection(collection.Resource.ID, patchName)
+		firstDone <- err
+	}()
+
+	select {
+	case <-locked:
+	case <-time.After(5 * time.Second):
+		t.Fatal("timed out waiting for first PATCH transaction to acquire row lock")
+	}
+
+	wg.Add(1)
+	go func() {
+		defer wg.Done()
+		_, err := workerScoped.PatchCollection(collection.Resource.ID, patchDescription)
+		secondDone <- err
+	}()
+	select {
+	case <-secondLockedReadAttempt:
+	case <-time.After(5 * time.Second):
+		t.Fatal("timed out waiting for second PATCH transaction to attempt the row lock")
+	}
+
+	select {
+	case err := <-firstDone:
+		t.Fatalf("first PATCH completed while holding row lock: %v", err)
+	case err := <-secondDone:
+		t.Fatalf("second PATCH completed before row lock released (FOR UPDATE not contending): %v", err)
+	case <-time.After(time.Second):
+		// Expected: the second transaction is blocked on SELECT ... FOR UPDATE.
+	}
+
+	releaseTransactions()
+	if err := <-firstDone; err != nil {
+		t.Fatalf("first PatchCollection: %v", err)
+	}
+	if err := <-secondDone; err != nil {
+		t.Fatalf("second PatchCollection: %v", err)
+	}
+
+	updated, err := scoped.GetCollection(collection.Resource.ID)
+	if err != nil {
+		t.Fatalf("GetCollection: %v", err)
+	}
+	if updated.Name != "Updated Name" {
+		t.Errorf("Name: got %q, want %q", updated.Name, "Updated Name")
+	}
+	if updated.Description != "Updated description" {
+		t.Errorf("Description: got %q, want %q", updated.Description, "Updated description")
 	}
 }
 
@@ -685,4 +899,69 @@ func TestCollectionFilters_MultiValueArrayField(t *testing.T) {
 	if !found {
 		t.Error("multi-domain collection should match rag+grounding filter")
 	}
+}
+
+func TestCollections_SortByCurationOrder(t *testing.T) {
+	testCollectionsSortByCurationOrder(t, "sqlite", getDBName())
+}
+
+func TestCollections_SortByCurationOrderPostgres(t *testing.T) {
+	image := usePostgresImage()
+	databaseName := getDBName()
+	user, err := getPostgresUser()
+	if err != nil {
+		t.Skipf("Failed to get Postgres user: %v", err)
+	}
+	if err := startPostgres(t, databaseName, user, image); err != nil {
+		t.Skipf("Skipping postgres tests: %v", err)
+	}
+	t.Cleanup(func() { stopPostgres(t, databaseName, user, image) })
+	testCollectionsSortByCurationOrder(t, "postgres", databaseName)
+}
+
+func testCollectionsSortByCurationOrder(t *testing.T, driver, databaseName string) {
+	store, err := getTestStorage(t, driver, databaseName)
+	if err != nil {
+		t.Fatalf("Failed to create storage: %v", err)
+	}
+	t.Cleanup(func() { _ = store.Close() })
+
+	collections := []api.CollectionResource{
+		testSystemCollection("z-uncurated", "Uncurated", "uncurated"),
+		testSystemCollection("b-curated-second", "Second", "second curated"),
+		testSystemCollection("a-curated-first", "First", "first curated"),
+		testSystemCollection("c-curated-large", "Large", "large curated"),
+	}
+	collections[1].CurationOrder = 2
+	collections[2].CurationOrder = 1
+	collections[3].CurationOrder = math.MaxInt32 + 1
+	for i := range collections {
+		if err := store.CreateCollection(&collections[i]); err != nil {
+			t.Fatalf("CreateCollection(%s): %v", collections[i].Resource.ID, err)
+		}
+	}
+
+	assertIDs := func(got []api.CollectionResource, want []string) {
+		t.Helper()
+		if len(got) != len(want) {
+			t.Fatalf("got %d collections, want %d", len(got), len(want))
+		}
+		for i := range want {
+			if got[i].Resource.ID != want[i] {
+				t.Fatalf("collection %d = %q, want %q", i, got[i].Resource.ID, want[i])
+			}
+		}
+	}
+
+	sorted, err := store.GetCollections(&abstractions.QueryFilter{Limit: 10, Params: map[string]any{}, SortBy: "curation_order"})
+	if err != nil {
+		t.Fatalf("GetCollections sorted by curation_order: %v", err)
+	}
+	assertIDs(sorted.Items, []string{"a-curated-first", "b-curated-second", "c-curated-large", "z-uncurated"})
+
+	defaultOrder, err := store.GetCollections(&abstractions.QueryFilter{Limit: 10, Params: map[string]any{}})
+	if err != nil {
+		t.Fatalf("GetCollections with default ordering: %v", err)
+	}
+	assertIDs(defaultOrder.Items, []string{"z-uncurated", "c-curated-large", "b-curated-second", "a-curated-first"})
 }

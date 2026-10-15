@@ -6,9 +6,12 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
+	"slices"
+	"strings"
 
 	batchv1 "k8s.io/api/batch/v1"
 	corev1 "k8s.io/api/core/v1"
+	networkingv1 "k8s.io/api/networking/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
 	"k8s.io/apimachinery/pkg/runtime/schema"
@@ -20,6 +23,9 @@ import (
 	"k8s.io/client-go/rest"
 	"k8s.io/client-go/tools/clientcmd"
 	"k8s.io/client-go/tools/record"
+	"k8s.io/client-go/util/retry"
+
+	"github.com/eval-hub/eval-hub/pkg/api"
 )
 
 // KubernetesHelper wraps the Kubernetes client-go client and exposes methods to interact with the cluster.
@@ -36,6 +42,12 @@ var hardwareProfileGVR = schema.GroupVersionResource{
 	Group:    hardwareProfileAPIGroup,
 	Version:  hardwareProfileAPIVersion,
 	Resource: hardwareProfileResource,
+}
+
+var localQueueGVR = schema.GroupVersionResource{
+	Group:    "kueue.x-k8s.io",
+	Version:  "v1beta1",
+	Resource: "localqueues",
 }
 
 func loadKubernetesConfig() (*rest.Config, error) {
@@ -112,6 +124,67 @@ func (h *KubernetesHelper) GetHardwareProfile(ctx context.Context, namespace, na
 	return h.dynamicClient.Resource(hardwareProfileGVR).Namespace(namespace).Get(ctx, name, metav1.GetOptions{})
 }
 
+// ListHardwareProfiles lists profiles from the configured platform namespace.
+func (h *KubernetesHelper) ListHardwareProfiles(ctx context.Context, namespace string) (*unstructured.UnstructuredList, error) {
+	if namespace == "" {
+		return nil, fmt.Errorf("namespace is required")
+	}
+	if h.dynamicClient == nil {
+		return nil, fmt.Errorf("dynamic kubernetes client is not configured")
+	}
+	return h.dynamicClient.Resource(hardwareProfileGVR).Namespace(namespace).List(ctx, metav1.ListOptions{})
+}
+
+// ListLocalQueues returns Kueue LocalQueues from a tenant namespace, including their Active
+// condition when one is present.
+func (h *KubernetesHelper) ListLocalQueues(ctx context.Context, namespace string) ([]api.QueueInfo, error) {
+	if namespace == "" {
+		return nil, fmt.Errorf("namespace is required")
+	}
+	if h.dynamicClient == nil {
+		return nil, fmt.Errorf("dynamic kubernetes client is not configured")
+	}
+
+	list, err := h.dynamicClient.Resource(localQueueGVR).Namespace(namespace).List(ctx, metav1.ListOptions{})
+	if err != nil {
+		return nil, err
+	}
+
+	queues := make([]api.QueueInfo, 0, len(list.Items))
+	for _, item := range list.Items {
+		queue := api.QueueInfo{Name: item.GetName(), Status: api.QueueAvailabilityUnknown}
+		conditions, found, err := unstructured.NestedSlice(item.Object, "status", "conditions")
+		if err != nil {
+			return nil, fmt.Errorf("read LocalQueue %q conditions: %w", item.GetName(), err)
+		}
+		if found {
+			for _, rawCondition := range conditions {
+				condition, ok := rawCondition.(map[string]any)
+				if !ok || condition["type"] != "Active" {
+					continue
+				}
+				status, _ := condition["status"].(string)
+				switch status {
+				case "True":
+					queue.Status = api.QueueAvailabilityActive
+				case "False":
+					queue.Status = api.QueueAvailabilityInactive
+				}
+				queue.Active = queue.Status == api.QueueAvailabilityActive
+				queue.Reason, _ = condition["reason"].(string)
+				queue.Message, _ = condition["message"].(string)
+				break
+			}
+		}
+		queues = append(queues, queue)
+	}
+
+	slices.SortFunc(queues, func(a, b api.QueueInfo) int {
+		return strings.Compare(a.Name, b.Name)
+	})
+	return queues, nil
+}
+
 // DeleteHardwareProfile deletes a HardwareProfile custom resource by name in the given namespace.
 func (h *KubernetesHelper) DeleteHardwareProfile(ctx context.Context, namespace, name string) error {
 	if namespace == "" || name == "" {
@@ -167,6 +240,14 @@ func (h *KubernetesHelper) CreateJob(ctx context.Context, job *batchv1.Job) (*ba
 	return created, err
 }
 
+// GetJob returns the Job with the given name in namespace.
+func (h *KubernetesHelper) GetJob(ctx context.Context, namespace, name string) (*batchv1.Job, error) {
+	if namespace == "" || name == "" {
+		return nil, fmt.Errorf("namespace and name are required")
+	}
+	return h.clientset.BatchV1().Jobs(namespace).Get(ctx, name, metav1.GetOptions{})
+}
+
 // DeleteJob deletes a Job in the given namespace.
 func (h *KubernetesHelper) DeleteJob(ctx context.Context, namespace, name string, opts metav1.DeleteOptions) error {
 	if namespace == "" || name == "" {
@@ -186,6 +267,46 @@ func (h *KubernetesHelper) DeleteConfigMap(ctx context.Context, namespace, name 
 	ctx, span := startK8sSpan(ctx, "delete_configmap", "ConfigMap", namespace, name)
 	err := h.clientset.CoreV1().ConfigMaps(namespace).Delete(ctx, name, metav1.DeleteOptions{})
 	endK8sSpan(span, err)
+	return err
+}
+
+// CreateNetworkPolicy creates a NetworkPolicy in the policy's namespace.
+func (h *KubernetesHelper) CreateNetworkPolicy(ctx context.Context, policy *networkingv1.NetworkPolicy) (*networkingv1.NetworkPolicy, error) {
+	if policy == nil || policy.Namespace == "" || policy.Name == "" {
+		return nil, fmt.Errorf("network policy, namespace, and name are required")
+	}
+	ctx, span := startK8sSpan(ctx, "create_network_policy", "NetworkPolicy", policy.Namespace, policy.Name)
+	created, err := h.clientset.NetworkingV1().NetworkPolicies(policy.Namespace).Create(ctx, policy, metav1.CreateOptions{})
+	endK8sSpan(span, err)
+	return created, err
+}
+
+// GetNetworkPolicy returns the NetworkPolicy with the given name in namespace.
+func (h *KubernetesHelper) GetNetworkPolicy(ctx context.Context, namespace, name string) (*networkingv1.NetworkPolicy, error) {
+	if namespace == "" || name == "" {
+		return nil, fmt.Errorf("namespace and name are required")
+	}
+	return h.clientset.NetworkingV1().NetworkPolicies(namespace).Get(ctx, name, metav1.GetOptions{})
+}
+
+// SetNetworkPolicyOwner sets a single owner reference on the NetworkPolicy.
+func (h *KubernetesHelper) SetNetworkPolicyOwner(ctx context.Context, namespace, name string, owner metav1.OwnerReference) error {
+	if namespace == "" || name == "" {
+		return fmt.Errorf("namespace and name are required")
+	}
+	ctx, span := startK8sSpan(ctx, "set_network_policy_owner", "NetworkPolicy", namespace, name)
+	var err error
+	defer func() { endK8sSpan(span, err) }()
+
+	err = retry.RetryOnConflict(retry.DefaultRetry, func() error {
+		policy, getErr := h.clientset.NetworkingV1().NetworkPolicies(namespace).Get(ctx, name, metav1.GetOptions{})
+		if getErr != nil {
+			return getErr
+		}
+		policy.OwnerReferences = []metav1.OwnerReference{owner}
+		_, updateErr := h.clientset.NetworkingV1().NetworkPolicies(namespace).Update(ctx, policy, metav1.UpdateOptions{})
+		return updateErr
+	})
 	return err
 }
 

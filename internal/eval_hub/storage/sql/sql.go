@@ -24,6 +24,7 @@ import (
 	"github.com/eval-hub/eval-hub/internal/eval_hub/storage/sql/postgres"
 	"github.com/eval-hub/eval-hub/internal/eval_hub/storage/sql/shared"
 	"github.com/eval-hub/eval-hub/internal/eval_hub/storage/sql/sqlite"
+	"github.com/eval-hub/eval-hub/internal/eval_hub/workloads"
 	"github.com/eval-hub/eval-hub/pkg/api"
 	"github.com/go-viper/mapstructure/v2"
 	"github.com/uptrace/opentelemetry-go-extra/otelsql"
@@ -318,6 +319,11 @@ func (s *sqlStorage) ensureSchema() error {
 	if _, err := s.exec(nil, schemas); err != nil {
 		return err
 	}
+	if s.sqlConfig.Driver == SQLiteDriver {
+		// CREATE TABLE IF NOT EXISTS does not add columns to an existing table,
+		// and SQLite has no ADD COLUMN IF NOT EXISTS syntax.
+		return sqlite.EnsureEvaluationWorkloadTypeColumn(s.pool)
+	}
 
 	return nil
 }
@@ -391,6 +397,10 @@ func (s *sqlStorage) WithContext(ctx context.Context) abstractions.Storage {
 		isolationLevel:    s.isolationLevel,
 		systemResourcesMu: s.systemResourcesMu,
 	}
+}
+
+func (s *sqlStorage) WithWorkloadType(workloadType workloads.Type) abstractions.Storage {
+	return s.WithContext(workloads.WithType(s.ctx, workloadType))
 }
 
 func (s *sqlStorage) WithTenant(tenant api.Tenant) abstractions.Storage {

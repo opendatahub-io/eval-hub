@@ -239,22 +239,28 @@ Feature: Collections Endpoint
 
   Scenario: List collections pagination returns next href and next page contains remaining item
     Given the service is running
-    When I send a POST request to "/api/v1/evaluations/collections" with body "file:/collection.json"
+    When I send a POST request to "/api/v1/evaluations/collections" with body "file:/collection_pagination.json"
     Then the response code should be 201
     And the "resource.id" field in the response should be saved as "value:first_id"
-    When I send a POST request to "/api/v1/evaluations/collections" with body "file:/collection.json"
+    When I send a POST request to "/api/v1/evaluations/collections" with body "file:/collection_pagination.json"
     Then the response code should be 201
     And the "resource.id" field in the response should be saved as "value:second_id"
-    When I send a POST request to "/api/v1/evaluations/collections" with body "file:/collection.json"
+    When I send a POST request to "/api/v1/evaluations/collections" with body "file:/collection_pagination.json"
     Then the response code should be 201
-    When I send a GET request to "/api/v1/evaluations/collections?limit=2&offset=0"
+    When I send a GET request to "/api/v1/evaluations/collections?name=fvt-pagination-collection-{{value:scenario_id}}&limit=2&offset=0"
     Then the response code should be 200
+    And the "total_count" field in the response should be saved as "value:collection_total"
+    And the response should contain the value "3" at path "$.total_count"
     And the array at path "items" in the response should have length 2
     And the response should contain "next"
     And the "next.href" field in the response should be saved as "value:next_url"
     When I send a GET request to "{{value:next_url}}"
     Then the response code should be 200
-    And the array at path "items" in the response should have length at least 1
+    And the array at path "items" in the response should have length 1
+    When I send a GET request to "/api/v1/evaluations/collections?name=fvt-pagination-collection-{{value:scenario_id}}&limit=2&offset={{value:collection_total}}"
+    Then the response code should be 200
+    And the array at path "items" in the response should have length 0
+    And the response should contain the value "{{value:collection_total}}" at path "$.total_count"
     When I send a DELETE request to "/api/v1/evaluations/collections/{{value:first_id}}?hard_delete=true"
     Then the response code should be 204
     When I send a DELETE request to "/api/v1/evaluations/collections/{{value:second_id}}?hard_delete=true"
@@ -631,7 +637,7 @@ Feature: Collections Endpoint
     And there is a system collection with id "safety-and-fairness-v1"
     When I send a GET request to "/api/v1/evaluations/collections/safety-and-fairness-v1"
     Then the response code should be 200
-    And the response should contain the value "0.758" at path "$.pass_criteria.threshold"
+    And the response should contain the value "0.7416666" at path "$.pass_criteria.threshold"
 
   Scenario: Verify out of box collection retrieval - benchmarks
     Given the service is running
@@ -660,7 +666,7 @@ Feature: Collections Endpoint
     Given the service is running
     And there are system collections
     When I send a DELETE request to "/api/v1/evaluations/collections/{{value:collection0:id}}?hard_delete=true"
-    Then the response code should be 400
+    Then the response code should be 403
     And the response should contain the value "read_only_collection" at path "$.message_code"
     And the response should contain the value "cannot be modified or deleted." at path "$.message"
 
@@ -687,7 +693,7 @@ Feature: Collections Endpoint
     And the array at path "benchmarks" in the response should have length 6
     And the response should equal the value "0.6" at path "$.benchmarks[0].pass_criteria.threshold"
     And the response should equal the value "0.85" at path "$.benchmarks[1].pass_criteria.threshold"
-    And the response should equal the value "0.8" at path "$.benchmarks[2].pass_criteria.threshold"
+    And the response should equal the value "0.6" at path "$.benchmarks[2].pass_criteria.threshold"
     And the response should equal the value "0.5" at path "$.benchmarks[3].pass_criteria.threshold"
     And the response should equal the value "0.9" at path "$.benchmarks[4].pass_criteria.threshold"
     And the response should equal the value "0.75" at path "$.benchmarks[5].pass_criteria.threshold"

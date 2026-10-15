@@ -17,7 +17,9 @@ import (
 	"github.com/eval-hub/eval-hub/internal/eval_hub/config"
 	"github.com/eval-hub/eval-hub/internal/eval_hub/handlers"
 	"github.com/eval-hub/eval-hub/internal/eval_hub/messages"
+	"github.com/eval-hub/eval-hub/internal/eval_hub/postprocessing"
 	"github.com/eval-hub/eval-hub/internal/eval_hub/runtimes/shared"
+	"github.com/eval-hub/eval-hub/internal/eval_hub/workloads"
 	"github.com/eval-hub/eval-hub/pkg/api"
 )
 
@@ -145,6 +147,10 @@ func (f *fakeStorage) WithContext(ctx context.Context) abstractions.Storage {
 		runStatusChan: f.runStatusChan,
 		updateErr:     f.updateErr,
 	}
+}
+
+func (f *fakeStorage) WithWorkloadType(workloadType workloads.Type) abstractions.Storage {
+	return f.WithContext(workloads.WithType(f.ctx, workloadType))
 }
 
 func (f *fakeStorage) WithOwner(owner api.User) abstractions.Storage {
@@ -301,6 +307,29 @@ func TestNewLocalRuntime(t *testing.T) {
 	}
 	if rt == nil {
 		t.Fatal("expected non-nil runtime")
+	}
+}
+
+func TestPostProcessingProviderUsesLocalCommand(t *testing.T) {
+	t.Setenv("EVALHUB_POST_PROCESSING_LOCAL_COMMAND", "")
+	benchmark := api.EvaluationBenchmarkConfig{Ref: api.Ref{ID: postprocessing.BenchmarkID}, ProviderID: postprocessing.ProviderID}
+	evaluation := &api.EvaluationJobResource{EvaluationJobConfig: api.EvaluationJobConfig{Benchmarks: []api.EvaluationBenchmarkConfig{benchmark}}}
+
+	provider, err := shared.ProviderForBenchmark(evaluation, benchmark, nil)
+	if err != nil {
+		t.Fatalf("ProviderForBenchmark failed without catalog storage: %v", err)
+	}
+	if provider.Resource.ID != postprocessing.ProviderID || provider.Runtime.Local.Command != "../eval-hub-contrib/adapters/evalhub-post-processor/.venv/bin/python ../eval-hub-contrib/adapters/evalhub-post-processor/main.py" {
+		t.Fatalf("unexpected default runtime provider: %#v", provider)
+	}
+
+	t.Setenv("EVALHUB_POST_PROCESSING_LOCAL_COMMAND", "python /path/to/evalhub-post-processor/main.py")
+	provider, err = shared.ProviderForBenchmark(evaluation, benchmark, nil)
+	if err != nil {
+		t.Fatalf("ProviderForBenchmark failed with local command override: %v", err)
+	}
+	if provider.Runtime.Local.Command != "python /path/to/evalhub-post-processor/main.py" {
+		t.Fatalf("unexpected runtime provider: %#v", provider)
 	}
 }
 

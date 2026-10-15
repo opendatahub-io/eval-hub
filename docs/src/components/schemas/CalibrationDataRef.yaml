@@ -1,0 +1,26 @@
+type: object
+title: CalibrationDataRef
+description: External calibration data reference together with its dataset description.
+properties:
+  s3:
+    $ref: ./TestDataRefS3.yaml
+  pvc:
+    $ref: ./TestDataRefPVC.yaml
+  git:
+    $ref: ./TestDataRefGit.yaml
+  hf:
+    $ref: ./TestDataRefHF.yaml
+  data_config:
+    $ref: ./CalibrationDataConfig.yaml
+required:
+  - data_config
+oneOf:
+  - required:
+      - s3
+  - required:
+      - pvc
+  - required:
+      - git
+  - required:
+      - hf
+additionalProperties: false

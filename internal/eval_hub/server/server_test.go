@@ -164,6 +164,8 @@ func TestServerSetupRoutes(t *testing.T) {
 		body   string
 	}{
 		{http.MethodGet, "/api/v1/health", http.StatusOK, ""},
+		{http.MethodGet, "/api/v1/info", http.StatusOK, ""},
+		{http.MethodPost, "/api/v1/info", http.StatusMethodNotAllowed, ""},
 		{http.MethodGet, "/openapi.yaml", http.StatusOK, ""},
 		{http.MethodGet, "/docs", http.StatusOK, ""},
 		// Evaluation endpoints
@@ -375,11 +377,11 @@ func createServerWithLocalMode(t *testing.T, port int, localMode bool) (*server.
 	}
 	// Use stub runtime to avoid file writes and process spawning during tests
 	runtime := &stubRuntime{logger: logger, providers: providerConfigs}
-	mlflowClient, err := mlflow.NewMLFlowClient(serviceConfig, logger)
+	mlflowClient, mlflowWorkspaceSupport, err := mlflow.NewMLFlowClient(serviceConfig, logger)
 	if err != nil {
 		return nil, fmt.Errorf("failed to create MLFlow client: %w", err)
 	}
-	return server.NewServer(logger, serviceConfig, store, validate, runtime, mlflowClient)
+	return server.NewServer(logger, serviceConfig, store, validate, runtime, mlflowClient, mlflowWorkspaceSupport)
 }
 
 func getKeyAsString(obj map[string]interface{}, key string) string {

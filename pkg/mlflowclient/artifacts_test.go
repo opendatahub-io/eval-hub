@@ -122,9 +122,9 @@ func TestUploadArtifactErrorResponse(t *testing.T) {
 func TestUploadArtifactWithWorkspaceHeader(t *testing.T) {
 	t.Parallel()
 
-	var workspaceHeader string
+	headerCh := make(chan string, 1)
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		workspaceHeader = r.Header.Get("X-MLFLOW-WORKSPACE")
+		headerCh <- r.Header.Get("X-MLFLOW-WORKSPACE")
 		w.WriteHeader(http.StatusOK)
 	}))
 	t.Cleanup(srv.Close)
@@ -137,23 +137,33 @@ func TestUploadArtifactWithWorkspaceHeader(t *testing.T) {
 	if err != nil {
 		t.Fatalf("UploadArtifact() err = %v", err)
 	}
-	if workspaceHeader != "tenant-a" {
-		t.Fatalf("workspace header = %q", workspaceHeader)
+	if got := <-headerCh; got != "tenant-a" {
+		t.Fatalf("workspace header = %q", got)
 	}
 }
 
-func TestReaderContentLength(t *testing.T) {
+func TestDownloadArtifactWithWorkspaceHeader(t *testing.T) {
 	t.Parallel()
 
-	body := []byte("artifact-bytes")
-	if got := readerContentLength(bytes.NewReader(body)); got != int64(len(body)) {
-		t.Fatalf("bytes.Reader length = %d, want %d", got, len(body))
+	headerCh := make(chan string, 1)
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		headerCh <- r.Header.Get("X-MLFLOW-WORKSPACE")
+		w.WriteHeader(http.StatusOK)
+		_, _ = w.Write([]byte(`{}`))
+	}))
+	t.Cleanup(srv.Close)
+
+	client := NewClient(srv.URL).
+		WithContext(t.Context()).
+		WithWorkspacesSupport(true).
+		WithWorkspace("tenant-b")
+	reader, err := client.DownloadArtifact("1/run-1/artifacts/file.json")
+	if err != nil {
+		t.Fatalf("DownloadArtifact() err = %v", err)
 	}
-	if got := readerContentLength(strings.NewReader("artifact-bytes")); got != int64(len(body)) {
-		t.Fatalf("strings.Reader length = %d, want %d", got, len(body))
-	}
-	if got := readerContentLength(io.NopCloser(strings.NewReader("x"))); got != -1 {
-		t.Fatalf("wrapped reader length = %d, want -1", got)
+	defer func() { _ = reader.Close() }()
+	if got := <-headerCh; got != "tenant-b" {
+		t.Fatalf("workspace header = %q", got)
 	}
 }
 

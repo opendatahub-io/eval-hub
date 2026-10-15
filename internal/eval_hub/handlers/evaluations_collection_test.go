@@ -54,11 +54,15 @@ func (s *collectionRunCountStorage) CreateEvaluationJobAndUpdateCollection(job *
 		return s.atomicErr
 	}
 	s.createdJob = job
-	if s.collection.Status != nil {
-		s.collection.Status.RunCount++
-		s.updatedStatusID = job.Collection.ID
-		s.updatedStatus = s.collection.Status
+	if s.collection.Resource.IsSystemResource() {
+		return nil
 	}
+	if s.collection.Status == nil {
+		s.collection.Status = &api.CollectionStatus{}
+	}
+	s.collection.Status.RunCount++
+	s.updatedStatusID = job.Collection.ID
+	s.updatedStatus = s.collection.Status
 	return nil
 }
 
@@ -71,7 +75,7 @@ func (s *collectionRunCountStorage) UpdateCollectionStatus(id string, status *ap
 func TestHandleListEvaluationsCollectionIDFilter(t *testing.T) {
 	storage := &listEvaluationsStorage{fakeStorage: &fakeStorage{}}
 	logger := slog.New(slog.NewTextHandler(io.Discard, nil))
-	h := handlers.New(storage, testhelpers.NewValidator(t), nil, nil, nil, nil)
+	h := handlers.New(storage, testhelpers.NewValidator(t), nil, nil, nil, nil, nil)
 	req := &listEvaluationsRequest{
 		MockRequest: createMockRequest("GET", "/api/v1/evaluations/jobs?collection_id=collection-1"),
 		queryValues: map[string][]string{"collection_id": {"collection-1"}},
@@ -100,10 +104,12 @@ func TestHandleCreateEvaluationUpdatesCustomCollectionRunCount(t *testing.T) {
 		wantCode     int
 		wantUpdate   bool
 		wantRunCount int
+		owner        api.User
 	}{
-		{name: "custom collection", status: &api.CollectionStatus{RunCount: 2}, wantCode: http.StatusAccepted, wantUpdate: true, wantRunCount: 3},
-		{name: "system collection", wantCode: http.StatusAccepted},
-		{name: "atomic storage failure", status: &api.CollectionStatus{RunCount: 2}, atomicErr: errors.New("storage failed"), wantCode: http.StatusInternalServerError},
+		{name: "custom collection", owner: "user-1", status: &api.CollectionStatus{RunCount: 2}, wantCode: http.StatusAccepted, wantUpdate: true, wantRunCount: 3},
+		{name: "custom collection without status", owner: "user-1", wantCode: http.StatusAccepted, wantUpdate: true, wantRunCount: 1},
+		{name: "system collection", owner: "system", wantCode: http.StatusAccepted},
+		{name: "atomic storage failure", owner: "user-1", status: &api.CollectionStatus{RunCount: 2}, atomicErr: errors.New("storage failed"), wantCode: http.StatusInternalServerError},
 	}
 
 	for _, tt := range tests {
@@ -118,7 +124,7 @@ func TestHandleCreateEvaluationUpdatesCustomCollectionRunCount(t *testing.T) {
 					},
 				}},
 				collection: &api.CollectionResource{
-					Resource: api.Resource{ID: "collection-1", UpdatedAt: now},
+					Resource: api.Resource{ID: "collection-1", Owner: tt.owner, UpdatedAt: now},
 					CollectionConfig: api.CollectionConfig{
 						Name:     "collection",
 						Category: "test",
@@ -132,7 +138,7 @@ func TestHandleCreateEvaluationUpdatesCustomCollectionRunCount(t *testing.T) {
 				atomicErr: tt.atomicErr,
 			}
 			logger := slog.New(slog.NewTextHandler(io.Discard, nil))
-			h := handlers.New(storage, testhelpers.NewValidator(t), nil, nil, nil, nil)
+			h := handlers.New(storage, testhelpers.NewValidator(t), nil, nil, nil, nil, nil)
 			req := &bodyRequest{
 				MockRequest: createMockRequest("POST", "/api/v1/evaluations/jobs"),
 				body:        []byte(`{"name":"evaluation","model":{"url":"http://test.com","name":"test"},"collection":{"id":"collection-1"}}`),

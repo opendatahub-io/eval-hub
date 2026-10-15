@@ -8,11 +8,12 @@ import (
 
 	"github.com/eval-hub/eval-hub/internal/eval_hub/abstractions"
 	"github.com/eval-hub/eval-hub/internal/eval_hub/storage/sql/shared"
+	"github.com/eval-hub/eval-hub/internal/eval_hub/workloads"
 	"github.com/eval-hub/eval-hub/pkg/api"
 )
 
 const (
-	insertEvaluationStatement = `INSERT INTO evaluations (id, tenant_id, owner, status, experiment_id, entity) VALUES ($1, $2, $3, $4, $5, $6) RETURNING id;`
+	insertEvaluationStatement = `INSERT INTO evaluations (id, tenant_id, owner, status, experiment_id, workload_type, entity) VALUES ($1, $2, $3, $4, $5, $6, $7) RETURNING id;`
 
 	insertCollectionStatement = `INSERT INTO collections (id, tenant_id, owner, created_at, updated_at, entity) VALUES ($1, $2, $3, $4, $5, $6) RETURNING id;`
 
@@ -27,9 +28,12 @@ CREATE TABLE IF NOT EXISTS evaluations (
     owner VARCHAR(255) NOT NULL,
     status VARCHAR(50) NOT NULL DEFAULT 'pending',
     experiment_id VARCHAR(255) NOT NULL,
+    workload_type TEXT NOT NULL DEFAULT 'evaluation',
     entity JSONB NOT NULL,
     PRIMARY KEY (id)
 );
+
+ALTER TABLE evaluations ADD COLUMN IF NOT EXISTS workload_type TEXT NOT NULL DEFAULT 'evaluation';
 
 CREATE TABLE IF NOT EXISTS collections (
     id VARCHAR(36) NOT NULL,
@@ -40,6 +44,9 @@ CREATE TABLE IF NOT EXISTS collections (
     entity JSONB NOT NULL,
     PRIMARY KEY (id)
 );
+
+CREATE INDEX IF NOT EXISTS idx_collections_curation_order_json
+ON collections ((NULLIF((entity->>'curation_order')::bigint, 0)) ASC NULLS LAST, id DESC);
 
 CREATE TABLE IF NOT EXISTS providers (
     id VARCHAR(36) NOT NULL,
@@ -69,16 +76,24 @@ func (s *postgresStatementsFactory) GetTablesSchema() string {
 	return tablesSchema
 }
 
-func (s *postgresStatementsFactory) CreateEvaluationAddEntityStatement(evaluation *api.EvaluationJobResource, entity string) (string, []any) {
-	return insertEvaluationStatement, []any{evaluation.Resource.ID, evaluation.Resource.Tenant, evaluation.Resource.Owner, evaluation.Status.State, evaluation.Resource.MLFlowExperimentID, entity}
+func (s *postgresStatementsFactory) CreateEvaluationAddEntityStatement(evaluation *api.EvaluationJobResource, entity string, workloadType workloads.Type) (string, []any) {
+	return insertEvaluationStatement, []any{evaluation.Resource.ID, evaluation.Resource.Tenant, evaluation.Resource.Owner, evaluation.Status.State, evaluation.Resource.MLFlowExperimentID, string(workloadType), entity}
 }
 
 func (s *postgresStatementsFactory) CreateEvaluationGetEntityStatement(query *shared.EntityQuery) (string, []any, []any) {
-	// SELECT id, created_at, updated_at, tenant_id, owner, status, experiment_id, entity FROM evaluations WHERE id = $1;
-	if query.Resource.Tenant.IsEmpty() {
-		return `SELECT id, created_at, updated_at, tenant_id, owner, status, experiment_id, entity FROM evaluations WHERE id = $1;`, []any{&query.Resource.ID}, []any{&query.Resource.ID, &query.Resource.CreatedAt, &query.Resource.UpdatedAt, &query.Resource.Tenant, &query.Resource.Owner, &query.Status, &query.MLFlowExperimentID, &query.EntityJSON}
+	where := "id = $1"
+	args := []any{&query.Resource.ID}
+	if !query.Resource.Tenant.IsEmpty() {
+		where += " AND tenant_id = $2"
+		args = append(args, query.Resource.Tenant.String())
 	}
-	return `SELECT id, created_at, updated_at, tenant_id, owner, status, experiment_id, entity FROM evaluations WHERE id = $1 AND tenant_id = $2;`, []any{&query.Resource.ID, query.Resource.Tenant.String()}, []any{&query.Resource.ID, &query.Resource.CreatedAt, &query.Resource.UpdatedAt, &query.Resource.Tenant, &query.Resource.Owner, &query.Status, &query.MLFlowExperimentID, &query.EntityJSON}
+	if query.WorkloadType != "" {
+		where += fmt.Sprintf(" AND workload_type = $%d", len(args)+1)
+		args = append(args, string(query.WorkloadType))
+	}
+	statement := fmt.Sprintf(`SELECT id, created_at, updated_at, tenant_id, owner, status, experiment_id, entity FROM evaluations WHERE %s;`, where)
+	scanArgs := []any{&query.Resource.ID, &query.Resource.CreatedAt, &query.Resource.UpdatedAt, &query.Resource.Tenant, &query.Resource.Owner, &query.Status, &query.MLFlowExperimentID, &query.EntityJSON}
+	return statement, args, scanArgs
 }
 
 func (s *postgresStatementsFactory) CreateEvaluationGetEntityForUpdateStatement(query *shared.EntityQuery) (string, []any, []any) {
@@ -161,14 +176,20 @@ func (s *postgresStatementsFactory) CreateEntityFilterCondition(key string, valu
 
 func (s *postgresStatementsFactory) CreateCountEntitiesStatement(tenant api.Tenant, tableName string, filter map[string]any) (string, []any) {
 	where, whereArgs := s.getWhereStatement(tenant, "", 1) // we don't need to filter by id as we want to count all entities
+	where = shared.AddEvaluationWorkloadTypeFilter(tableName, where)
 	filterClause, args := shared.CreateFilterStatement(s, where, whereArgs, filter, "", 0, 0, tableName)
 	query := fmt.Sprintf(`SELECT COUNT(*) FROM %s%s;`, tableName, filterClause)
 	return query, args
 }
 
-func (s *postgresStatementsFactory) CreateListEntitiesStatement(tenant api.Tenant, tableName string, limit, offset int, filter map[string]any) (string, []any) {
+func (s *postgresStatementsFactory) CreateListEntitiesStatement(tenant api.Tenant, tableName string, limit, offset int, filter map[string]any, sortBy string) (string, []any) {
 	where, whereArgs := s.getWhereStatement(tenant, "", 1) // we don't need to filter by id as we want to list all entities
-	filterClause, args := shared.CreateFilterStatement(s, where, whereArgs, filter, "id DESC", limit, offset, tableName)
+	where = shared.AddEvaluationWorkloadTypeFilter(tableName, where)
+	orderBy := "id DESC"
+	if tableName == shared.TableCollections && sortBy == "curation_order" {
+		orderBy = "NULLIF((entity->>'curation_order')::bigint, 0) ASC NULLS LAST, id DESC"
+	}
+	filterClause, args := shared.CreateFilterStatement(s, where, whereArgs, filter, orderBy, limit, offset, tableName)
 
 	var query string
 	switch tableName {

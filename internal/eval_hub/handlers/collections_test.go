@@ -5,7 +5,10 @@ import (
 	"encoding/json"
 	"io"
 	"log/slog"
+	"net/http"
 	"net/http/httptest"
+	"reflect"
+	"strings"
 	"testing"
 
 	"github.com/eval-hub/eval-hub/internal/eval_hub/abstractions"
@@ -51,6 +54,7 @@ type listCollectionsStorage struct {
 	*fakeStorage
 	collections []api.CollectionResource
 	err         error
+	lastSortBy  *string
 }
 
 func (s *listCollectionsStorage) WithLogger(_ *slog.Logger) abstractions.Storage {
@@ -70,7 +74,10 @@ func (s *listCollectionsStorage) WithOwner(_ api.User) abstractions.Storage {
 	return &copy
 }
 
-func (s *listCollectionsStorage) GetCollections(_ *abstractions.QueryFilter) (*abstractions.QueryResults[api.CollectionResource], error) {
+func (s *listCollectionsStorage) GetCollections(filter *abstractions.QueryFilter) (*abstractions.QueryResults[api.CollectionResource], error) {
+	if s.lastSortBy != nil {
+		*s.lastSortBy = filter.SortBy
+	}
 	if s.err != nil {
 		return nil, s.err
 	}
@@ -221,7 +228,7 @@ func TestHandleListCollections(t *testing.T) {
 	}
 	validate := testhelpers.NewValidator(t)
 	logger := slog.New(slog.NewTextHandler(io.Discard, nil))
-	h := handlers.New(storage, validate, &fakeRuntime{}, nil, nil, nil)
+	h := handlers.New(storage, validate, &fakeRuntime{}, nil, nil, nil, nil)
 
 	req := &providersRequest{
 		MockRequest: createMockRequest("GET", "/api/v1/evaluations/collections"),
@@ -354,7 +361,7 @@ func TestHandleListCollections_ReturnsStoredBenchmarkURL(t *testing.T) {
 	}
 	validate := testhelpers.NewValidator(t)
 	logger := slog.New(slog.NewTextHandler(io.Discard, nil))
-	h := handlers.New(storage, validate, &fakeRuntime{}, nil, nil, nil)
+	h := handlers.New(storage, validate, &fakeRuntime{}, nil, nil, nil, nil)
 
 	req := &providersRequest{
 		MockRequest: createMockRequest("GET", "/api/v1/evaluations/collections"),
@@ -410,7 +417,7 @@ func TestHandleGetCollection_ReturnsStoredBenchmarkURL(t *testing.T) {
 	}
 	validate := testhelpers.NewValidator(t)
 	logger := slog.New(slog.NewTextHandler(io.Discard, nil))
-	h := handlers.New(storage, validate, &fakeRuntime{}, nil, nil, nil)
+	h := handlers.New(storage, validate, &fakeRuntime{}, nil, nil, nil, nil)
 
 	req := &providersRequest{
 		MockRequest: createMockRequest("GET", "/api/v1/evaluations/collections/coll-1"),
@@ -445,7 +452,7 @@ func TestHandleListCollections_StorageError(t *testing.T) {
 	}
 	validate := testhelpers.NewValidator(t)
 	logger := slog.New(slog.NewTextHandler(io.Discard, nil))
-	h := handlers.New(storage, validate, &fakeRuntime{}, nil, nil, nil)
+	h := handlers.New(storage, validate, &fakeRuntime{}, nil, nil, nil, nil)
 
 	req := &providersRequest{
 		MockRequest: createMockRequest("GET", "/api/v1/evaluations/collections"),
@@ -476,7 +483,7 @@ func TestHandleCreateCollection(t *testing.T) {
 	}}
 	validate := testhelpers.NewValidator(t)
 	logger := slog.New(slog.NewTextHandler(io.Discard, nil))
-	h := handlers.New(storage, validate, &fakeRuntime{}, nil, nil, nil)
+	h := handlers.New(storage, validate, &fakeRuntime{}, nil, nil, nil, nil)
 
 	body := `
 	{
@@ -513,6 +520,9 @@ func TestHandleCreateCollection(t *testing.T) {
 	if got.Resource.ID == "" {
 		t.Error("expected non-empty resource ID")
 	}
+	if got.Status == nil || got.Status.RunCount != 0 {
+		t.Errorf("expected new custom collection status with run_count 0, got %+v", got.Status)
+	}
 	if got.Name != "My Collection" {
 		t.Errorf("expected name My Collection, got %s", got.Name)
 	}
@@ -521,6 +531,81 @@ func TestHandleCreateCollection(t *testing.T) {
 	}
 	if got.Benchmarks[0].URL != "https://example.com/b1" {
 		t.Errorf("benchmark url = %q, want https://example.com/b1", got.Benchmarks[0].URL)
+	}
+}
+
+func TestHandleCreateCollection_RequiresCategoryOrDomains(t *testing.T) {
+	storage := &createCollectionStorage{fakeStorage: &fakeStorage{}}
+	validate := testhelpers.NewValidator(t)
+	logger := slog.New(slog.NewTextHandler(io.Discard, nil))
+	h := handlers.New(storage, validate, &fakeRuntime{}, nil, nil, nil, nil)
+
+	req := &providersRequest{
+		MockRequest: createMockRequest("POST", "/api/v1/evaluations/collections"),
+		queryValues: map[string][]string{},
+		pathValues:  map[string]string{},
+	}
+	req.SetBody([]byte(`{
+		"name": "My Collection",
+		"benchmarks": [{"id": "b1", "provider_id": "p1"}]
+	}`))
+	recorder := httptest.NewRecorder()
+	resp := MockResponseWrapper{recorder: recorder}
+	ctx := executioncontext.NewExecutionContext(context.Background(), "req-1", logger, "test-user", "test-tenant")
+
+	h.HandleCreateCollection(ctx, req, resp)
+
+	if recorder.Code != http.StatusBadRequest {
+		t.Fatalf("expected status %d, got %d body %s", http.StatusBadRequest, recorder.Code, recorder.Body.String())
+	}
+	if !strings.Contains(recorder.Body.String(), "either category or a non-empty domains array must be provided") {
+		t.Fatalf("expected classification validation error, got %s", recorder.Body.String())
+	}
+}
+
+func TestHandleCreateCollection_AllowsDomainsWithoutCategory(t *testing.T) {
+	storage := &createCollectionStorage{fakeStorage: &fakeStorage{
+		providerConfigs: map[string]api.ProviderResource{
+			"p1": {
+				Resource: api.Resource{ID: "p1"},
+				ProviderConfig: api.ProviderConfig{
+					Benchmarks: []api.BenchmarkResource{{ID: "b1", URL: "https://example.com/b1"}},
+				},
+			},
+		},
+	}}
+	validate := testhelpers.NewValidator(t)
+	logger := slog.New(slog.NewTextHandler(io.Discard, nil))
+	h := handlers.New(storage, validate, &fakeRuntime{}, nil, nil, nil, nil)
+
+	req := &providersRequest{
+		MockRequest: createMockRequest("POST", "/api/v1/evaluations/collections"),
+		queryValues: map[string][]string{},
+		pathValues:  map[string]string{},
+	}
+	req.SetBody([]byte(`{
+		"name": "My Collection",
+		"domains": ["knowledge_and_reasoning"],
+		"benchmarks": [{"id": "b1", "provider_id": "p1"}]
+	}`))
+	recorder := httptest.NewRecorder()
+	resp := MockResponseWrapper{recorder: recorder}
+	ctx := executioncontext.NewExecutionContext(context.Background(), "req-1", logger, "test-user", "test-tenant")
+
+	h.HandleCreateCollection(ctx, req, resp)
+
+	if recorder.Code != http.StatusCreated {
+		t.Fatalf("expected status %d, got %d body %s", http.StatusCreated, recorder.Code, recorder.Body.String())
+	}
+	var got api.CollectionResource
+	if err := json.NewDecoder(recorder.Body).Decode(&got); err != nil {
+		t.Fatalf("decode response: %v", err)
+	}
+	if got.Category != "" {
+		t.Errorf("expected no category, got %q", got.Category)
+	}
+	if !reflect.DeepEqual(got.Domains, []string{"knowledge_and_reasoning"}) {
+		t.Errorf("Domains: got %v, want [knowledge_and_reasoning]", got.Domains)
 	}
 }
 
@@ -536,7 +621,7 @@ func TestHandleGetCollection(t *testing.T) {
 	storage := &getCollectionStorage{fakeStorage: &fakeStorage{}, collection: coll}
 	validate := testhelpers.NewValidator(t)
 	logger := slog.New(slog.NewTextHandler(io.Discard, nil))
-	h := handlers.New(storage, validate, &fakeRuntime{}, nil, nil, nil)
+	h := handlers.New(storage, validate, &fakeRuntime{}, nil, nil, nil, nil)
 
 	req := &providersRequest{
 		MockRequest: createMockRequest("GET", "/api/v1/evaluations/collections/coll-123"),
@@ -565,7 +650,7 @@ func TestHandleGetCollection_MissingPathParam(t *testing.T) {
 	storage := &fakeStorage{}
 	validate := testhelpers.NewValidator(t)
 	logger := slog.New(slog.NewTextHandler(io.Discard, nil))
-	h := handlers.New(storage, validate, &fakeRuntime{}, nil, nil, nil)
+	h := handlers.New(storage, validate, &fakeRuntime{}, nil, nil, nil, nil)
 
 	req := &providersRequest{
 		MockRequest: createMockRequest("GET", "/api/v1/evaluations/collections/"),
@@ -606,7 +691,7 @@ func TestHandleUpdateCollection(t *testing.T) {
 	}
 	validate := testhelpers.NewValidator(t)
 	logger := slog.New(slog.NewTextHandler(io.Discard, nil))
-	h := handlers.New(storage, validate, &fakeRuntime{}, nil, nil, nil)
+	h := handlers.New(storage, validate, &fakeRuntime{}, nil, nil, nil, nil)
 
 	body := `
 	{
@@ -716,7 +801,7 @@ func TestHandlePatchCollection_EnrichesFullBenchmarkElementBeforeStorage(t *test
 	}
 	validate := testhelpers.NewValidator(t)
 	logger := slog.New(slog.NewTextHandler(io.Discard, nil))
-	h := handlers.New(storage, validate, &fakeRuntime{}, nil, nil, nil)
+	h := handlers.New(storage, validate, &fakeRuntime{}, nil, nil, nil, nil)
 
 	body := `[{"op":"replace","path":"/benchmarks/0","value":{"id":"b1","provider_id":"p1"}}]`
 	req := &providersRequest{
@@ -778,7 +863,7 @@ func TestHandlePatchCollection_EnrichesFullBenchmarksArrayBeforeStorage(t *testi
 	}
 	validate := testhelpers.NewValidator(t)
 	logger := slog.New(slog.NewTextHandler(io.Discard, nil))
-	h := handlers.New(storage, validate, &fakeRuntime{}, nil, nil, nil)
+	h := handlers.New(storage, validate, &fakeRuntime{}, nil, nil, nil, nil)
 
 	body := `[{"op":"replace","path":"/benchmarks","value":[{"id":"b1","provider_id":"p1"},{"id":"b2","provider_id":"p2"}]}]`
 	req := &providersRequest{
@@ -826,7 +911,7 @@ func TestHandlePatchCollection(t *testing.T) {
 	}
 	validate := testhelpers.NewValidator(t)
 	logger := slog.New(slog.NewTextHandler(io.Discard, nil))
-	h := handlers.New(storage, validate, &fakeRuntime{}, nil, nil, nil)
+	h := handlers.New(storage, validate, &fakeRuntime{}, nil, nil, nil, nil)
 
 	body := `[{"op":"replace","path":"/name","value":"Patched Name"}]`
 	req := &providersRequest{
@@ -849,7 +934,7 @@ func TestHandleDeleteCollection(t *testing.T) {
 	storage := &updatePatchDeleteCollectionStorage{fakeStorage: &fakeStorage{}}
 	validate := testhelpers.NewValidator(t)
 	logger := slog.New(slog.NewTextHandler(io.Discard, nil))
-	h := handlers.New(storage, validate, &fakeRuntime{}, nil, nil, nil)
+	h := handlers.New(storage, validate, &fakeRuntime{}, nil, nil, nil, nil)
 
 	req := &providersRequest{
 		MockRequest: createMockRequest("DELETE", "/api/v1/evaluations/collections/coll-del"),
@@ -964,7 +1049,7 @@ func TestCollectionHandlers_PropagateTenantAndOwner(t *testing.T) {
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			storage := &tenantTrackingStorage{fakeStorage: &fakeStorage{}}
-			h := handlers.New(storage, validate, &fakeRuntime{}, nil, nil, nil)
+			h := handlers.New(storage, validate, &fakeRuntime{}, nil, nil, nil, nil)
 
 			req := &providersRequest{
 				MockRequest: createMockRequest(tt.method, tt.path),
@@ -1030,7 +1115,7 @@ func TestHandleCloneCollection_Success(t *testing.T) {
 		},
 	}
 	storage := &cloneCollectionStorage{fakeStorage: &fakeStorage{}, source: source}
-	h := handlers.New(storage, validator, &fakeRuntime{}, nil, nil, nil)
+	h := handlers.New(storage, validator, &fakeRuntime{}, nil, nil, nil, nil)
 
 	req := &providersRequest{
 		MockRequest: createMockRequest("POST", "/api/v1/evaluations/collections/src-1/clones"),
@@ -1067,7 +1152,7 @@ func TestHandleCloneCollection_SourceNotFound(t *testing.T) {
 	validator := testhelpers.NewValidator(t)
 
 	storage := &cloneCollectionStorage{fakeStorage: &fakeStorage{}}
-	h := handlers.New(storage, validator, &fakeRuntime{}, nil, nil, nil)
+	h := handlers.New(storage, validator, &fakeRuntime{}, nil, nil, nil, nil)
 
 	req := &providersRequest{
 		MockRequest: createMockRequest("POST", "/api/v1/evaluations/collections/missing/clones"),
@@ -1098,7 +1183,7 @@ func TestHandleUpdateCollection_CuratedCollectionReturns403(t *testing.T) {
 		},
 	}
 	storage := &updatePatchDeleteCollectionStorage{fakeStorage: &fakeStorage{}, collection: curated}
-	h := handlers.New(storage, validator, &fakeRuntime{}, nil, nil, nil)
+	h := handlers.New(storage, validator, &fakeRuntime{}, nil, nil, nil, nil)
 
 	body := `{"name":"updated","category":"rag","benchmarks":[{"id":"crag","provider_id":"ragas"}]}`
 	req := &providersRequest{
@@ -1113,8 +1198,8 @@ func TestHandleUpdateCollection_CuratedCollectionReturns403(t *testing.T) {
 
 	h.HandleUpdateCollection(ctx, req, resp)
 
-	if recorder.Code != 400 {
-		t.Errorf("expected 400 (ReadOnlyCollection) for curated collection, got %d: %s", recorder.Code, recorder.Body.String())
+	if recorder.Code != 403 {
+		t.Errorf("expected 403 (ReadOnlyCollection) for curated collection, got %d: %s", recorder.Code, recorder.Body.String())
 	}
 }
 
@@ -1124,7 +1209,7 @@ func TestHandleListCollections_NewParamsAccepted(t *testing.T) {
 	validator := testhelpers.NewValidator(t)
 
 	storage := &listCollectionsStorage{fakeStorage: &fakeStorage{}, collections: []api.CollectionResource{}}
-	h := handlers.New(storage, validator, &fakeRuntime{}, nil, nil, nil)
+	h := handlers.New(storage, validator, &fakeRuntime{}, nil, nil, nil, nil)
 
 	newParams := []string{"domains", "tasks", "modalities", "industries", "evaluation_targets"}
 	for _, param := range newParams {
@@ -1165,7 +1250,7 @@ func TestHandleCloneCollection_CopiesToTenantScope(t *testing.T) {
 		},
 	}
 	storage := &cloneCollectionStorage{fakeStorage: &fakeStorage{}, source: source}
-	h := handlers.New(storage, validator, &fakeRuntime{}, nil, nil, nil)
+	h := handlers.New(storage, validator, &fakeRuntime{}, nil, nil, nil, nil)
 
 	req := &providersRequest{
 		MockRequest: createMockRequest("POST", "/api/v1/evaluations/collections/src-2/clones"),
@@ -1198,7 +1283,7 @@ func TestHandleCloneCollection_CopiesToTenantScope(t *testing.T) {
 	}
 }
 
-func TestHandlePatchCollection_CuratedReturns400(t *testing.T) {
+func TestHandlePatchCollection_CuratedReturns403(t *testing.T) {
 	t.Parallel()
 	logger := slog.New(slog.NewTextHandler(io.Discard, nil))
 	validator := testhelpers.NewValidator(t)
@@ -1211,7 +1296,7 @@ func TestHandlePatchCollection_CuratedReturns400(t *testing.T) {
 		},
 	}
 	storage := &updatePatchDeleteCollectionStorage{fakeStorage: &fakeStorage{}, collection: curated}
-	h := handlers.New(storage, validator, &fakeRuntime{}, nil, nil, nil)
+	h := handlers.New(storage, validator, &fakeRuntime{}, nil, nil, nil, nil)
 
 	req := &providersRequest{
 		MockRequest: createMockRequest("PATCH", "/api/v1/evaluations/collections/curated-patch"),
@@ -1225,12 +1310,12 @@ func TestHandlePatchCollection_CuratedReturns400(t *testing.T) {
 
 	h.HandlePatchCollection(ctx, req, resp)
 
-	if recorder.Code != 400 {
-		t.Errorf("expected 400 (ReadOnlyCollection) for curated collection, got %d: %s", recorder.Code, recorder.Body.String())
+	if recorder.Code != 403 {
+		t.Errorf("expected 403 (ReadOnlyCollection) for curated collection, got %d: %s", recorder.Code, recorder.Body.String())
 	}
 }
 
-func TestHandleUpdateCollection_SystemCollectionReturns400(t *testing.T) {
+func TestHandleUpdateCollection_SystemCollectionReturns403(t *testing.T) {
 	t.Parallel()
 	logger := slog.New(slog.NewTextHandler(io.Discard, nil))
 	validator := testhelpers.NewValidator(t)
@@ -1243,7 +1328,7 @@ func TestHandleUpdateCollection_SystemCollectionReturns400(t *testing.T) {
 		},
 	}
 	storage := &updatePatchDeleteCollectionStorage{fakeStorage: &fakeStorage{}, collection: sysColl}
-	h := handlers.New(storage, validator, &fakeRuntime{}, nil, nil, nil)
+	h := handlers.New(storage, validator, &fakeRuntime{}, nil, nil, nil, nil)
 
 	body := `{"name":"new","category":"test","benchmarks":[{"id":"b1","provider_id":"p1"}]}`
 	req := &providersRequest{
@@ -1258,8 +1343,39 @@ func TestHandleUpdateCollection_SystemCollectionReturns400(t *testing.T) {
 
 	h.HandleUpdateCollection(ctx, req, resp)
 
-	if recorder.Code != 400 {
-		t.Errorf("expected 400 for system collection, got %d: %s", recorder.Code, recorder.Body.String())
+	if recorder.Code != 403 {
+		t.Errorf("expected 403 for system collection, got %d: %s", recorder.Code, recorder.Body.String())
+	}
+}
+func TestHandlePatchCollection_SystemCollectionReturns403(t *testing.T) {
+	t.Parallel()
+	logger := slog.New(slog.NewTextHandler(io.Discard, nil))
+	validator := testhelpers.NewValidator(t)
+
+	sysColl := &api.CollectionResource{
+		Resource: api.Resource{ID: "sys-patch", Owner: "system"},
+		CollectionConfig: api.CollectionConfig{
+			Name: "System", Category: "test",
+			Benchmarks: []api.CollectionBenchmarkConfig{{Ref: api.Ref{ID: "b1"}, ProviderID: "p1"}},
+		},
+	}
+	storage := &updatePatchDeleteCollectionStorage{fakeStorage: &fakeStorage{}, collection: sysColl}
+	h := handlers.New(storage, validator, &fakeRuntime{}, nil, nil, nil, nil)
+
+	req := &providersRequest{
+		MockRequest: createMockRequest("PATCH", "/api/v1/evaluations/collections/sys-patch"),
+		queryValues: map[string][]string{},
+		pathValues:  map[string]string{constants.PathParameterCollectionID: "sys-patch"},
+	}
+	req.SetBody([]byte(`[{"op":"replace","path":"/name","value":"new"}]`))
+	recorder := httptest.NewRecorder()
+	resp := MockResponseWrapper{recorder: recorder}
+	ctx := executioncontext.NewExecutionContext(context.Background(), "req-1", logger, "user1", "tenant1")
+
+	h.HandlePatchCollection(ctx, req, resp)
+
+	if recorder.Code != 403 {
+		t.Errorf("expected 403 for system collection, got %d: %s", recorder.Code, recorder.Body.String())
 	}
 }
 
@@ -1338,7 +1454,7 @@ func TestHandleListCollections_ScopeCuratedRejected(t *testing.T) {
 	validator := testhelpers.NewValidator(t)
 
 	storage := &listCollectionsStorage{fakeStorage: &fakeStorage{}, collections: nil}
-	h := handlers.New(storage, validator, &fakeRuntime{}, nil, nil, nil)
+	h := handlers.New(storage, validator, &fakeRuntime{}, nil, nil, nil, nil)
 
 	req := &providersRequest{
 		MockRequest: createMockRequest("GET", "/api/v1/evaluations/collections"),
@@ -1370,7 +1486,7 @@ func TestHandleDeleteCollection_Success(t *testing.T) {
 		},
 	}
 	storage := &updatePatchDeleteCollectionStorage{fakeStorage: &fakeStorage{}, collection: coll}
-	h := handlers.New(storage, validator, &fakeRuntime{}, nil, nil, nil)
+	h := handlers.New(storage, validator, &fakeRuntime{}, nil, nil, nil, nil)
 
 	req := &providersRequest{
 		MockRequest: createMockRequest("DELETE", "/api/v1/evaluations/collections/del-ok"),
@@ -1387,13 +1503,40 @@ func TestHandleDeleteCollection_Success(t *testing.T) {
 		t.Errorf("expected 204, got %d: %s", recorder.Code, recorder.Body.String())
 	}
 }
+func TestHandleDeleteCollection_SystemCollectionReturns403(t *testing.T) {
+	t.Parallel()
+	logger := slog.New(slog.NewTextHandler(io.Discard, nil))
+	validator := testhelpers.NewValidator(t)
+
+	storage := &updatePatchDeleteCollectionStorage{
+		fakeStorage: &fakeStorage{},
+		collection:  &api.CollectionResource{Resource: api.Resource{ID: "sys-delete", Owner: "system"}},
+		deleteErr:   serviceerrors.NewServiceError(messages.ReadOnlyCollection, "CollectionID", "sys-delete"),
+	}
+	h := handlers.New(storage, validator, &fakeRuntime{}, nil, nil, nil, nil)
+
+	req := &providersRequest{
+		MockRequest: createMockRequest("DELETE", "/api/v1/evaluations/collections/sys-delete"),
+		queryValues: map[string][]string{},
+		pathValues:  map[string]string{constants.PathParameterCollectionID: "sys-delete"},
+	}
+	recorder := httptest.NewRecorder()
+	resp := MockResponseWrapper{recorder: recorder}
+	ctx := executioncontext.NewExecutionContext(context.Background(), "req-1", logger, "user1", "tenant1")
+
+	h.HandleDeleteCollection(ctx, req, resp)
+
+	if recorder.Code != 403 {
+		t.Errorf("expected 403 for system collection, got %d: %s", recorder.Code, recorder.Body.String())
+	}
+}
 
 func TestHandleDeleteCollection_MissingPathParam(t *testing.T) {
 	t.Parallel()
 	logger := slog.New(slog.NewTextHandler(io.Discard, nil))
 	validator := testhelpers.NewValidator(t)
 
-	h := handlers.New(&fakeStorage{}, validator, &fakeRuntime{}, nil, nil, nil)
+	h := handlers.New(&fakeStorage{}, validator, &fakeRuntime{}, nil, nil, nil, nil)
 	req := &providersRequest{
 		MockRequest: createMockRequest("DELETE", "/api/v1/evaluations/collections/"),
 		queryValues: map[string][]string{},
@@ -1426,7 +1569,7 @@ func TestHandleDeleteCollection_StorageError(t *testing.T) {
 		},
 		deleteErr: serviceerrors.NewServiceError(messages.InternalServerError, "Error", "db error"),
 	}
-	h := handlers.New(storage, validator, &fakeRuntime{}, nil, nil, nil)
+	h := handlers.New(storage, validator, &fakeRuntime{}, nil, nil, nil, nil)
 
 	req := &providersRequest{
 		MockRequest: createMockRequest("DELETE", "/api/v1/evaluations/collections/del-err"),
@@ -1449,7 +1592,7 @@ func TestHandlePatchCollection_MissingPathParam(t *testing.T) {
 	logger := slog.New(slog.NewTextHandler(io.Discard, nil))
 	validator := testhelpers.NewValidator(t)
 
-	h := handlers.New(&fakeStorage{}, validator, &fakeRuntime{}, nil, nil, nil)
+	h := handlers.New(&fakeStorage{}, validator, &fakeRuntime{}, nil, nil, nil, nil)
 	req := &providersRequest{
 		MockRequest: createMockRequest("PATCH", "/api/v1/evaluations/collections/"),
 		queryValues: map[string][]string{},
@@ -1471,7 +1614,7 @@ func TestHandlePatchCollection_InvalidJSON(t *testing.T) {
 	logger := slog.New(slog.NewTextHandler(io.Discard, nil))
 	validator := testhelpers.NewValidator(t)
 
-	h := handlers.New(&fakeStorage{}, validator, &fakeRuntime{}, nil, nil, nil)
+	h := handlers.New(&fakeStorage{}, validator, &fakeRuntime{}, nil, nil, nil, nil)
 	req := &providersRequest{
 		MockRequest: createMockRequest("PATCH", "/api/v1/evaluations/collections/coll-1"),
 		queryValues: map[string][]string{},
@@ -1494,7 +1637,7 @@ func TestHandleUpdateCollection_MissingPathParam(t *testing.T) {
 	logger := slog.New(slog.NewTextHandler(io.Discard, nil))
 	validator := testhelpers.NewValidator(t)
 
-	h := handlers.New(&fakeStorage{}, validator, &fakeRuntime{}, nil, nil, nil)
+	h := handlers.New(&fakeStorage{}, validator, &fakeRuntime{}, nil, nil, nil, nil)
 	req := &providersRequest{
 		MockRequest: createMockRequest("PUT", "/api/v1/evaluations/collections/"),
 		queryValues: map[string][]string{},
@@ -1523,7 +1666,7 @@ func TestHandleListCollections_MultiValueFilter(t *testing.T) {
 		},
 	}
 	storage := &listCollectionsStorage{fakeStorage: &fakeStorage{}, collections: collections}
-	h := handlers.New(storage, validator, &fakeRuntime{}, nil, nil, nil)
+	h := handlers.New(storage, validator, &fakeRuntime{}, nil, nil, nil, nil)
 
 	req := &providersRequest{
 		MockRequest: createMockRequest("GET", "/api/v1/evaluations/collections"),
@@ -1554,7 +1697,7 @@ func TestHandleCloneCollection_UnknownFieldRejected(t *testing.T) {
 		},
 	}
 	storage := &cloneCollectionStorage{fakeStorage: &fakeStorage{}, source: source}
-	h := handlers.New(storage, validator, &fakeRuntime{}, nil, nil, nil)
+	h := handlers.New(storage, validator, &fakeRuntime{}, nil, nil, nil, nil)
 
 	req := &providersRequest{
 		MockRequest: createMockRequest("POST", "/api/v1/evaluations/collections/src-unk/clones"),
@@ -1590,7 +1733,7 @@ func TestHandleCloneCollection_InvalidJSONBody(t *testing.T) {
 		},
 	}
 	storage := &cloneCollectionStorage{fakeStorage: &fakeStorage{}, source: source}
-	h := handlers.New(storage, validator, &fakeRuntime{}, nil, nil, nil)
+	h := handlers.New(storage, validator, &fakeRuntime{}, nil, nil, nil, nil)
 
 	req := &providersRequest{
 		MockRequest: createMockRequest("POST", "/api/v1/evaluations/collections/src-json/clones"),
@@ -1622,7 +1765,7 @@ func TestHandleCloneCollection_InvalidBenchmarkOverride(t *testing.T) {
 		},
 	}
 	storage := &cloneCollectionStorage{fakeStorage: &fakeStorage{}, source: source}
-	h := handlers.New(storage, validator, &fakeRuntime{}, nil, nil, nil)
+	h := handlers.New(storage, validator, &fakeRuntime{}, nil, nil, nil, nil)
 
 	req := &providersRequest{
 		MockRequest: createMockRequest("POST", "/api/v1/evaluations/collections/src-bench/clones"),
@@ -1692,5 +1835,44 @@ func TestApplyOverrides_AllFields(t *testing.T) {
 	}
 	if result.Agent == nil || result.Agent.Summary != "override-agent" {
 		t.Errorf("Agent: expected override, got %v", result.Agent)
+	}
+}
+
+func TestHandleListCollections_CurationOrderSort(t *testing.T) {
+	t.Parallel()
+	logger := slog.New(slog.NewTextHandler(io.Discard, nil))
+	validator := testhelpers.NewValidator(t)
+	sortBy := ""
+	storage := &listCollectionsStorage{
+		fakeStorage: &fakeStorage{},
+		collections: []api.CollectionResource{},
+		lastSortBy:  &sortBy,
+	}
+	h := handlers.New(storage, validator, &fakeRuntime{}, nil, nil, nil, nil)
+	ctx := executioncontext.NewExecutionContext(context.Background(), "req-1", logger, "user1", "tenant1")
+
+	req := &providersRequest{
+		MockRequest: createMockRequest("GET", "/api/v1/evaluations/collections?sort_by=curation_order"),
+		queryValues: map[string][]string{"sort_by": {"curation_order"}},
+		pathValues:  map[string]string{},
+	}
+	recorder := httptest.NewRecorder()
+	h.HandleListCollections(ctx, req, MockResponseWrapper{recorder: recorder})
+	if recorder.Code != 200 {
+		t.Fatalf("expected 200 for curation_order sort, got %d: %s", recorder.Code, recorder.Body.String())
+	}
+	if sortBy != "curation_order" {
+		t.Fatalf("storage sort_by = %q, want curation_order", sortBy)
+	}
+
+	invalidReq := &providersRequest{
+		MockRequest: createMockRequest("GET", "/api/v1/evaluations/collections?sort_by=name"),
+		queryValues: map[string][]string{"sort_by": {"name"}},
+		pathValues:  map[string]string{},
+	}
+	invalidRecorder := httptest.NewRecorder()
+	h.HandleListCollections(ctx, invalidReq, MockResponseWrapper{recorder: invalidRecorder})
+	if invalidRecorder.Code != 400 {
+		t.Errorf("expected 400 for unsupported sort_by, got %d: %s", invalidRecorder.Code, invalidRecorder.Body.String())
 	}
 }

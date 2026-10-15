@@ -9,6 +9,7 @@ import (
 
 	"github.com/eval-hub/eval-hub/internal/eval_hub/abstractions"
 	"github.com/eval-hub/eval-hub/internal/eval_hub/storage/sql/shared"
+	"github.com/eval-hub/eval-hub/internal/eval_hub/workloads"
 	"github.com/eval-hub/eval-hub/pkg/api"
 )
 
@@ -145,13 +146,26 @@ func TestCreateCountEntitiesStatement(t *testing.T) {
 	if !strings.Contains(stmt, "SELECT COUNT(*)") {
 		t.Errorf("expected COUNT(*), got: %s", stmt)
 	}
+	evaluationStmt, _ := f.CreateCountEntitiesStatement("t1", shared.TableEvaluations, map[string]any{})
+	if !strings.Contains(evaluationStmt, "workload_type = 'evaluation'") {
+		t.Errorf("evaluation-job count should exclude post-processing jobs, got: %s", evaluationStmt)
+	}
 }
 
 func TestCreateListEntitiesStatement(t *testing.T) {
 	f := NewStatementsFactory(slog.Default())
-	stmt, _ := f.CreateListEntitiesStatement("t1", shared.TableCollections, 10, 0, map[string]any{})
-	if !strings.Contains(stmt, "SELECT") {
-		t.Errorf("expected SELECT, got: %s", stmt)
+	stmt, _ := f.CreateListEntitiesStatement("t1", shared.TableCollections, 10, 0, map[string]any{}, "")
+	if !strings.Contains(stmt, "ORDER BY id DESC") {
+		t.Errorf("default statement should preserve id ordering, got: %s", stmt)
+	}
+	evaluationStmt, _ := f.CreateListEntitiesStatement("t1", shared.TableEvaluations, 10, 0, map[string]any{}, "")
+	if !strings.Contains(evaluationStmt, "workload_type = 'evaluation'") {
+		t.Errorf("evaluation-job list should exclude post-processing jobs, got: %s", evaluationStmt)
+	}
+
+	curatedStmt, _ := f.CreateListEntitiesStatement("t1", shared.TableCollections, 10, 0, map[string]any{}, "curation_order")
+	if !strings.Contains(curatedStmt, "CASE WHEN json_extract(entity, '$.curation_order') > 0 THEN 0 ELSE 1 END") {
+		t.Errorf("expected JSON curation order, got: %s", curatedStmt)
 	}
 }
 
@@ -220,7 +234,7 @@ func TestCreateEvaluationAddEntityStatement(t *testing.T) {
 		Resource: api.EvaluationResource{Resource: api.Resource{ID: "e1", Tenant: "t1", Owner: "u1"}},
 		Status:   &api.EvaluationJobStatus{EvaluationJobState: api.EvaluationJobState{State: state}},
 	}
-	stmt, args := f.CreateEvaluationAddEntityStatement(eval, `{}`)
+	stmt, args := f.CreateEvaluationAddEntityStatement(eval, `{}`, workloads.Evaluation)
 	if !strings.Contains(stmt, "INSERT INTO evaluations") {
 		t.Errorf("expected INSERT INTO evaluations, got: %s", stmt)
 	}

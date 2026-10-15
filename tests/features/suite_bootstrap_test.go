@@ -9,6 +9,7 @@ import (
 	"log/slog"
 	"net"
 	"net/http"
+	"net/http/httptest"
 	"net/url"
 	"os"
 	"os/exec"
@@ -25,6 +26,7 @@ import (
 	"github.com/eval-hub/eval-hub/internal/eval_hub/validation"
 	"github.com/eval-hub/eval-hub/internal/logging"
 	"github.com/eval-hub/eval-hub/internal/otel"
+	"github.com/eval-hub/eval-hub/internal/otel/oteltest"
 	"github.com/eval-hub/eval-hub/internal/testhelpers"
 	pkgapi "github.com/eval-hub/eval-hub/pkg/api"
 	"github.com/eval-hub/eval-hub/pkg/evalhubclient"
@@ -32,6 +34,7 @@ import (
 	"github.com/cucumber/godog"
 	"github.com/modelcontextprotocol/go-sdk/mcp"
 
+	mcpconfig "github.com/eval-hub/eval-hub/internal/evalhub_mcp/config"
 	mcpserver "github.com/eval-hub/eval-hub/internal/evalhub_mcp/server"
 )
 
@@ -44,8 +47,13 @@ func createApiFeature() (*apiFeature, error) {
 			timeout = time.Duration(eTimeout) * time.Second
 		}
 	}
+	// Avoid reusing idle connections that the ingress router may have closed.
+	// Clone to preserve the suite's TLS settings without changing other clients.
+	transport := http.DefaultTransport.(*http.Transport).Clone()
+	transport.DisableKeepAlives = true
 	client := &http.Client{
-		Timeout: timeout,
+		Timeout:   timeout,
+		Transport: transport,
 	}
 
 	if serverURL := os.Getenv("SERVER_URL"); serverURL != "" {
@@ -118,6 +126,28 @@ func ensureFVTOTELConfig(serviceConfig *config.Config) {
 	serviceConfig.OTEL.ExporterType = otel.ExporterTypeStdout
 }
 
+// configureFVTAdapterOTEL points the local runtime's adapter OTLP endpoint at the
+// in-process test collector so adapter subprocesses receive
+// OTEL_EXPORTER_OTLP_ENDPOINT and export their log records to it. It only sets
+// the endpoint used by the runtime (otelEndpointFromConfig); it deliberately
+// leaves ExporterType/EnableMetrics untouched so server-side OTEL behaviour
+// (stdout metrics, Prometheus scraping) is unchanged. ExporterType defaults to
+// stdout only when unset, keeping SetupOTEL valid if a provider is enabled.
+func configureFVTAdapterOTEL(serviceConfig *config.Config, endpoint string) {
+	if serviceConfig == nil || endpoint == "" {
+		return
+	}
+	if serviceConfig.OTEL == nil {
+		serviceConfig.OTEL = &config.OTELConfig{}
+	}
+	serviceConfig.OTEL.Enabled = true
+	serviceConfig.OTEL.ExporterEndpoint = endpoint
+	serviceConfig.OTEL.ExporterInsecure = true
+	if serviceConfig.OTEL.ExporterType == "" {
+		serviceConfig.OTEL.ExporterType = otel.ExporterTypeStdout
+	}
+}
+
 func (a *apiFeature) startLocalServer(port int) error {
 	logger, _, err := logging.NewLogger()
 	if err != nil {
@@ -144,11 +174,9 @@ func (a *apiFeature) startLocalServer(port int) error {
 		// we do this as no point trying to continue
 		return logError(fmt.Errorf("failed to load provider configs: %w", err))
 	}
-
 	if len(providerConfigs) == 0 {
 		return logError(fmt.Errorf("no provider configs loaded"))
 	}
-
 	logger.Info("Providers loaded.")
 	for key := range providerConfigs {
 		providerCfg := providerConfigs[key]
@@ -168,6 +196,18 @@ func (a *apiFeature) startLocalServer(port int) error {
 	}
 
 	ensureFVTOTELConfig(serviceConfig)
+
+	// Start an in-process OTLP logs collector and point the runtime's adapter
+	// OTLP endpoint at it, so @local_runtime scenarios can assert that adapter
+	// log records are exported to OTEL. Best-effort: a collector failure must
+	// not block the wider FVT suite (only OTEL log-assertion scenarios rely on it).
+	if collector, err := oteltest.NewGRPCLogsCollector(); err != nil {
+		logDebug("Failed to start OTLP logs collector for FVT: %v\n", err)
+	} else {
+		a.otelLogsCollector = collector
+		configureFVTAdapterOTEL(serviceConfig, collector.Endpoint())
+	}
+
 	if serviceConfig.IsOTELEnabled() {
 		if _, err := otel.SetupOTEL(context.Background(), serviceConfig.OTEL, logger, serviceConfig.IsPrometheusEnabled()); err != nil {
 			return logError(fmt.Errorf("failed to setup OTEL: %w", err))
@@ -197,7 +237,7 @@ func (a *apiFeature) startLocalServer(port int) error {
 		return logError(fmt.Errorf("failed to create runtime: %w", err))
 	}
 
-	mlflowClient, err := mlflow.NewMLFlowClient(serviceConfig, logger)
+	mlflowClient, mlflowWorkspaceSupport, err := mlflow.NewMLFlowClient(serviceConfig, logger)
 	if err != nil {
 		return logError(fmt.Errorf("failed to create MLFlow client: %w", err))
 	}
@@ -207,7 +247,7 @@ func (a *apiFeature) startLocalServer(port int) error {
 		storage,
 		validate,
 		runtime,
-		mlflowClient)
+		mlflowClient, mlflowWorkspaceSupport)
 	if err != nil {
 		return err
 	}
@@ -283,28 +323,28 @@ func (a *apiFeature) setupMCPServer(logger *slog.Logger) error {
 		GitHash:   gitHash,
 	}
 
-	a.mcpServer = mcpserver.New(serverInfo, logger, nil)
+	a.mcpServer = mcpserver.New(serverInfo, logger, mcpserver.CompletionHandlerOption(evalhubClient, logger, evalhubclient.DefaultListPageLimit))
 	if err := mcpserver.RegisterHandlers(a.mcpServer, evalhubClient, serverInfo, logger, evalhubclient.DefaultListPageLimit); err != nil {
 		return fmt.Errorf("failed to register MCP handlers: %w", err)
 	}
 
-	// Create in-memory transports for testing (like unit tests)
-	serverTransport, clientTransport := mcp.NewInMemoryTransports()
-
-	ctx := context.Background()
-
-	// Connect server
-	serverSession, err := a.mcpServer.Connect(ctx, serverTransport, nil)
-	if err != nil {
-		return fmt.Errorf("failed to connect MCP server: %w", err)
-	}
-	a.mcpServerSession = serverSession
+	// Exercise the production HTTP handler rather than an in-memory transport.
+	a.mcpHTTPServer = httptest.NewServer(mcpserver.NewHTTPHandler(a.mcpServer, &mcpconfig.Config{AuthType: mcpconfig.AuthTypeNone}, logger))
+	clientTransport := &mcp.StreamableClientTransport{Endpoint: a.mcpHTTPServer.URL}
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
 
 	// Connect client
 	mcpClient := mcp.NewClient(&mcp.Implementation{Name: "fvt-test-client", Version: "1.0.X"}, nil) // this is just a test so it can be anything
 	clientSession, err := mcpClient.Connect(ctx, clientTransport, nil)
 	if err != nil {
+		a.mcpHTTPServer.Close()
 		return fmt.Errorf("failed to connect MCP client: %w", err)
+	}
+	if got := clientSession.InitializeResult().ProtocolVersion; got != "2026-07-28" {
+		_ = clientSession.Close()
+		a.mcpHTTPServer.Close()
+		return fmt.Errorf("MCP FVT negotiated protocol %q, want 2026-07-28", got)
 	}
 	a.mcpClientSession = clientSession
 
@@ -319,11 +359,8 @@ func (a *apiFeature) cleanup(ctx context.Context, _ *godog.Scenario, _ error) (c
 			logDebug("MCP client session close error (non-fatal): %v\n", err)
 		}
 	}
-	if a.mcpServerSession != nil {
-		if err := a.mcpServerSession.Close(); err != nil {
-			// Log but don't fail - consistent with existing cleanup pattern
-			logDebug("MCP server session close error (non-fatal): %v\n", err)
-		}
+	if a.mcpHTTPServer != nil {
+		a.mcpHTTPServer.Close()
 	}
 	if a.metricsServer != nil {
 		shutdownCtx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
@@ -334,6 +371,9 @@ func (a *apiFeature) cleanup(ctx context.Context, _ *godog.Scenario, _ error) (c
 		shutdownCtx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
 		defer cancel()
 		_ = a.httpServer.Shutdown(shutdownCtx)
+	}
+	if a.otelLogsCollector != nil {
+		a.otelLogsCollector.Shutdown()
 	}
 
 	return ctx, nil
@@ -584,6 +624,8 @@ func InitializeScenario(ctx *godog.ScenarioContext) {
 	ctx.Step(`^the response should not contain "([^"]*)"$`, tc.theResponseShouldNotContain)
 	ctx.Step(`^the response should be JSON$`, tc.theResponseShouldBeJSON)
 	ctx.Step(`^the response should contain Prometheus metrics$`, tc.theResponseShouldContainPrometheusMetrics)
+	ctx.Step(`^service info metadata matches configured environment variables$`, tc.infoMetadataMatchesConfiguredEnvironment)
+	ctx.Step(`^the configured tenant hardware profile should be returned$`, tc.configuredTenantHardwareProfileShouldBeReturned)
 	ctx.Step(`^the metrics should include "([^"]*)"$`, tc.theMetricsShouldInclude)
 	ctx.Step(`^the metrics should show request count for "([^"]*)"$`, tc.theMetricsShouldShowRequestCountFor)
 	// Responses
@@ -597,12 +639,15 @@ func InitializeScenario(ctx *godog.ScenarioContext) {
 	ctx.Step(`^the response should not contain the value "([^"]*)" at path "([^"]*)"$`, tc.theResponseShouldNotContainAtJSONPath)
 	ctx.Step(`^the response should not equal the value "([^"]*)" at path "([^"]*)"$`, tc.theResponseShouldNotEqualAtJSONPath)
 	ctx.Step(`^the array at path "([^"]*)" in the response should have length (\d+)$`, tc.theArrayAtPathInResponseShouldHaveLength)
+	ctx.Step(`^the string at path "([^"]*)" in the response should have length (\d+)$`, tc.theStringAtPathInResponseShouldHaveLength)
+	ctx.Step(`^the response at path "([^"]*)" should not be empty$`, tc.theValueIsNotEmpty)
 	ctx.Step(`^the array at path "([^"]*)" in the response should have length "([^"]*)"$`, tc.theArrayAtPathInResponseShouldHaveLength)
 	ctx.Step(`^the array at path "([^"]*)" in the response should have length at least (\d+)$`, tc.theArrayAtPathInResponseShouldHaveLengthAtLeast)
 	ctx.Step(`^the array at path "([^"]*)" in the response should have length at least "([^"]*)"$`, tc.theArrayAtPathInResponseShouldHaveLengthAtLeast)
 	ctx.Step(`^all benchmarks in the response should have status "([^"]*)"$`, tc.theAllBenchmarksInStatusShouldBe)
 	ctx.Step(`^all benchmarks in the response should have metrics$`, tc.theAllBenchmarksHaveMetrics)
 	ctx.Step(`^the benchmark "([^"]*)" in the response should have metric "([^"]*)"$`, tc.theBenchmarkShouldHaveMetric)
+	ctx.Step(`^all benchmarks in the response should have additional_info matching the expected fields$`, tc.theAllBenchmarksShouldHaveAdditionalInfo)
 	ctx.Step(`^all benchmarks in the response should have metrics matching the provider config$`, tc.theAllBenchmarksHaveMetricsMatchingProviderConfig)
 	ctx.Step(`^all benchmarks in the response should have a test block with pass criteria$`, tc.theAllBenchmarksHaveTestBlock)
 	ctx.Step(`^I wait for the evaluation job status to be "([^"]*)"$`, tc.iWaitForEvaluationJobStatus)
@@ -614,6 +659,9 @@ func InitializeScenario(ctx *godog.ScenarioContext) {
 
 	// MCP-specific steps
 	InitializeMCPSteps(ctx, tc)
+
+	// OTEL adapter-log export steps
+	InitializeOTELSteps(ctx, tc)
 
 	// MLflow artifact steps
 	ctx.Step(`^I fetch the MLflow artifact "([^"]*)" for run "([^"]*)"$`, tc.iFetchMLflowArtifact)
@@ -644,4 +692,10 @@ func InitializeScenario(ctx *godog.ScenarioContext) {
 
 	// Kubernetes lifecycle signal steps (event emission and evaluation-phase label)
 	InitializeLifecycleSignalSteps(ctx, tc)
+
+	// Hugging Face credential-isolation steps (Kubernetes Job template inspection)
+	InitializeHFSecuritySteps(ctx, tc)
+
+	// Hugging Face sub-path staging steps (live /test_data inspection)
+	InitializeHFSubpathSteps(ctx, tc)
 }

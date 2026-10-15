@@ -52,4 +52,10 @@ type Runtime interface {
 	NotifyThresholdViolation(ctx context.Context, evaluation *api.EvaluationJobResource, benchmarkIndex int, metricName string, actualValue, threshold float32)
 }
 
+// HardwareProfileLister is an optional runtime capability for discovering enabled
+// hardware profiles available to a tenant, using the same tenant scope as evaluation jobs.
+type HardwareProfileLister interface {
+	ListHardwareProfiles(ctx context.Context, namespace string) ([]api.HardwareProfileInfo, error)
+}
+
 // This interface must be decoupled from the service HTTP layer

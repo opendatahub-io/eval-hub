@@ -65,6 +65,13 @@ var (
 		"job_can_not_be_updated",
 	)
 
+	// PostProcessingSourceNotCompleted The source evaluation job must be completed.
+	PostProcessingSourceNotCompleted = createMessage(
+		constants.HTTPCodeConflict,
+		"The evaluation job '{{.Id}}' must be completed before post-processing.",
+		"post_processing_source_not_completed",
+	)
+
 	// RequestBodyTooLarge The request body exceeds the maximum allowed size of {{.Limit}} bytes.
 	RequestBodyTooLarge = createMessage(
 		constants.HTTPCodePayloadTooLarge,
@@ -137,7 +144,7 @@ var (
 
 	// ReadOnlyCollection Collection '{{.CollectionID}}' cannot be modified or deleted.
 	ReadOnlyCollection = createMessage(
-		constants.HTTPCodeBadRequest,
+		constants.HTTPCodeForbidden,
 		"Collection '{{.CollectionID}}' cannot be modified or deleted.",
 		"read_only_collection",
 	)

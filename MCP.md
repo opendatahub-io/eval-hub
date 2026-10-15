@@ -1,5 +1,33 @@
 # Development tips for MCP
 
+## Protocol versions and transports
+
+EvalHub supports MCP **2026-07-28** over stdio and stateless Streamable HTTP
+(`--transport http`). The Go MCP SDK also supports older revisions
+`2025-11-25`, `2025-06-18`, `2025-03-26`, and `2024-11-05`. Older clients can
+continue to use the initialization handshake over these transports.
+
+For 2026-07-28, each request carries its protocol version and client capabilities
+in `params._meta`. Clients can call `server/discover` to obtain supported versions,
+capabilities, and server identity, or send a request directly. There is no
+`initialize` / `notifications/initialized` exchange and no `Mcp-Session-Id`.
+The SDK adds server identity to each result's `_meta`.
+
+HTTP requests use `MCP-Protocol-Version` and `Mcp-Method` headers. Named operations
+also use `Mcp-Name`: the tool or prompt name, or the resource URI. Header values
+must match the request body. The SDK supplies these fields for SDK clients.
+
+Catalogs are fixed at startup and do not advertise list-change notifications or
+resource subscriptions. Cache hints use `ttlMs: 0` and `cacheScope: private`, so
+clients should re-fetch results and intermediaries should not share evaluation
+data between users. The separate 30-second completion cache is unchanged.
+
+The deprecated `--transport http-sse` remains available for legacy clients,
+including MCP 2024-11-05. Use stdio or Streamable HTTP for 2026-07-28.
+
+See the [specification changelog](https://modelcontextprotocol.io/specification/2026-07-28/changelog)
+and [Go SDK protocol guidance](https://github.com/modelcontextprotocol/go-sdk/blob/v1.8.0/docs/protocol.md).
+
 ## Creating a MCP service using the evalhub CR
 
 This example shows the minimal config required to enable MCP in the evalhub CR:
@@ -98,9 +126,13 @@ When `EVALHUB_BASE_URL` is configured and the eval-hub API is reachable, the MCP
 
 | Tool | Parameters | Description |
 |------|------------|-------------|
-| `discover_providers` | Optional: `target_type` (`model`, `agent`, or `inference_server`); `evaluates` (array of capability tags, e.g. `safety`, `robustness` — provider must evaluate **all** listed values) | Discover evaluation providers with agent-oriented metadata: summary, usage hints, result interpretation, complementary providers, and when to use each provider. Unfiltered calls return every provider; when filters are set, only providers with agent metadata can match. |
+| `discover_providers` | Optional: `target_type` (`model`, `agent`, or `inference_server`); `evaluates` (array of capability tags, e.g. `safety`, `robustness` — provider must evaluate **all** listed values) | Discover evaluation providers with agent-oriented metadata: summary, usage hints, result interpretation, complementary providers, and when to use each provider. Unfiltered calls return every provider; when filters are set, only providers with agent metadata can match. Returns provider-level metadata only — use `search_benchmarks`/`get_benchmark` to obtain benchmark IDs. |
+| `search_benchmarks` | Optional: `query` (substring over id/name/description/tags), `labels` (array of tags — benchmark must have **all**), `category`, `provider_id`, `limit` (default 50) | Search the live benchmark catalog. Returns matching benchmarks with their `id` and owning `provider_id` (plus name, category, metrics, thresholds). Use this to find valid benchmark IDs for `create_collection` and `submit_evaluation`. |
+| `get_benchmark` | Required: `benchmark_id`. Optional: `provider_id` (disambiguates when the same ID is offered by multiple providers) | Look up a single benchmark by ID. Returns full detail including the `provider_id` required to run it, metrics, `primary_score`, and `pass_criteria`. If the ID is shared by multiple providers and `provider_id` is omitted, returns an ambiguity error listing the providers. |
+| `design_collection` | Required: `evaluation_goal`. Optional: `provider_filter`, `max_benchmarks` (default 12), `strictness` (`lenient`, `moderate`, `strict`) | Design a benchmark collection from a natural-language evaluation goal. Fetches the live benchmark catalog and curated collection examples and returns calibration guidance for benchmark selection, weighting, and threshold setting. Returns guidance only — use `create_collection` to persist the design. Model-callable equivalent of the `design_collection` prompt (use the tool when driving the workflow conversationally; the prompt is user-invoked and cannot take multi-word arguments via slash commands). |
 | `submit_evaluation` | Required: `name`, `model`; either `benchmarks` **or** `collection` (not both). Optional: `description`, `tags`, `experiment`. Request fields match the eval-hub HTTP API (`POST /api/v1/evaluations`). See **submit_evaluation request shape** below. | Submit a new evaluation job. Returns `job_id` and initial `state`. |
 | `get_job_status` | Required: `job_id` | Poll job state, progress percentage, and per-benchmark status. Completed benchmarks may include `result_interpretation` and `complements` from provider metadata. |
+| `create_collection` | Required: `name`, `benchmarks`, `domains` (non-empty array). Optional: `description`, `tags`, `pass_criteria`. | Create a new benchmark collection classified by `domains`. Use after designing a collection (via the `design_collection` prompt or manually) to persist it. The collection can then be referenced in `submit_evaluation`. |
 | `cancel_job` | Required: `job_id` | Cancel a running or pending job. Use `get_job_status` to confirm the final state. |
 
 **Example — discover providers for agent safety evaluation:**
@@ -179,6 +211,7 @@ All resource URIs use the `evalhub://` scheme and return JSON.
 
 | Prompt | Arguments | Description |
 |--------|-----------|-------------|
+| `design_collection` | Required: `evaluation_goal`. Optional: `provider_filter`, `max_benchmarks`, `strictness` (`lenient`, `moderate`, `strict`) | Design a benchmark collection from a natural-language evaluation goal. Dynamically fetches the live benchmark catalog and curated collection examples, then provides calibration guidelines for benchmark selection, weighting, and threshold setting. Use `create_collection` to persist the result. |
 | `edd_workflow` | Required: `application_type` (`rag`, `agent`, `safety`, or `classifier`) | Evaluation-Driven Development cycle (Define → Measure → Iterate) tailored to the application type |
 | `evaluate_model` | Optional: `model_url`, `benchmark_preferences` | Step-by-step model evaluation workflow (model URL, benchmark selection, experiment config, submission, monitoring) |
 | `compare_runs` | Optional: `job_ids` (comma-separated) | Compare two or more evaluation jobs: fetch results, compare metrics, summarize findings |
@@ -194,6 +227,52 @@ Argument completion is available for resource template parameters (provider, ben
 3. Call `submit_evaluation` with the model endpoint and selected benchmarks or collection.
 4. Poll with `get_job_status` until the job reaches a terminal state.
 5. Optionally use the `compare_runs` prompt to compare multiple completed jobs.
+
+### Collection design workflow
+
+Use the `design_collection` prompt (user-invoked) or the `design_collection` tool (model-invoked) to generate a benchmark collection from a natural-language goal. The tool is the better fit when an agent drives the workflow from a conversational request, since MCP prompt slash commands cannot pass multi-word argument values; the prompt is best for explicit, interactive invocation. Both share the same catalog and calibration guidance.
+
+1. Invoke `design_collection` with your `evaluation_goal` (e.g. "enterprise deployment requiring safety and instruction following").
+2. The agent receives the full benchmark catalog and calibration guidelines, then proposes a collection.
+3. Iterate conversationally ("add more safety benchmarks", "lower the thresholds").
+4. When satisfied, use the `create_collection` tool to persist the collection in eval-hub.
+5. Use the created collection ID with `submit_evaluation` to run evaluations.
+
+**Example — design and create a collection:**
+
+```text
+# Step 1: invoke the prompt
+design_collection(evaluation_goal="enterprise deployment requiring safety, instruction following, and long-context support")
+
+# Step 2: agent proposes a collection, user approves
+
+# Step 3: persist it
+create_collection(name="enterprise-safety-v1", domains=["safety"], benchmarks=[...], pass_criteria={threshold: 0.72})
+```
+
+**Other examples:**
+
+```text
+I need to evaluate a 7B instruction-tuned model for enterprise deployment — it must be safe, follow instructions well, and handle documents up to 64k tokens
+```
+
+```text
+I'm fine-tuning a 13B model for customer support. I need to make sure it doesn't produce toxic content, follows instructions accurately, and gives truthful answers
+```
+
+In MCP client usage, you'd invoke it like:
+
+```shell
+design_collection(evaluation_goal="enterprise deployment requiring safety, instruction following, and long-context support")
+```
+
+The prompt handler takes that free text goal, fetches the live benchmark catalog and system collection examples from the API, and returns a rich prompt with calibration guidelines, domain-signal mapping, and threshold ranges — so the AI agent can reason over all of it and propose a complete CollectionConfig.
+
+Optional parameters let you constrain the output:
+
+- provider_filter — e.g. "lm_evaluation_harness,lighteval" to restrict to specific providers
+- max_benchmarks — cap on benchmark count (default 12)
+- strictness — "lenient", "moderate" (default), or "strict" to shift all thresholds
 
 ## Testing that the MCP service is functioning
 
@@ -225,3 +304,53 @@ EVALHUB_BASE_URL=http://localhost:8080 EVALHUB_TOKEN=token EVALHUB_TENANT=tenant
 ```
 
 Default `auth_type` is `none`; no bearer token is required to reach the MCP endpoint.
+
+For example, discover capabilities without initialization:
+
+```shell
+curl http://localhost:3001/ \
+  -H 'Content-Type: application/json' \
+  -H 'Accept: application/json, text/event-stream' \
+  -H 'MCP-Protocol-Version: 2026-07-28' \
+  -H 'Mcp-Method: server/discover' \
+  --data '{"jsonrpc":"2.0","id":1,"method":"server/discover","params":{"_meta":{"io.modelcontextprotocol/protocolVersion":"2026-07-28","io.modelcontextprotocol/clientCapabilities":{},"io.modelcontextprotocol/clientInfo":{"name":"curl","version":"1"}}}}'
+```
+
+Or read the version resource directly, without a discovery call:
+
+```shell
+curl http://localhost:3001/ \
+  -H 'Content-Type: application/json' \
+  -H 'Accept: application/json, text/event-stream' \
+  -H 'MCP-Protocol-Version: 2026-07-28' \
+  -H 'Mcp-Method: resources/read' \
+  -H 'Mcp-Name: evalhub://server/version' \
+  --data '{"jsonrpc":"2.0","id":2,"method":"resources/read","params":{"uri":"evalhub://server/version","_meta":{"io.modelcontextprotocol/protocolVersion":"2026-07-28","io.modelcontextprotocol/clientCapabilities":{},"io.modelcontextprotocol/clientInfo":{"name":"curl","version":"1"}}}}'
+```
+
+Through kube-rbac-proxy, send a bearer token to the proxy for every request,
+including discovery. The proxy must forward the MCP headers along with `X-User`
+and `X-Tenant`. The MCP server validates those identity headers on each request.
+
+### Local testing
+
+MCP FVT scenarios exercise the production Streamable HTTP handler and assert
+protocol version 2026-07-28, covering tools, resources, prompts, and completions:
+
+```shell
+make test-fvt FVT_TAGS='--godog.tags=@mcp && ~@ignore && ~@cluster && ~@local_runtime && ~@mlflow && ~@benchmark_providers'
+```
+
+```shell
+make start-service
+make start-mcp
+```
+
+Now the MCP service will be running on `http://localhost:3001` and connected to the local service running
+on `http://localhost:8080`.
+
+### Adding the MCP server to `Claude`
+
+```shell
+claude mcp add --transport http evalhub http://localhost:3001
+```

@@ -77,7 +77,9 @@ When running in local server mode, the tests will:
 | --- | :-- |
 | `@collections` | Used to run just the collections tests |
 | `@evaluations` | Used to run just the evaluations tests |
+| `@post_processing` | Standalone post-processing API scenarios in `standalone_post_processing.feature`; run with `GODOG_TAGS="@post_processing"` against the embedded local FVT server. |
 | `@providers` | Used to run just the providers tests |
+| `@info` | Authenticated service metadata and tenant queue tests in `info.feature` |
 | `@mcp` | MCP tool and resource scenarios in `mcp.feature` |
 | `@cluster` | Tests that require the Kubernetes cluster runtime (default `make test-fvt` excludes them via `~@cluster` in `FVT_TAGS`) |
 | `@local_runtime` | Scenarios that require a **fully functional local evaluation runtime**—eval-hub in local mode (embedded FVT server with `LocalMode`, or a binary started with `--local`). Use for flows such as local evaluation jobs that run to completion. Distinct from `@cluster`. **Excluded by default for `make test-fvt`/CI** via `~@local_runtime` in Makefile `FVT_TAGS`; `suite_test.go` only defaults to `~@ignore`, so plain `go test ./tests/features/...` does not exclude `@local_runtime` unless you set `GODOG_TAGS` |
@@ -93,6 +95,7 @@ When running in local server mode, the tests will:
 | `@hardware_profile` | Hardware profile API and Kubernetes Job adapter resource tests in `evaluation_jobs.feature`; require pipeline env vars (see below). |
 | `@metrics` | Prometheus `/metrics` scrape tests in `metrics.feature`; in cluster/remote mode require `METRICS_URL` (see below). |
 | `@logs` | Evaluation job log collection scenarios in `evaluation_local_jobs.feature` and `evaluation_jobs.feature` |
+| `@otel` | Verifies adapter log records are exported to an in-process OTLP collector (`evaluation_local_jobs.feature`). The embedded local-runtime server points `OTEL_EXPORTER_OTLP_ENDPOINT` at a test `GRPCLogsCollector`, and the scenario asserts the adapter's log records (including `EVALUATION COMPLETE`) arrive with `INFO` severity, `evalhub.job_id` / `evalhub.benchmark_id` attributes, and trace/span correlation. Requires `@local_runtime` (excluded by default; opt in via `GODOG_TAGS`). |
 | `@pvc` | Evaluation jobs that mount offline test data from a PersistentVolumeClaim (`evaluation_jobs.feature`). Defaults: claim `evalhub-offline-test-data`, `sub_path` `staging`. Override with `TEST_DATA_PVC_CLAIM_NAME` / `TEST_DATA_PVC_SUB_PATH`. Missing-PVC negative case uses `TEST_DATA_PVC_MISSING_CLAIM_NAME` (default `evalhub-offline-test-data-does-not-exist`) and waits up to 5m for operator failure sync. Opt in with `GODOG_TAGS="@pvc"`. |
 | `@git` | Evaluation jobs that clone offline test data from a git repository (`evaluation_jobs.feature`). Defaults: `TEST_DATA_GIT_URL`=`https://github.com/eval-hub/eval-hub`, `TEST_DATA_GIT_REF`=`main`, `TEST_DATA_GIT_SUB_PATH`=`tests/git-testdata` (`arc_easy` + tokenizer; see `tests/git-testdata/README.md`). The main happy-path job runs two git benchmarks (`arc_easy` + nested `truthfulqa_mc1` via `TEST_DATA_GIT_NESTED_SUB_PATH`, default `tests/git-testdata/staging_sub_path`) and asserts `resolved_sha` is absent on create then populated after completion. Optional: `TEST_DATA_GIT_TAG_REF`; `TEST_DATA_GIT_SHA_REF` / `TEST_DATA_GIT_SHA_URL` (SHA scenario defaults to `TEST_DATA_GIT_REF`/`main`; set `TEST_DATA_GIT_SHA_REF` to a real hex commit SHA for commit-checkout coverage), blocked-host via `TEST_DATA_GIT_BLOCKED_URL`, bad-ref via `TEST_DATA_GIT_BAD_REF`, http+secret_ref negative via `TEST_DATA_GIT_HTTP_URL`, missing sub_path via `TEST_DATA_GIT_BAD_SUB_PATH`. Job-wait negatives (bad ref, missing sub_path) poll every 10s for up to 5m (same as missing-PVC); API-only negatives return 400 immediately. Requires cluster egress to the git host (or an internal mirror). Until `tests/git-testdata` is on the target ref, set `TEST_DATA_GIT_REF` accordingly. Opt in with `GODOG_TAGS="@git"`. |
 | `@hf` | Evaluation jobs that download offline test data from Hugging Face Hub (`evaluation_jobs.feature`). Defaults: `TEST_DATA_HF_REPO_ID`=`eval-hub-test/evalhub-offline-testdata`, `TEST_DATA_HF_REVISION`=`main`, nested `truthfulqa_mc1` via `TEST_DATA_HF_NESTED_SUB_PATH`=`staging_sub_path` (public mirror of `tests/git-testdata` on HF). One happy-path job runs `arc_easy` (full repo, branch revision) + `truthfulqa_mc1` (nested `sub_path`) and asserts `resolved_sha` is absent on create then populated after completion; set `TEST_DATA_HF_SHA_REVISION` to a real hex commit SHA to exercise pinned revision on `arc_easy` without a separate scenario. Runtime failures: one job covers invalid `repo_id` + bad `revision`; missing `sub_path` stays a separate job. Optional env: `TEST_DATA_HF_BAD_REPO_ID` (default `eval-hub-test/invalid-db`), `TEST_DATA_HF_BAD_REVISION`, `TEST_DATA_HF_BAD_SUB_PATH`. Job-wait negatives poll every 10s for up to 5m; API-only negatives return 400 immediately. Requires cluster egress to huggingface.co (or configure the init image with `HF_ENDPOINT` for a mirror). Opt in with `GODOG_TAGS="@hf"`. |
@@ -117,6 +120,23 @@ GODOG_TAGS="@metrics" go test -v ./tests/features/...
 
 If `SERVER_URL` is set but `METRICS_URL` is not, `@metrics` scenarios are **skipped**.
 
+### Service info tests (`@info`)
+
+`info.feature` checks the authenticated `GET /api/v1/info` response, including build metadata and the hardware_profiles array. Requests use `X_TENANT` and `X_USER` (defaulting to `test-tenant` and `test-user`); remote cluster runs also need `AUTH_TOKEN`.
+
+Run the general response scenario with `GODOG_TAGS="@info && ~@cluster" go test -v ./tests/features/...`. Run the hardware profile scenario with `GODOG_TAGS="@info && @cluster" go test -v ./tests/features/...` after setting the hardware profile environment variables below.
+
+To compare returned build metadata with a known deployment, optionally set any of these variables:
+
+```bash
+export TEST_INFO_VERSION="1.2.3"
+export TEST_INFO_BUILD="1234"
+export TEST_INFO_BUILD_DATE="2026-10-01T12:00:00Z"
+export TEST_INFO_GIT_HASH="abc123"
+```
+
+The `@cluster` hardware profile scenario is excluded by default. Set `TEST_INFO_HARDWARE_PROFILE_NAME` to an enabled profile available to `X_TENANT` and include `@cluster` in the Godog tag expression. Set `TEST_INFO_OTHER_TENANT_HARDWARE_PROFILE_NAME` to a queue-backed profile whose LocalQueue exists only in another tenant to assert isolation. The scenario is skipped when `TEST_INFO_HARDWARE_PROFILE_NAME` is unset.
+
 ### Hardware profile tests (`@hardware_profile`)
 
 These scenarios validate that evaluation job APIs accept and persist `hardware_config.hardware_profile_name`, and that the created Kubernetes Job adapter container receives CPU/memory from the referenced profile. They do **not** create `HardwareProfile` CRs or fetch profile specs in the test binary — the pipeline supplies the profile name and expected adapter resources via environment variables.
@@ -127,13 +147,13 @@ These scenarios validate that evaluation job APIs accept and persist `hardware_c
 2. Ensure the EvalHub deployment sets `EVALHUB_HARDWARE_PROFILES_NAMESPACE` to the platform namespace that holds HardwareProfiles (typically `opendatahub` or `redhat-ods-applications`), and that a `HardwareProfile` exists there.
 3. Export its name and expected adapter resources (must match the profile's `defaultCount` / `maxCount` for CPU and memory):
 
-```bash
-export TEST_HARDWARE_PROFILE="your-profile-name"
-export TEST_HARDWARE_PROFILE_CPU_REQUEST="1"
-export TEST_HARDWARE_PROFILE_MEMORY_REQUEST="1Gi"
-export TEST_HARDWARE_PROFILE_CPU_LIMIT="2"
-export TEST_HARDWARE_PROFILE_MEMORY_LIMIT="2Gi"
-```
+   ```bash
+   export TEST_HARDWARE_PROFILE="your-profile-name"
+   export TEST_HARDWARE_PROFILE_CPU_REQUEST="1"
+   export TEST_HARDWARE_PROFILE_MEMORY_REQUEST="1Gi"
+   export TEST_HARDWARE_PROFILE_CPU_LIMIT="2"
+   export TEST_HARDWARE_PROFILE_MEMORY_LIMIT="2Gi"
+   ```
 
 4. Grant the FVT test runner **`get`/`list` on `jobs`** in the tenant namespace (to inspect the adapter container). Hardware profile steps use a FVT Kubernetes client that **prefers `KUBECONFIG`** (pipeline `oc login`) over in-cluster credentials, then falls back to in-cluster config for local runs inside the cluster. The test process does not read `HardwareProfile` CRs or cluster-scoped CRDs.
 
@@ -187,6 +207,17 @@ which will be stored in the `bin` directory:
 ```bash
 make test-fvt-server
 ```
+
+Two convenience wrappers set `FVT_TAGS` for local runs against a started server:
+
+```bash
+make test-fvt-server-local          # excludes @mlflow (no MLflow server needed)
+make test-fvt-server-local-mlflow   # includes @mlflow; start MLflow first (see tests/mlflow)
+```
+
+`test-fvt-server-local-mlflow` needs a reachable MLflow tracking server; start one
+with `make start-mlflow` from `tests/mlflow/` (and set `MLFLOW_TRACKING_URI` if it
+is not the default).
 
 This runs the tests with verbose output enabled.
 

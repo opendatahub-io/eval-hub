@@ -1,4 +1,4 @@
-.PHONY: help autoupdate-precommit pre-commit clean build build-coverage build-service build-init build-sidecar build-mcp build-all-platforms cross-compile-mcp build-all-platforms-mcp cross-compile-sidecar build-all-platforms-sidecar start-service stop-service start-sidecar stop-sidecar lint golangci-lint validate-configs test test-fuzz test-fvt-server test-all test-coverage test-fvt-coverage test-fvt-server-coverage test-all-coverage install-deps update-deps get-deps fmt vet generate-public-docs verify-api-docs generate-ignore-file documentation check-unused-components docker-image-local docker-mcp-version test-mcp-build-all test-mcp-binary-info test-mcp-binary-naming test-mcp-version test-mcp-no-runtime-deps test-mcp-container-build test-mcp-container-http test-mcp-checksums test-mcp-formula-syntax test-mcp-native-smoke test-mcp-brew-install test-mcp-brew-test test-mcp-brew-uninstall test-mcp-cross-platform test-mcp-fvt test-mcp-e2e test-mcp test-mcp-vscode test-help clean-mcp-wheels build-mcp-wheel build-all-mcp-wheels show-local-api-docs doc-build
+.PHONY: help autoupdate-precommit pre-commit clean build build-coverage build-service build-init build-sidecar build-mcp build-all-platforms cross-compile-mcp build-all-platforms-mcp cross-compile-sidecar build-all-platforms-sidecar start-service stop-service start-sidecar stop-sidecar lint golangci-lint validate-configs test test-fuzz test-fvt-server test-fvt-server-local test-fvt-server-local-mlflow test-all test-coverage test-fvt-coverage test-fvt-server-coverage test-all-coverage install-deps update-deps get-deps fmt vet generate-public-docs verify-api-docs generate-ignore-file documentation check-unused-components docker-image-local docker-mcp-version test-mcp-build-all test-mcp-binary-info test-mcp-binary-naming test-mcp-version test-mcp-no-runtime-deps test-mcp-container-build test-mcp-container-http test-mcp-checksums test-mcp-formula-syntax test-mcp-native-smoke test-mcp-brew-install test-mcp-brew-test test-mcp-brew-uninstall test-mcp-cross-platform test-mcp-fvt test-mcp-e2e test-mcp test-mcp-vscode test-help clean-mcp-wheels build-mcp-wheel build-all-mcp-wheels show-local-api-docs doc-build
 
 GOPATH := $(shell go env GOPATH)
 GOBIN := $(shell go env GOPATH)/bin
@@ -100,6 +100,14 @@ stop-service:
 	-./scripts/stop_server.sh "${SERVER_PID_FILE}"
 	! grep -i -F panic "${SERVICE_LOG}"
 
+.PHONY: start-oci-registry stop-oci-registry
+start-oci-registry: ## Start an anonymous OCI registry at http://localhost:5001
+	$(DOCKER) run -d -p 5001:5000 --name eval-hub-oci-registry docker.io/library/registry:2
+
+stop-oci-registry: ## Stop and remove the local OCI registry
+	$(DOCKER) stop eval-hub-oci-registry
+	$(DOCKER) rm eval-hub-oci-registry
+
 # Sidecar (eval-runtime-sidecar) starter/stopper
 SIDECAR_PID_FILE ?= $(BIN_DIR)/sidecar.pid
 SIDECAR_LOG ?= $(BIN_DIR)/sidecar.log
@@ -173,12 +181,13 @@ vet: ## Run go vet
 # Iterations (Nx) or duration for mutational fuzzing during make test / make test-fuzz.
 # Prefer Nx so CI finishes deterministically; seed corpora also run under plain go test.
 FUZZTIME ?= 10000x
+GO_TEST_TIMEOUT ?= 10m
 # Packages that define Fuzz* tests. Keep in sync when adding new fuzz targets.
-FUZZ_PACKAGES ?= ./pkg/ociclient ./pkg/mlflowclient ./pkg/api ./internal/eval_hub/handlers ./internal/eval_hub/storage/sql/shared ./internal/eval_hub/config ./internal/eval_runtime_sidecar/handlers ./internal/eval_runtime_sidecar/proxy ./internal/evalhub_mcp/server ./internal/safefile ./cmd/eval_runtime_init
+FUZZ_PACKAGES ?= ./internal/eval_hub/runtimes/k8s ./pkg/ociclient ./pkg/mlflowclient ./pkg/api ./internal/eval_hub/handlers ./internal/eval_hub/storage/sql/shared ./internal/eval_hub/config ./internal/eval_runtime_sidecar/handlers ./internal/eval_runtime_sidecar/proxy ./internal/evalhub_mcp/server ./internal/safefile ./cmd/eval_runtime_init
 
 test: ## Run unit tests (including fuzz seed corpora and a short fuzzing pass)
 	@echo "Running unit tests..."
-	@bash -c 'set -o pipefail; go test -v ./internal/... ./cmd/... ./pkg/... | ${PWD}/scripts/grcat ${PWD}/.conf.go-test'
+	@bash -c 'set -o pipefail; go test -timeout=$(GO_TEST_TIMEOUT) -v ./internal/... ./cmd/... ./pkg/... | ${PWD}/scripts/grcat ${PWD}/.conf.go-test'
 	@$(MAKE) test-fuzz
 	@echo "Unit tests complete"
 
@@ -186,7 +195,7 @@ test-fuzz: ## Run mutational fuzzing briefly for each Fuzz* test
 	@echo "Running fuzz tests (fuzztime=$(FUZZTIME))..."
 	@failed=0; \
 	for pkg in $(FUZZ_PACKAGES); do \
-		list_output=$$(go test "$$pkg" -list='^Fuzz' 2>&1); \
+		list_output=$$(go test -timeout=$(GO_TEST_TIMEOUT) "$$pkg" -list='^Fuzz' 2>&1); \
 		if [ $$? -ne 0 ]; then \
 			echo "$$list_output"; \
 			echo "failed to list fuzz tests in $$pkg"; \
@@ -195,15 +204,15 @@ test-fuzz: ## Run mutational fuzzing briefly for each Fuzz* test
 		fi; \
 		for fuzz in $$(echo "$$list_output" | grep '^Fuzz'); do \
 			echo "Fuzzing $$pkg $$fuzz..."; \
-			go test "$$pkg" -run='^$$' -fuzz="^$${fuzz}$$" -fuzztime=$(FUZZTIME) || failed=1; \
+			go test -timeout=$(GO_TEST_TIMEOUT) "$$pkg" -run='^$$' -fuzz="^$${fuzz}$$" -fuzztime=$(FUZZTIME) || failed=1; \
 		done; \
 	done; \
 	if [ $$failed -ne 0 ]; then exit 1; fi
 	@echo "Fuzz tests complete"
 test-coverage: $(BIN_DIR) ## Run unit tests with coverage
 	@echo "Running unit tests with coverage..."
-	@go test -v -race -coverprofile=$(BIN_DIR)/coverage.out -covermode=atomic ./internal/... ./cmd/... ./pkg/...
-	@go test -v -race -coverprofile=$(BIN_DIR)/coverage-init.out -covermode=atomic ./cmd/eval_runtime_init
+	@go test -timeout=$(GO_TEST_TIMEOUT) -v -race -coverprofile=$(BIN_DIR)/coverage.out -covermode=atomic ./internal/... ./cmd/... ./pkg/...
+	@go test -timeout=$(GO_TEST_TIMEOUT) -v -race -coverprofile=$(BIN_DIR)/coverage-init.out -covermode=atomic ./cmd/eval_runtime_init
 	@go tool cover -html=$(BIN_DIR)/coverage.out -o $(BIN_DIR)/coverage.html
 	@go tool cover -html=$(BIN_DIR)/coverage-init.out -o $(BIN_DIR)/coverage-init.html
 	@echo "Coverage report generated: $(BIN_DIR)/coverage.html and $(BIN_DIR)/coverage-init.html"
@@ -226,18 +235,24 @@ FVT_CONCURRENCY ?= 1
 
 .PHONY: test-setup
 test-setup: venv ## Set up Python test environment (venv + eval-hub-sdk adapter)
-	@uv pip install "eval-hub-sdk[adapter]>=0.1.5"
+	@uv pip install "eval-hub-sdk[adapter]>=1.0.4"
 
 test-fvt: $(BIN_DIR) test-setup ## Run FVT (Functional Verification Tests) using godog
 	@echo "Running FVT tests..."
-	@if [ -f $(VENV_DIR)/bin/activate ]; then . $(VENV_DIR)/bin/activate; else . $(VENV_DIR)/Scripts/activate; fi && bash -c 'set -o pipefail; go test ${FVT_TESTS} ${FVT_OUTPUT} "${FVT_TAGS}" -v -race | ${PWD}/scripts/grcat ${PWD}/.conf.go-integration-test'
+	@if [ -f $(VENV_DIR)/bin/activate ]; then . $(VENV_DIR)/bin/activate; else . $(VENV_DIR)/Scripts/activate; fi && bash -c 'set -o pipefail; go test ${FVT_TESTS} ${FVT_OUTPUT} "${FVT_TAGS}" -timeout=$(GO_TEST_TIMEOUT) -v -race | ${PWD}/scripts/grcat ${PWD}/.conf.go-integration-test'
 
 test-fvt-server: start-service ## Run FVT tests using godog against a running server
 	@SERVER_URL="${SERVER_URL}" make test-fvt; status=$$?; make stop-service; exit $$status
 
+test-fvt-server-local:
+	@FVT_TAGS="--godog.tags=~@ignore && ~@mlflow && ~@cluster && ~@benchmark_providers" make test-fvt-server
+
+test-fvt-server-local-mlflow: ## Run FVT (incl. @mlflow) against a local server; requires a running MLflow (see tests/mlflow)
+	@FVT_TAGS="--godog.tags=~@ignore && ~@otel && ~@cluster && ~@benchmark_providers" make test-fvt-server
+
 test-fvt-coverage: $(BIN_DIR)## Run integration (FVT) tests with coverage
 	@echo "Running integration (FVT) tests with coverage..."
-	@go test ${FVT_TESTS} ${FVT_OUTPUT} "${FVT_TAGS}" -v -race -coverprofile=$(BIN_DIR)/coverage-fvt.out -covermode=atomic
+	@go test ${FVT_TESTS} ${FVT_OUTPUT} "${FVT_TAGS}" -timeout=$(GO_TEST_TIMEOUT) -v -race -coverprofile=$(BIN_DIR)/coverage-fvt.out -covermode=atomic
 	@go tool cover -html=$(BIN_DIR)/coverage-fvt.out -o $(BIN_DIR)/coverage-fvt.html
 	@echo "Coverage report generated: $(BIN_DIR)/coverage-fvt.html"
 
@@ -757,7 +772,7 @@ MCP_FVT_TESTS ?= ./tests/mcp/features/...
 
 test-mcp-fvt: $(BIN_DIR) ## Run MCP godog feature tests (tests/mcp/features)
 	@echo "Running MCP godog tests..."
-	@go test -v -race ${MCP_FVT_TESTS}
+	@go test -timeout=$(GO_TEST_TIMEOUT) -v -race ${MCP_FVT_TESTS}
 
 test-mcp-e2e: start-service ## Run end-to-end MCP tests
 	@echo "Running end-to-end MCP tests..."

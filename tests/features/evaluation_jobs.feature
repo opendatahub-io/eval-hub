@@ -1498,6 +1498,7 @@ Feature: Evaluation Jobs
   # real hex commit SHA to exercise pinned revision download on arc_easy without a separate job.
   # Cluster needs egress to huggingface.co (or set HF_ENDPOINT on init image for a mirror).
   # Opt in: GODOG_TAGS="@hf".
+  @connected
   @hf
   Scenario: Evaluation job with Hugging Face test data completes successfully
     Given the service is running
@@ -1512,9 +1513,12 @@ Feature: Evaluation Jobs
     And the response should contain the value "{{env:TEST_DATA_HF_REPO_ID|eval-hub-test/evalhub-offline-testdata}}" at path "$.benchmarks[0].test_data_ref.hf.repo_id"
     And the response should contain the value "{{env:TEST_DATA_HF_SHA_REVISION,TEST_DATA_HF_REVISION|main}}" at path "$.benchmarks[0].test_data_ref.hf.revision"
     And the response should contain the value "truthfulqa_mc1" at path "$.benchmarks[1].id"
+    And the response should contain the value "{{env:TEST_DATA_HF_REVISION|main}}" at path "$.benchmarks[1].test_data_ref.hf.revision"
     And the response should contain the value "{{env:TEST_DATA_HF_NESTED_SUB_PATH|staging_sub_path}}" at path "$.benchmarks[1].test_data_ref.hf.sub_path"
     And the response should not contain the value "resolved_sha" at path "$.benchmarks[0].test_data_ref"
     And the response should not contain the value "resolved_sha" at path "$.benchmarks[1].test_data_ref"
+    And I wait for the Kubernetes evaluation Job to be created
+    And the HF sub-path benchmark should contain file "tokenizer/tokenizer.json" and not contain path "allenai--ai2_arc--ARC-Easy" under "/test_data"
     And I wait for the evaluation job status to be "completed"
     When I send a GET request to "/api/v1/evaluations/jobs/{id}"
     Then the response code should be 200
@@ -1531,6 +1535,7 @@ Feature: Evaluation Jobs
     And the response should contain at least the value "0.2" at path "$.results.benchmarks[?(@.id == &quot;arc_easy&quot;)].metrics.acc_norm"
     And the response should contain the value "{{env:TEST_DATA_HF_REPO_ID|eval-hub-test/evalhub-offline-testdata}}" at path "$.benchmarks[0].test_data_ref.hf.repo_id"
     And the response should contain the value "{{env:TEST_DATA_HF_SHA_REVISION,TEST_DATA_HF_REVISION|main}}" at path "$.benchmarks[0].test_data_ref.hf.revision"
+    And the response should contain the value "{{env:TEST_DATA_HF_REVISION|main}}" at path "$.benchmarks[1].test_data_ref.hf.revision"
     And the response should contain the value "{{env:TEST_DATA_HF_NESTED_SUB_PATH|staging_sub_path}}" at path "$.benchmarks[1].test_data_ref.hf.sub_path"
     And the response should match the value "[0-9a-fA-F]{7,40}" at path "$.benchmarks[0].test_data_ref.resolved_sha"
     And the response should match the value "[0-9a-fA-F]{7,40}" at path "$.benchmarks[1].test_data_ref.resolved_sha"
@@ -1633,7 +1638,7 @@ Feature: Evaluation Jobs
     And I wait for the evaluation job status to be "completed"
     When I send a GET request to "/api/v1/evaluations/jobs/{id}"
     Then the response code should be 200
-    When I fetch the MLflow artifact "evaluation-card.json" for experiment "{{value:mlflow_experiment_id}}" and job "{{value:job_id}}"
+    When I wait for the MLflow artifact "evaluation-card.json" for experiment "{{value:mlflow_experiment_id}}" and job "{{value:job_id}}"
     Then the MLflow artifact should exist
     And the MLflow artifact should contain "card_version"
     And the MLflow artifact should contain "schema_version"
@@ -1652,7 +1657,7 @@ Feature: Evaluation Jobs
     And I wait for the evaluation job status to be "completed"
     When I send a GET request to "/api/v1/evaluations/jobs/{id}"
     Then the response code should be 200
-    When I fetch the MLflow artifact "evaluation-card.json" for experiment "{{value:mlflow_experiment_id}}" and job "{{value:job_id}}"
+    When I wait for the MLflow artifact "evaluation-card.json" for experiment "{{value:mlflow_experiment_id}}" and job "{{value:job_id}}"
     Then the MLflow artifact should exist
     And the MLflow artifact should contain "context.collection_id"
     And the MLflow artifact should contain the value "toxicity-and-ethical-principles" at path "$.context.collection_id"
@@ -1682,7 +1687,7 @@ Feature: Evaluation Jobs
     And I wait for the evaluation job status to be "completed"
     When I send a GET request to "/api/v1/evaluations/jobs/{id}"
     Then the response code should be 200
-    When I fetch the MLflow artifact "evaluation-card.json" for experiment "{{value:mlflow_experiment_id}}" and job "{{value:job_id}}"
+    When I wait for the MLflow artifact "evaluation-card.json" for experiment "{{value:mlflow_experiment_id}}" and job "{{value:job_id}}"
     Then the MLflow artifact should exist
 
   @mlflow
@@ -1712,10 +1717,10 @@ Feature: Evaluation Jobs
     And I wait for the evaluation job status to be "completed"
     When I send a GET request to "/api/v1/evaluations/jobs/{{value:job2_id}}"
     Then the response code should be 200
-    When I fetch the MLflow artifact "evaluation-card.json" for experiment "{{value:mlflow_experiment_id}}" and job "{{value:job1_id}}"
+    When I wait for the MLflow artifact "evaluation-card.json" for experiment "{{value:mlflow_experiment_id}}" and job "{{value:job1_id}}"
     Then the MLflow artifact should exist
     And the MLflow artifact should contain the value "{{value:job1_id}}" at path "$.metadata.evaluation_job_id"
-    When I fetch the MLflow artifact "evaluation-card.json" for experiment "{{value:mlflow_experiment_id}}" and job "{{value:job2_id}}"
+    When I wait for the MLflow artifact "evaluation-card.json" for experiment "{{value:mlflow_experiment_id}}" and job "{{value:job2_id}}"
     Then the MLflow artifact should exist
     And the MLflow artifact should contain the value "{{value:job2_id}}" at path "$.metadata.evaluation_job_id"
     # Each job gets its own distinct EvalCard even in the same experiment
@@ -1730,7 +1735,7 @@ Feature: Evaluation Jobs
     And I wait for the evaluation job status to be "completed"
     When I send a GET request to "/api/v1/evaluations/jobs/{id}"
     Then the response code should be 200
-    When I fetch the MLflow artifact "evaluation-card.json" for experiment "{{value:mlflow_experiment_id}}" and job "{{value:job_id}}"
+    When I wait for the MLflow artifact "evaluation-card.json" for experiment "{{value:mlflow_experiment_id}}" and job "{{value:job_id}}"
     Then the MLflow artifact should exist
     And the MLflow artifact should contain the value "1.0" at path "$.card_version"
     And the MLflow artifact should contain the value "1.0" at path "$.schema_version"
@@ -1745,7 +1750,7 @@ Feature: Evaluation Jobs
     And I wait for the evaluation job status to be "completed"
     When I send a GET request to "/api/v1/evaluations/jobs/{id}"
     Then the response code should be 200
-    When I fetch the MLflow artifact "evaluation-card.json" for experiment "{{value:mlflow_experiment_id}}" and job "{{value:job_id}}"
+    When I wait for the MLflow artifact "evaluation-card.json" for experiment "{{value:mlflow_experiment_id}}" and job "{{value:job_id}}"
     Then the MLflow artifact should exist
     And the MLflow artifact should contain "metadata.created_at"
     And the MLflow artifact should contain "metadata.updated_at"
@@ -1762,7 +1767,7 @@ Feature: Evaluation Jobs
     And I wait for the evaluation job status to be "completed"
     When I send a GET request to "/api/v1/evaluations/jobs/{id}"
     Then the response code should be 200
-    When I fetch the MLflow artifact "evaluation-card.json" for experiment "{{value:mlflow_experiment_id}}" and job "{{value:job_id}}"
+    When I wait for the MLflow artifact "evaluation-card.json" for experiment "{{value:mlflow_experiment_id}}" and job "{{value:job_id}}"
     Then the MLflow artifact should exist
     And the MLflow artifact should contain "card_version"
     And the MLflow artifact should contain "schema_version"
@@ -1780,7 +1785,7 @@ Feature: Evaluation Jobs
     And I wait for the evaluation job status to be "completed"
     When I send a GET request to "/api/v1/evaluations/jobs/{id}"
     Then the response code should be 200
-    When I fetch the MLflow artifact "evaluation-card.json" for experiment "{{value:mlflow_experiment_id}}" and job "{{value:job_id}}"
+    When I wait for the MLflow artifact "evaluation-card.json" for experiment "{{value:mlflow_experiment_id}}" and job "{{value:job_id}}"
     Then the MLflow artifact should exist
     And the MLflow artifact should contain "context.model.url"
     And the MLflow artifact should contain "context.model.name"
@@ -1795,7 +1800,7 @@ Feature: Evaluation Jobs
     And I wait for the evaluation job status to be "completed"
     When I send a GET request to "/api/v1/evaluations/jobs/{id}"
     Then the response code should be 200
-    When I fetch the MLflow artifact "evaluation-card.json" for experiment "{{value:mlflow_experiment_id}}" and job "{{value:job_id}}"
+    When I wait for the MLflow artifact "evaluation-card.json" for experiment "{{value:mlflow_experiment_id}}" and job "{{value:job_id}}"
     Then the MLflow artifact should exist
     And the MLflow artifact should contain "context.benchmarks"
     And the MLflow artifact should contain "context.benchmarks[0].id"
@@ -1811,7 +1816,7 @@ Feature: Evaluation Jobs
     And I wait for the evaluation job status to be "completed"
     When I send a GET request to "/api/v1/evaluations/jobs/{id}"
     Then the response code should be 200
-    When I fetch the MLflow artifact "evaluation-card.json" for experiment "{{value:mlflow_experiment_id}}" and job "{{value:job_id}}"
+    When I wait for the MLflow artifact "evaluation-card.json" for experiment "{{value:mlflow_experiment_id}}" and job "{{value:job_id}}"
     Then the MLflow artifact should exist
     And the MLflow artifact should contain "results.benchmarks"
     And the MLflow artifact should contain "results.benchmarks[0].metrics"
@@ -1826,7 +1831,7 @@ Feature: Evaluation Jobs
     And I wait for the evaluation job status to be "completed"
     When I send a GET request to "/api/v1/evaluations/jobs/{id}"
     Then the response code should be 200
-    When I fetch the MLflow artifact "evaluation-card.json" for experiment "{{value:mlflow_experiment_id}}" and job "{{value:job_id}}"
+    When I wait for the MLflow artifact "evaluation-card.json" for experiment "{{value:mlflow_experiment_id}}" and job "{{value:job_id}}"
     Then the MLflow artifact should exist
     And the MLflow artifact should contain "results.benchmarks[0].mlflow_run_id"
 
@@ -1840,7 +1845,7 @@ Feature: Evaluation Jobs
     And I wait for the evaluation job status to be "completed"
     When I send a GET request to "/api/v1/evaluations/jobs/{id}"
     Then the response code should be 200
-    When I fetch the MLflow artifact "evaluation-card.json" for experiment "{{value:mlflow_experiment_id}}" and job "{{value:job_id}}"
+    When I wait for the MLflow artifact "evaluation-card.json" for experiment "{{value:mlflow_experiment_id}}" and job "{{value:job_id}}"
     Then the MLflow artifact should exist
     And the MLflow artifact should contain the value "completed" at path "$.results.status.state"
 
@@ -1855,7 +1860,7 @@ Feature: Evaluation Jobs
     And I wait for the evaluation job status to be "completed"
     When I send a GET request to "/api/v1/evaluations/jobs/{id}"
     Then the response code should be 200
-    When I fetch the MLflow artifact "evaluation-card.json" for experiment "{{value:mlflow_experiment_id}}" and job "{{value:job_id}}"
+    When I wait for the MLflow artifact "evaluation-card.json" for experiment "{{value:mlflow_experiment_id}}" and job "{{value:job_id}}"
     Then the MLflow artifact should exist
     And the MLflow artifact should contain "context.collection_id"
     And the MLflow artifact should contain the value "toxicity-and-ethical-principles" at path "$.context.collection_id"
@@ -1870,7 +1875,7 @@ Feature: Evaluation Jobs
     And I wait for the evaluation job status to be "completed"
     When I send a GET request to "/api/v1/evaluations/jobs/{id}"
     Then the response code should be 200
-    When I fetch the MLflow artifact "evaluation-card.json" for experiment "{{value:mlflow_experiment_id}}" and job "{{value:job_id}}"
+    When I wait for the MLflow artifact "evaluation-card.json" for experiment "{{value:mlflow_experiment_id}}" and job "{{value:job_id}}"
     Then the MLflow artifact should exist
     And the MLflow artifact should contain the value "arc_easy" at path "$.context.benchmarks[0].id"
     And the MLflow artifact should contain the value "lm_evaluation_harness" at path "$.context.benchmarks[0].provider_id"
@@ -1885,7 +1890,7 @@ Feature: Evaluation Jobs
     And I wait for the evaluation job status to be "completed"
     When I send a GET request to "/api/v1/evaluations/jobs/{id}"
     Then the response code should be 200
-    When I fetch the MLflow artifact "evaluation-card.json" for experiment "{{value:mlflow_experiment_id}}" and job "{{value:job_id}}"
+    When I wait for the MLflow artifact "evaluation-card.json" for experiment "{{value:mlflow_experiment_id}}" and job "{{value:job_id}}"
     Then the MLflow artifact should exist
     And the MLflow artifact should contain "results.benchmarks[0].id"
     And the MLflow artifact should contain "results.benchmarks[0].provider_id"
@@ -1902,7 +1907,7 @@ Feature: Evaluation Jobs
     And I wait for the evaluation job status to be "completed"
     When I send a GET request to "/api/v1/evaluations/jobs/{id}"
     Then the response code should be 200
-    When I fetch the MLflow artifact "evaluation-card.json" for experiment "{{value:mlflow_experiment_id}}" and job "{{value:job_id}}"
+    When I wait for the MLflow artifact "evaluation-card.json" for experiment "{{value:mlflow_experiment_id}}" and job "{{value:job_id}}"
     Then the MLflow artifact should exist
     And the MLflow artifact should contain the value "completed" at path "$.results.benchmarks[0].status"
 
@@ -1917,7 +1922,7 @@ Feature: Evaluation Jobs
     When I send a GET request to "/api/v1/evaluations/jobs/{id}"
     Then the response code should be 200
     And the "resource.mlflow_experiment_id" field in the response should be saved as "value:experiment_id"
-    When I fetch the MLflow artifact "evaluation-card.json" for experiment "{{value:experiment_id}}" and job "{{value:job_id}}"
+    When I wait for the MLflow artifact "evaluation-card.json" for experiment "{{value:experiment_id}}" and job "{{value:job_id}}"
     Then the MLflow artifact should exist
     And the MLflow artifact should contain "results.benchmarks[0].error_message"
     And the MLflow artifact should contain "results.benchmarks[0].error_message.message"
@@ -1935,7 +1940,7 @@ Feature: Evaluation Jobs
     When I send a GET request to "/api/v1/evaluations/jobs/{id}"
     Then the response code should be 200
     And the "resource.mlflow_experiment_id" field in the response should be saved as "value:experiment_id"
-    When I fetch the MLflow artifact "evaluation-card.json" for experiment "{{value:experiment_id}}" and job "{{value:job_id}}"
+    When I wait for the MLflow artifact "evaluation-card.json" for experiment "{{value:experiment_id}}" and job "{{value:job_id}}"
     Then the MLflow artifact should exist
     And the MLflow artifact should be valid JSON
 
@@ -1950,7 +1955,7 @@ Feature: Evaluation Jobs
     When I send a GET request to "/api/v1/evaluations/jobs/{id}"
     Then the response code should be 200
     And the "resource.mlflow_experiment_id" field in the response should be saved as "value:experiment_id"
-    When I fetch the MLflow artifact "evaluation-card.json" for experiment "{{value:experiment_id}}" and job "{{value:job_id}}"
+    When I wait for the MLflow artifact "evaluation-card.json" for experiment "{{value:experiment_id}}" and job "{{value:job_id}}"
     Then the MLflow artifact should exist
     And the MLflow artifact should contain "card_version"
     And the MLflow artifact should contain "results.benchmarks"
@@ -2096,11 +2101,12 @@ Feature: Evaluation Jobs
     And the OCI artifact should contain "results"
     And the OCI artifact should contain the value "{{value:job_id}}" at path "$.id"
     # Verify MLflow has the EvalCard
-    When I fetch the MLflow artifact "evaluation-card.json" for experiment "{{value:mlflow_experiment_id}}" and job "{{value:job_id}}"
+    When I wait for the MLflow artifact "evaluation-card.json" for experiment "{{value:mlflow_experiment_id}}" and job "{{value:job_id}}"
     Then the MLflow artifact should exist
     And the MLflow artifact should contain "card_version"
     And the MLflow artifact should contain "schema_version"
 
+  @connected
   Scenario: Verify Evaluation Jobs Can Use OOB Collections - open-telco-v1
     Given the service is running
     When I send a POST request to "/api/v1/evaluations/jobs" with body "file:/evaluation_job_oob_open_telco_v1.json"
@@ -2120,17 +2126,18 @@ Feature: Evaluation Jobs
     And the response should contain the value "teleqna" at path "$.results.benchmarks[*].id"
     And the response should contain the value "telelogs" at path "$.results.benchmarks[*].id"
     And the response should contain the value "3gpp-tsg" at path "$.results.benchmarks[*].id"
-    And the response should equal the value "5" at path "$.collection.benchmarks[0].parameters.num_examples"
-    And the response should equal the value "5" at path "$.collection.benchmarks[1].parameters.num_examples"
-    And the response should equal the value "5" at path "$.collection.benchmarks[2].parameters.num_examples"
-    And the response should equal the value "5" at path "$.collection.benchmarks[3].parameters.num_examples"
+    And the response should equal the value "1" at path "$.collection.benchmarks[0].parameters.num_examples"
+    And the response should equal the value "1" at path "$.collection.benchmarks[1].parameters.num_examples"
+    And the response should equal the value "1" at path "$.collection.benchmarks[2].parameters.num_examples"
+    And the response should equal the value "1" at path "$.collection.benchmarks[3].parameters.num_examples"
     And the response should contain "results"
-    And the response should contain the value "telemath_scorer/accuracy" at path "$.results.benchmarks[?(@.id=='telemath')].metrics[*].name"
-    And the response should contain the value "choice/accuracy" at path "$.results.benchmarks[?(@.id=='teleqna')].metrics[*].name"
-    And the response should contain the value "telelogs_scorer/accuracy" at path "$.results.benchmarks[?(@.id=='telelogs')].metrics[*].name"
-    And the response should contain the value "pattern/accuracy" at path "$.results.benchmarks[?(@.id=='3gpp-tsg')].metrics[*].name"
+    And the response should contain the value "telemath_scorer/accuracy" at path "$.results.benchmarks[?(@.id == &quot;telemath&quot;)].metrics_schema[*].name"
+    And the response should contain the value "choice/accuracy" at path "$.results.benchmarks[?(@.id == &quot;teleqna&quot;)].metrics_schema[*].name"
+    And the response should contain the value "telelogs_scorer/accuracy" at path "$.results.benchmarks[?(@.id == &quot;telelogs&quot;)].metrics_schema[*].name"
+    And the response should contain the value "pattern/accuracy" at path "$.results.benchmarks[?(@.id == &quot;3gpp-tsg&quot;)].metrics_schema[*].name"
     # TODO: Add metric value validations once a job completes successfully on a cluster with the telco inspect runner - https://redhat.atlassian.net/browse/RHOAIENG-87955
 
+  @connected
   @kueue
   Scenario: Create evaluation job with queue and collection - open-telco-v1
     Given the service is running
@@ -2159,6 +2166,7 @@ Feature: Evaluation Jobs
     And the response should contain the value "kueue" at path "$.collection.benchmarks[3].hardware_config.queue.kind"
     And the response should contain the value "{{env:QUEUE_NAME|user-queue}}" at path "$.collection.benchmarks[3].hardware_config.queue.name"
 
+  @connected
   @mlflow
   Scenario: Card generated for completed job with collection - open-telco-v1
     Given the service is running
@@ -2170,7 +2178,99 @@ Feature: Evaluation Jobs
     And I wait for the evaluation job status to be "completed"
     When I send a GET request to "/api/v1/evaluations/jobs/{id}"
     Then the response code should be 200
-    When I fetch the MLflow artifact "evaluation-card.json" for experiment "{{value:mlflow_experiment_id}}" and job "{{value:job_id}}"
+    When I wait for the MLflow artifact "evaluation-card.json" for experiment "{{value:mlflow_experiment_id}}" and job "{{value:job_id}}"
     Then the MLflow artifact should exist
     And the MLflow artifact should contain "context.collection_id"
     And the MLflow artifact should contain the value "open-telco-v1" at path "$.context.collection_id"
+
+  @connected
+  @hf
+  @ignore # https://gitlab.cee.redhat.com/atris/shepard/-/work_items/274 and requires Jenkins variables TEST_DATA_HF_GATED_REPO_ID, TEST_DATA_HF_REVISION, TEST_DATA_HF_SUB_PATH, and TEST_DATA_HF_SECRET_REF
+  Scenario:  Evaluation job is created successfully using huggingface credentials
+    Given the service is running
+    When I send a POST request to "/api/v1/evaluations/jobs" with body "file:/evaluation_job_hf_token.json"
+    Then the response code should be 202
+    And the response should contain the value "pending" at path "$.status.state"
+    And the response should contain the value "evaluation_job_created" at path "$.status.message.message_code"
+    And the response should contain the value "{{env:TEST_DATA_HF_SECRET_REF|hftoken}}" at path "$.benchmarks[0].test_data_ref.hf.secret_ref"
+    And I wait for the Kubernetes evaluation Job to be created
+    And the HF Secret "{{env:TEST_DATA_HF_SECRET_REF|hftoken}}" should be mounted only in the HF init container
+    And I wait for the evaluation job status to be "completed"
+    When I send a GET request to "/api/v1/evaluations/jobs/{id}"
+    Then the response code should be 200
+    And the response should contain the value "completed" at path "$.status.state"
+    And the response should contain the value "completed" at path "$.status.benchmarks[0].status"
+    And the response should contain "results"
+    And the response should contain the value "{{env:TEST_DATA_HF_GATED_REPO_ID|gated_repo}}" at path "$.benchmarks[0].test_data_ref.hf.repo_id"
+    And the response should contain the value "{{env:TEST_DATA_HF_REVISION|main}}" at path "$.benchmarks[0].test_data_ref.hf.revision"
+    And the response should contain the value "{{env:TEST_DATA_HF_SUB_PATH|data}}" at path "$.benchmarks[0].test_data_ref.hf.sub_path"
+    And the string at path "$.benchmarks[0].test_data_ref.resolved_sha" in the response should have length 40
+    And the response at path "$.benchmarks[0].test_data_ref.resolved_sha" should not be empty
+
+  @negative
+  @connected
+  @hf
+  @ignore # https://gitlab.cee.redhat.com/atris/shepard/-/work_items/274 and requires Jenkins variables TEST_DATA_HF_GATED_REPO_ID, TEST_DATA_HF_REVISION, and TEST_DATA_HF_SUB_PATH
+  Scenario:  Evaluation job fails for Gated repository without credentials
+    Given the service is running
+    When I send a POST request to "/api/v1/evaluations/jobs" with body "file:/evaluation_job_hf_no_cred.json"
+    Then the response code should be 202
+    And the response should contain the value "pending" at path "$.status.state"
+    And I wait for the evaluation job status to be "failed"
+    When I send a GET request to "/api/v1/evaluations/jobs/{id}"
+    Then the response code should be 200
+    And the response should contain the value "failed" at path "$.status.state"
+
+  @connected
+  @hf
+  Scenario:  Evaluation job is created successfully with HF revision omitted
+    Given the service is running
+    When I send a POST request to "/api/v1/evaluations/jobs" with body "file:/evaluation_job_hf_no_revision.json"
+    Then the response code should be 202
+    And the response should contain the value "pending" at path "$.status.state"
+    And the response should contain the value "evaluation_job_created" at path "$.status.message.message_code"
+    And I wait for the evaluation job status to be "completed"
+    When I send a GET request to "/api/v1/evaluations/jobs/{id}"
+    Then the response code should be 200
+    And the response should contain "results"
+    And the response should contain the value "arc_easy" at path "$.results.benchmarks[?(@.id == &quot;arc_easy&quot;)].id"
+    And the response should contain at least the value "0.2" at path "$.results.benchmarks[?(@.id == &quot;arc_easy&quot;)].metrics.acc"
+    And the response should contain at least the value "0.2" at path "$.results.benchmarks[?(@.id == &quot;arc_easy&quot;)].metrics.acc_norm"
+    And the response should contain the value "{{env:TEST_DATA_HF_REPO_ID|eval-hub-test/evalhub-offline-testdata}}" at path "$.benchmarks[0].test_data_ref.hf.repo_id"
+    And the response should match the value "[0-9a-fA-F]{40}" at path "$.benchmarks[0].test_data_ref.resolved_sha"
+    And the string at path "$.benchmarks[0].test_data_ref.resolved_sha" in the response should have length 40
+    And the response at path "$.benchmarks[0].test_data_ref.resolved_sha" should not be empty
+    And the response should contain the value "/test_data/tokenizer" at path "$.benchmarks[0].parameters.tokenizer"
+
+  @connected
+  @hf
+  @ignore  #https://redhat.atlassian.net/browse/RHOAIENG-96323
+  @negative
+  # https://gitlab.cee.redhat.com/atris/shepard/-/work_items/274 and requires Jenkins variables TEST_DATA_HF_GATED_REPO_ID, TEST_DATA_HF_REVISION, and TEST_DATA_HF_SUB_PATH
+  Scenario: Evaluation job fails when the Hugging Face secret reference points to a missing Secret
+    Given the service is running
+    When I send a POST request to "/api/v1/evaluations/jobs" with body "file:/evaluation_job_invalid_hf_token.json"
+    Then the response code should be 202
+    And the response should contain the value "pending" at path "$.status.state"
+    And I wait for the evaluation job status to be "failed"
+    When I send a GET request to "/api/v1/evaluations/jobs/{id}"
+    Then the response code should be 200
+    And the response should contain the value "failed" at path "$.status.state"
+
+  @connected
+  @hf
+  Scenario: Hugging Face pinned revision is preserved and resolved
+    Given the service is running
+    When I send a POST request to "/api/v1/evaluations/jobs" with body "file:/evaluation_job_hf_pinned_revision.json"
+    Then the response code should be 202
+    And the response should contain the value "pending" at path "$.status.state"
+    And the response should contain the value "evaluation_job_created" at path "$.status.message.message_code"
+    And the response should contain the value "{{env:TEST_DATA_HF_PINNED_SHA|96edc9dc18c4421a32976c06ffc78955fb4507bd}}" at path "$.benchmarks[0].test_data_ref.hf.revision"
+    And the response should not contain the value "resolved_sha" at path "$.benchmarks[0].test_data_ref"
+    And I wait for the evaluation job status to be "completed"
+    When I send a GET request to "/api/v1/evaluations/jobs/{id}"
+    Then the response code should be 200
+    And the response should contain the value "completed" at path "$.status.state"
+    And the response should contain the value "completed" at path "$.status.benchmarks[0].status"
+    And the response should contain the value "{{env:TEST_DATA_HF_PINNED_SHA|96edc9dc18c4421a32976c06ffc78955fb4507bd}}" at path "$.benchmarks[0].test_data_ref.hf.revision"
+    And the response should contain the value "{{env:TEST_DATA_HF_PINNED_SHA|96edc9dc18c4421a32976c06ffc78955fb4507bd}}" at path "$.benchmarks[0].test_data_ref.resolved_sha"
