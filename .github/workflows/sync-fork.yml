@@ -1,0 +1,20 @@
+name: Sync from upstream
+
+on:
+  schedule:
+    # Daily at 02:30 UTC: 18:30 PST / 19:30 PDT (previous day), 08:00 IST.
+    - cron: '30 2 * * *'
+  workflow_dispatch: {}
+
+permissions:
+  contents: write
+
+jobs:
+  sync:
+    if: github.repository == 'opendatahub-io/eval-hub'
+    uses: eval-hub/eval-hub-workflows/.github/workflows/sync-fork.yml@f3399f561ab299549f7996f4a562b1b460b3a02a
+    with:
+      target-repository: opendatahub-io/eval-hub
+      target-branch: main
+    secrets:
+      sync-token: ${{ secrets.GITHUB_TOKEN }}
