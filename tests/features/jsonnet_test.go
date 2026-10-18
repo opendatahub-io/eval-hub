@@ -726,8 +726,8 @@ func TestEvaluateEvaluationJobHFJsonnet(t *testing.T) {
 	if b0.ID != "arc_easy" {
 		t.Errorf("benchmark[0] id = %q, want arc_easy", b0.ID)
 	}
-	if b0.Parameters["tokenizer"] != "/test_data/tokenizer" {
-		t.Errorf("tokenizer = %v, want /test_data/tokenizer", b0.Parameters["tokenizer"])
+	if b0.Parameters["tokenizer"] != "google/flan-t5-small" {
+		t.Errorf("tokenizer = %v, want google/flan-t5-small", b0.Parameters["tokenizer"])
 	}
 	if b0.TestDataRef.HF.RepoID != "eval-hub-test/evalhub-offline-testdata" {
 		t.Errorf("hf.repo_id = %q, want eval-hub-test/evalhub-offline-testdata", b0.TestDataRef.HF.RepoID)

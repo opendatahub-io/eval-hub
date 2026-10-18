@@ -140,13 +140,15 @@ local harness = std.parseJson(std.extVar('harness'));
       } + overrides,
     },
 
-  // Benchmark that always downloads offline data from Hugging Face Hub (tokenizer under /test_data).
+  // Benchmark that downloads offline data from Hugging Face Hub.
+  // Uses defaultTokenizer() so connected clusters resolve the tokenizer from HF Hub
+  // (repo_id format) instead of a local path that may not exist in the pod.
   hfBenchmark(id, providerId, parameters, hfOverrides={})::
     {
       id: id,
       provider_id: providerId,
       parameters: {
-        tokenizer: '/test_data/tokenizer',
+        tokenizer: $.defaultTokenizer(),
       } + parameters,
       test_data_ref: $.hfTestDataRef(hfOverrides),
     } + $.hardwareConfigQueue(),
