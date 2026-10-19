@@ -15,6 +15,9 @@ jobs:
     permissions:
       contents: write
       pull-requests: write
+      # Required when the sync carries .github/workflows changes (GitHub App
+      # tokens cannot create or update workflow files without this grant).
+      workflows: write
     concurrency:
       group: sync-upstream-main-into-main
       cancel-in-progress: false
