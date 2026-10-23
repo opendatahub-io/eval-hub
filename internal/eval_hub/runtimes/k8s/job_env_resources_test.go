@@ -352,6 +352,73 @@ func TestBuildEnvVarsMLFlowCertPathMatchesSidecarResolution(t *testing.T) {
 	})
 }
 
+func TestBuildEnvVarsHFOfflineWithTestData(t *testing.T) {
+	base := &jobConfig{
+		jobID:          "job-offline",
+		resourceGUID:   "guid-offline",
+		benchmarkIndex: 0,
+		namespace:      "default",
+		providerID:     "provider-1",
+		benchmarkID:    "bench-1",
+		adapterImage:   "adapter:latest",
+		defaultEnv:     []api.EnvVar{},
+		sidecarBaseURL: config.DefaultSidecarBaseURL,
+	}
+
+	t.Run("no test data omits HF offline vars", func(t *testing.T) {
+		cfg := *base
+		env := buildEnvVars(&cfg, nil)
+		for _, name := range []string{"HF_HUB_OFFLINE", "HF_DATASETS_OFFLINE", "TRANSFORMERS_OFFLINE"} {
+			if v := envValue(env, name); v != "" {
+				t.Errorf("expected no %s without test data, got %q", name, v)
+			}
+		}
+	})
+
+	t.Run("S3 test data sets HF offline vars", func(t *testing.T) {
+		cfg := *base
+		cfg.testDataS3 = s3TestDataConfig{bucket: "mlpipeline", key: "offline", secretRef: "minio-test"}
+		env := buildEnvVars(&cfg, nil)
+		for _, name := range []string{"HF_HUB_OFFLINE", "HF_DATASETS_OFFLINE", "TRANSFORMERS_OFFLINE"} {
+			if v := envValue(env, name); v != "1" {
+				t.Errorf("%s = %q, want %q", name, v, "1")
+			}
+		}
+	})
+
+	t.Run("PVC test data sets HF offline vars", func(t *testing.T) {
+		cfg := *base
+		cfg.testDataPVC = pvcTestDataConfig{claimName: "test-data-pvc"}
+		env := buildEnvVars(&cfg, nil)
+		for _, name := range []string{"HF_HUB_OFFLINE", "HF_DATASETS_OFFLINE", "TRANSFORMERS_OFFLINE"} {
+			if v := envValue(env, name); v != "1" {
+				t.Errorf("%s = %q, want %q", name, v, "1")
+			}
+		}
+	})
+
+	t.Run("Git test data sets HF offline vars", func(t *testing.T) {
+		cfg := *base
+		cfg.testDataGit = gitTestDataConfig{url: "https://git.example/data.git", ref: "main"}
+		env := buildEnvVars(&cfg, nil)
+		for _, name := range []string{"HF_HUB_OFFLINE", "HF_DATASETS_OFFLINE", "TRANSFORMERS_OFFLINE"} {
+			if v := envValue(env, name); v != "1" {
+				t.Errorf("%s = %q, want %q", name, v, "1")
+			}
+		}
+	})
+
+	t.Run("provider env does not override HF offline vars", func(t *testing.T) {
+		cfg := *base
+		cfg.testDataS3 = s3TestDataConfig{bucket: "mlpipeline", key: "offline", secretRef: "minio-test"}
+		cfg.defaultEnv = []api.EnvVar{{Name: "HF_HUB_OFFLINE", Value: "0"}}
+		env := buildEnvVars(&cfg, nil)
+		if v := envValue(env, "HF_HUB_OFFLINE"); v != "1" {
+			t.Errorf("HF_HUB_OFFLINE = %q, want %q (test data should take precedence)", v, "1")
+		}
+	})
+}
+
 func envValue(env []corev1.EnvVar, name string) string {
 	for _, e := range env {
 		if e.Name == name {
