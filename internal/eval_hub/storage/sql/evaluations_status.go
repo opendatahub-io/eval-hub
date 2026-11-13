@@ -61,12 +61,17 @@ func (s *sqlStorage) UpdateEvaluationJobStatus(id string, state api.OverallState
 				return nil
 			}
 			benchmarks := evaluationJob.Status.Benchmarks
+			phase := evaluationJob.Status.EvaluationPhase
+			if phase == "" {
+				phase = api.EvaluationPhaseFromOverallState(evaluationJob.Status.State)
+			}
 			entity := EvaluationJobEntity{
 				Config: &evaluationJob.EvaluationJobConfig,
 				Status: &api.EvaluationJobStatus{
 					EvaluationJobState: api.EvaluationJobState{
-						State:   evaluationJob.Status.State,
-						Message: message,
+						State:           evaluationJob.Status.State,
+						EvaluationPhase: phase,
+						Message:         message,
 					},
 					Benchmarks: benchmarks,
 				},
@@ -91,8 +96,9 @@ func (s *sqlStorage) UpdateEvaluationJobStatus(id string, state api.OverallState
 			Config: &evaluationJob.EvaluationJobConfig,
 			Status: &api.EvaluationJobStatus{
 				EvaluationJobState: api.EvaluationJobState{
-					State:   state,
-					Message: message,
+					State:           state,
+					EvaluationPhase: api.EvaluationPhaseFromOverallState(state),
+					Message:         message,
 				},
 				Benchmarks: benchmarks,
 			},
@@ -321,6 +327,14 @@ func (s *sqlStorage) UpdateEvaluationJob(id string, runStatus *api.StatusEvent) 
 		if overallState == api.OverallStateCompleted {
 			s.computeJobTestResult(job, collection)
 		}
+
+		// Derive the evaluation phase from the overall state, then check for
+		// threshold violations: a completed job whose test failed is ThresholdViolated.
+		phase := api.EvaluationPhaseFromOverallState(overallState)
+		if overallState == api.OverallStateCompleted && job.Results != nil && job.Results.Test != nil && !job.Results.Test.Pass {
+			phase = api.EvaluationPhaseThresholdViolated
+		}
+		job.Status.EvaluationPhase = phase
 
 		entity := EvaluationJobEntity{
 			Config:  &job.EvaluationJobConfig,
