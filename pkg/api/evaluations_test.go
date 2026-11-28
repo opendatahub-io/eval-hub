@@ -8,6 +8,30 @@ import (
 	"testing"
 )
 
+func TestEvaluationPhaseFromOverallState(t *testing.T) {
+	tests := []struct {
+		state OverallState
+		phase EvaluationPhase
+	}{
+		{OverallStatePending, EvaluationPhasePending},
+		{OverallStateRunning, EvaluationPhaseRunning},
+		{OverallStateCompleted, EvaluationPhaseCompleted},
+		{OverallStateFailed, EvaluationPhaseFailed},
+		{OverallStateCancelled, EvaluationPhaseFailed},
+		{OverallStatePartiallyFailed, EvaluationPhaseFailed},
+		{OverallState("unknown"), EvaluationPhasePending},
+	}
+
+	for _, tt := range tests {
+		t.Run(string(tt.state), func(t *testing.T) {
+			got := EvaluationPhaseFromOverallState(tt.state)
+			if got != tt.phase {
+				t.Errorf("EvaluationPhaseFromOverallState(%q) = %q, want %q", tt.state, got, tt.phase)
+			}
+		})
+	}
+}
+
 func TestIsBenchmarkTerminalState(t *testing.T) {
 	tests := []struct {
 		state    State
